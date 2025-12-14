@@ -1,0 +1,53 @@
+# Codepal Configuration Example
+# Copy this file to ~/.config/codepal/config.toml
+
+[general]
+# Default model to use
+model = "claude-sonnet-4-20250514"
+
+# Working directory (default: current directory)
+# working_dir = "/path/to/project"
+
+# Maximum tokens for responses
+max_tokens = 8192
+
+[auth]
+# Authentication method: "oauth" or "api_key"
+method = "oauth"
+
+# API key (only if method = "api_key")
+# api_key = "sk-ant-..."
+#
+# Or set the ANTHROPIC_API_KEY environment variable
+
+[ui]
+# Syntax highlighting theme
+# Available: base16-ocean.dark, base16-ocean.light, InspiredGitHub, Solarized (dark), Solarized (light)
+theme = "base16-ocean.dark"
+
+# Enable auto-scroll when new content arrives
+auto_scroll = true
+
+# Show token usage in status bar
+show_tokens = true
+
+[tools]
+# Tools to enable (leave empty for all)
+enabled = ["read_file", "write_file", "edit_file", "shell", "fetch_url"]
+
+# Default permission settings per tool
+# Options: "ask" = always ask, "allow" = auto-allow, "deny" = auto-deny
+[tools.permissions]
+read_file = "ask"
+write_file = "ask"
+edit_file = "ask"
+shell = "ask"
+fetch_url = "ask"
+
+[tools.shell]
+# Allowed shell command patterns (regex)
+# Leave empty to allow all (with permission prompt)
+allowed_patterns = []
+
+# Blocked commands (always denied regardless of permissions)
+blocked_patterns = ["rm -rf /", "sudo rm", ":(){ :|:& };:"]
