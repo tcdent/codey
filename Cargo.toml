@@ -1,0 +1,67 @@
+[package]
+name = "codepal"
+version = "0.1.0"
+edition = "2021"
+authors = ["Codepal Contributors"]
+description = "A terminal-based AI coding assistant"
+license = "MIT"
+repository = "https://github.com/codepal/codepal"
+
+[dependencies]
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+
+# HTTP client & streaming
+reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
+reqwest-eventsource = "0.6"
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Syntax highlighting
+syntect = "5"
+
+# Config
+toml = "0.8"
+dirs = "5"
+
+# CLI arguments
+clap = { version = "4", features = ["derive", "env"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+open = "5"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async utilities
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+pretty_assertions = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
