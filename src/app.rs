@@ -21,9 +21,40 @@ use std::time::{Duration, Instant};
 
 const APP_NAME: &str = "Codey";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-const TRANSCRIPT_DIR: &str = ".codey";
-const TRANSCRIPT_FILE: &str = "transcript.json";
+const CODEY_DIR: &str = ".codey";
+const TRANSCRIPTS_DIR: &str = "transcripts";
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
+
+/// Get the transcripts directory path, creating it if necessary
+fn get_transcripts_dir() -> Result<PathBuf> {
+    let dir = PathBuf::from(CODEY_DIR).join(TRANSCRIPTS_DIR);
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).context("Failed to create transcripts directory")?;
+    }
+    Ok(dir)
+}
+
+/// Find the latest transcript number by scanning the transcripts directory
+fn find_latest_transcript_number(dir: &PathBuf) -> Option<u32> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if name.ends_with(".json") {
+                name.trim_end_matches(".json").parse::<u32>().ok()
+            } else {
+                None
+            }
+        })
+        .max()
+}
+
+/// Get the path for a transcript with a given number
+fn transcript_path(dir: &PathBuf, number: u32) -> PathBuf {
+    dir.join(format!("{:06}.json", number))
+}
 
 /// Tracks the currently active block during streaming
 enum ActiveBlock {
@@ -209,13 +240,26 @@ impl App {
         let terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
         // Set up transcript path in current working directory
-        let transcript_path = PathBuf::from(TRANSCRIPT_DIR).join(TRANSCRIPT_FILE);
-
-        // Load existing transcript if continuing
-        let transcript = if continue_session {
-            Transcript::load(&transcript_path).unwrap_or_default()
+        let transcripts_dir = get_transcripts_dir()?;
+        let latest_number = find_latest_transcript_number(&transcripts_dir);
+        
+        let (transcript_path, transcript) = if continue_session {
+            // Continue from latest transcript if it exists
+            match latest_number {
+                Some(n) => {
+                    let path = transcript_path(&transcripts_dir, n);
+                    let transcript = Transcript::load(&path).unwrap_or_default();
+                    (path, transcript)
+                }
+                None => {
+                    // No existing transcripts, start fresh at 000000
+                    (transcript_path(&transcripts_dir, 0), Transcript::new())
+                }
+            }
         } else {
-            Transcript::new()
+            // Start new session with next number
+            let next_number = latest_number.map(|n| n + 1).unwrap_or(0);
+            (transcript_path(&transcripts_dir, next_number), Transcript::new())
         };
 
         Ok(Self {
