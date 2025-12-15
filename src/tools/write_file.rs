@@ -1,7 +1,7 @@
 //! Write file tool
 
 use super::{Tool, ToolResult};
-use crate::message::{render_approval_prompt, render_result, ContentBlock, ToolBlock, Status};
+use crate::transcript::{render_approval_prompt, render_result, Block, ToolBlock, Status};
 use anyhow::Result;
 use async_trait::async_trait;
 use ratatui::{
@@ -41,7 +41,7 @@ impl WriteFileBlock {
     }
 }
 
-impl ContentBlock for WriteFileBlock {
+impl Block for WriteFileBlock {
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
@@ -81,33 +81,20 @@ impl ContentBlock for WriteFileBlock {
         lines
     }
 
-    fn status(&self) -> Option<Status> {
-        Some(self.status)
+    fn status(&self) -> Status {
+        self.status
     }
 
-    fn tool_name(&self) -> Option<&str> {
-        Some("write_file")
+    fn set_status(&mut self, status: Status) {
+        self.status = status;
+    }
+
+    fn set_result(&mut self, result: String) {
+        self.result = Some(result);
     }
 
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
-    }
-
-    fn approve(&mut self) {
-        self.status = Status::Running;
-    }
-
-    fn deny(&mut self) {
-        self.status = Status::Denied;
-    }
-
-    fn complete(&mut self, result: String, is_error: bool) {
-        self.status = if is_error {
-            Status::Error
-        } else {
-            Status::Success
-        };
-        self.result = Some(result);
     }
 }
 
@@ -148,7 +135,7 @@ impl Tool for WriteFileTool {
         })
     }
 
-    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn ContentBlock> {
+    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
         if let Some(block) = WriteFileBlock::from_params(call_id, &params) {
             Box::new(block)
         } else {

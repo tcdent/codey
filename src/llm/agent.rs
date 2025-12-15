@@ -1,6 +1,6 @@
 //! Agent loop for handling conversations with tool execution
 
-use crate::message::ContentBlock;
+use crate::transcript::Block;
 use crate::tools::ToolRegistry;
 use anyhow::Result;
 use futures::StreamExt;
@@ -33,7 +33,7 @@ pub enum AgentStep {
     /// Agent wants to execute a tool, needs approval
     ToolRequest {
         call_id: String,
-        block: Box<dyn ContentBlock>,
+        block: Box<dyn Block>,
     },
     /// Tool finished executing
     ToolResult {

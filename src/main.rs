@@ -3,9 +3,9 @@
 mod app;
 mod config;
 mod llm;
-mod message;
 mod permission;
 mod tools;
+mod transcript;
 mod ui;
 
 use anyhow::Result;

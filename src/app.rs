@@ -2,7 +2,7 @@
 
 use crate::config::Config;
 use crate::llm::{Agent, AgentStep, ToolDecision, Usage};
-use crate::message::{MessageId, Role, Status, TextBlock, Transcript};
+use crate::transcript::{Role, Status, TextBlock, Transcript, TurnId};
 use crate::tools::ToolRegistry;
 use crate::ui::{ChatView, ConnectionStatus, InputBox, StatusBar};
 
@@ -69,7 +69,7 @@ pub struct App {
     usage: Usage,
     should_quit: bool,
     /// Queue of messages waiting to be sent (content, message_id)
-    message_queue: Vec<(String, MessageId)>,
+    message_queue: Vec<(String, TurnId)>,
 }
 
 impl App {
@@ -286,30 +286,31 @@ impl App {
     fn queue_message(&mut self, content: String) {
         // Add to transcript and mark as pending
         let id = self.transcript.add(Role::User, TextBlock::new(&content));
-        if let Some(msg) = self.transcript.get_mut(id) {
-            msg.status = Status::Pending;
+        if let Some(turn) = self.transcript.get_mut(id) {
+            turn.status = Status::Pending;
         }
-        // Add to queue with message ID
+        // Add to queue with turn ID
         self.message_queue.push((content, id));
     }
 
     /// Send a message to the agent
-    async fn send_message(&mut self, agent: &mut Agent, content: String, user_msg_id: MessageId) -> Result<()> {
-        // Mark user message as running
-        if let Some(msg) = self.transcript.get_mut(user_msg_id) {
-            msg.status = Status::Running;
+    async fn send_message(&mut self, agent: &mut Agent, content: String, user_turn_id: TurnId) -> Result<()> {
+        // Mark user turn as running
+        if let Some(turn) = self.transcript.get_mut(user_turn_id) {
+            turn.status = Status::Running;
         }
         self.draw()?;
 
-        // Track the current assistant message being built
-        let mut current_msg_id: Option<MessageId> = None;
+        // Track the current assistant turn being built
+        let mut current_turn_id: Option<TurnId> = None;
+        let mut streaming_block_idx: Option<usize> = None;
 
         // Create the stream - agent is borrowed mutably for its lifetime
         let mut stream = agent.process_message(&content);
 
-        // Mark user message as sent
-        if let Some(msg) = self.transcript.get_mut(user_msg_id) {
-            msg.status = Status::Success;
+        // Mark user turn as sent
+        if let Some(turn) = self.transcript.get_mut(user_turn_id) {
+            turn.status = Status::Success;
         }
         self.draw()?;
 
@@ -321,21 +322,28 @@ impl App {
 
             match step {
                 AgentStep::TextDelta(text) => {
-                    // Create message on first chunk, append on subsequent
-                    if current_msg_id.is_none() {
-                        current_msg_id =
-                            Some(self.transcript.add(Role::Assistant, TextBlock::new(&text)));
-                    } else if let Some(msg) = self.transcript.get_mut(current_msg_id.unwrap()) {
-                        msg.append_text(&text);
+                    // Create turn on first chunk, append on subsequent
+                    if current_turn_id.is_none() {
+                        current_turn_id = Some(self.transcript.add_empty(Role::Assistant));
+                    }
+                    if let Some(turn) = self.transcript.get_mut(current_turn_id.unwrap()) {
+                        if streaming_block_idx.is_none() {
+                            streaming_block_idx = Some(turn.add_text_block(&text));
+                        } else {
+                            turn.append_to_block(streaming_block_idx.unwrap(), &text);
+                        }
                     }
                     self.draw()?;
                 }
                 AgentStep::ToolRequest { call_id, block, .. } => {
-                    // Add tool block to message
-                    if current_msg_id.is_none() {
-                        current_msg_id = Some(self.transcript.add_boxed(Role::Assistant, block));
-                    } else if let Some(msg) = self.transcript.get_mut(current_msg_id.unwrap()) {
-                        msg.content.push(block);
+                    // Reset streaming block - next text will be a new block
+                    streaming_block_idx = None;
+                    
+                    // Add tool block to turn
+                    if current_turn_id.is_none() {
+                        current_turn_id = Some(self.transcript.add_boxed(Role::Assistant, block));
+                    } else if let Some(turn) = self.transcript.get_mut(current_turn_id.unwrap()) {
+                        turn.add_block(block);
                     }
 
                     self.draw()?;
@@ -344,11 +352,11 @@ impl App {
                     let decision = self.wait_for_tool_approval().await?;
 
                     // Update tool status based on decision
-                    if let Some(msg) = current_msg_id.and_then(|id| self.transcript.get_mut(id)) {
-                        if let Some(tool) = msg.get_tool_mut(&call_id) {
+                    if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id)) {
+                        if let Some(tool) = turn.get_block_mut(&call_id) {
                             match decision {
-                                ToolDecision::Approve => tool.approve(),
-                                ToolDecision::Deny => tool.deny(),
+                                ToolDecision::Approve => tool.set_status(Status::Running),
+                                ToolDecision::Deny => tool.set_status(Status::Denied),
                             }
                         }
                     }
@@ -362,10 +370,11 @@ impl App {
                         ..
                     }) = stream.decide_tool(decision).await
                     {
-                        if let Some(msg) = current_msg_id.and_then(|id| self.transcript.get_mut(id))
+                        if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id))
                         {
-                            if let Some(tool) = msg.get_tool_mut(&call_id) {
-                                tool.complete(result, is_error);
+                            if let Some(tool) = turn.get_block_mut(&call_id) {
+                                tool.set_status(if is_error { Status::Error } else { Status::Success });
+                                tool.set_result(result);
                             }
                         }
                         self.draw()?;

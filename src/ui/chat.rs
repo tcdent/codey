@@ -1,6 +1,6 @@
 //! Chat view component
 
-use crate::message::{Message, Role, Status, Transcript};
+use crate::transcript::{Role, Status, Transcript, Turn};
 use ratatui::{
     buffer::Buffer,
     layout::{Rect, Size},
@@ -74,11 +74,11 @@ pub struct ChatViewWidget<'a> {
 }
 
 impl ChatViewWidget<'_> {
-    fn render_message(msg: &Message, width: u16) -> Vec<Line<'_>> {
+    fn render_turn(turn: &Turn, width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
         // Role header
-        let (role_text, role_style) = match msg.role {
+        let (role_text, role_style) = match turn.role {
             Role::User => (
                 "You",
                 Style::default()
@@ -99,8 +99,8 @@ impl ChatViewWidget<'_> {
             ),
         };
 
-        // Status indicator for non-complete messages
-        let status_span = match msg.status {
+        // Status indicator for non-complete turns
+        let status_span = match turn.status {
             Status::Pending => Some(Span::styled(" (queued)", Style::default().fg(Color::Yellow))),
             Status::Running => {
                 Some(Span::styled(" (sending...)", Style::default().fg(Color::Blue)))
@@ -112,7 +112,7 @@ impl ChatViewWidget<'_> {
         let mut header = vec![
             Span::styled(role_text, role_style),
             Span::styled(
-                format!(" ({})", msg.timestamp.format("%H:%M:%S")),
+                format!(" ({})", turn.timestamp.format("%H:%M:%S")),
                 Style::default().fg(Color::DarkGray),
             ),
         ];
@@ -122,7 +122,7 @@ impl ChatViewWidget<'_> {
         lines.push(Line::from(header));
 
         // Render all content blocks via trait
-        lines.extend(msg.render(width));
+        lines.extend(turn.render(width));
 
         // Separator
         lines.push(Line::from(""));
@@ -150,8 +150,8 @@ impl Widget for ChatViewWidget<'_> {
         // inner accounts for the border, subtract scrollbar (1) + small margin (1)
         let content_width = inner.width.saturating_sub(2);
 
-        for msg in self.transcript.messages() {
-            all_lines.extend(Self::render_message(msg, content_width));
+        for turn in self.transcript.turns() {
+            all_lines.extend(Self::render_turn(turn, content_width));
         }
 
         // TODO: This scroll/height calculation is brittle. We manually track line counts

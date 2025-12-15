@@ -1,7 +1,7 @@
-//! Core message types for chat history
+//! Core types for chat transcript
 //!
-//! This module contains the serializable message types that represent
-//! the chat history. All content blocks implement the ContentBlock trait.
+//! This module contains the types that represent the conversation transcript.
+//! A Transcript contains Turns, and each Turn contains Blocks.
 
 use chrono::{DateTime, Utc};
 use ratatui::{
@@ -10,9 +10,9 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Unique identifier for a message
+/// Unique identifier for a turn
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MessageId(pub usize);
+pub struct TurnId(pub usize);
 
 /// Role of the message sender
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,41 +34,29 @@ pub enum Status {
     Denied,
 }
 
-/// Trait for all content blocks in a message
-pub trait ContentBlock: Send + Sync {
+/// Trait for all blocks in a turn
+pub trait Block: Send + Sync {
     /// Render this block to terminal lines with given width for wrapping
     fn render(&self, width: u16) -> Vec<Line<'_>>;
 
-    /// Get tool status if this block requires approval
-    fn status(&self) -> Option<Status> {
-        None
-    }
+    /// Get the status of this block
+    fn status(&self) -> Status;
 
-    /// Get tool name if this is a tool block
-    fn tool_name(&self) -> Option<&str> {
-        None
-    }
+    /// Set the status of this block
+    fn set_status(&mut self, status: Status);
 
-    /// Get tool call ID if this is a tool block
-    fn call_id(&self) -> Option<&str> {
-        None
-    }
-
-    /// Approve execution (for tools)
-    fn approve(&mut self) {}
-
-    /// Deny execution (for tools)
-    fn deny(&mut self) {}
-
-    /// Mark as complete with result (for tools)
-    fn complete(&mut self, _result: String, _is_error: bool) {}
-
-    /// Append text to this block (for streaming text blocks)
+    /// Append text content to this block (for streaming)
     fn append_text(&mut self, _text: &str) {}
 
-    /// Check if this is a text block
-    fn is_text_block(&self) -> bool {
-        false
+    /// Set the result/output of this block
+    fn set_result(&mut self, _result: String) {}
+
+    /// TODO: Revisit whether call_id belongs on the trait or should use
+    /// a separate lookup mechanism (e.g., HashMap on Turn).
+    /// Currently here because tool blocks need to be found by call_id
+    /// within a turn, but TextBlock doesn't need it.
+    fn call_id(&self) -> Option<&str> {
+        None
     }
 }
 
@@ -76,15 +64,19 @@ pub trait ContentBlock: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextBlock {
     pub text: String,
+    pub status: Status,
 }
 
 impl TextBlock {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+        Self { 
+            text: text.into(),
+            status: Status::Success,
+        }
     }
 }
 
-impl ContentBlock for TextBlock {
+impl Block for TextBlock {
     fn render(&self, width: u16) -> Vec<Line<'_>> {
         // Use ratskin for markdown rendering
         let skin = ratskin::RatSkin::default();
@@ -92,12 +84,16 @@ impl ContentBlock for TextBlock {
         skin.parse(text, width)
     }
 
-    fn append_text(&mut self, text: &str) {
-        self.text.push_str(text);
+    fn status(&self) -> Status {
+        self.status
     }
 
-    fn is_text_block(&self) -> bool {
-        true
+    fn set_status(&mut self, status: Status) {
+        self.status = status;
+    }
+
+    fn append_text(&mut self, text: &str) {
+        self.text.push_str(text);
     }
 }
 
@@ -123,7 +119,7 @@ impl ToolBlock {
     }
 }
 
-impl ContentBlock for ToolBlock {
+impl Block for ToolBlock {
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
@@ -182,33 +178,20 @@ impl ContentBlock for ToolBlock {
         lines
     }
 
-    fn status(&self) -> Option<Status> {
-        Some(self.status)
+    fn status(&self) -> Status {
+        self.status
     }
 
-    fn tool_name(&self) -> Option<&str> {
-        Some(&self.name)
+    fn set_status(&mut self, status: Status) {
+        self.status = status;
+    }
+
+    fn set_result(&mut self, result: String) {
+        self.result = Some(result);
     }
 
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
-    }
-
-    fn approve(&mut self) {
-        self.status = Status::Running;
-    }
-
-    fn deny(&mut self) {
-        self.status = Status::Denied;
-    }
-
-    fn complete(&mut self, result: String, is_error: bool) {
-        self.status = if is_error {
-            Status::Error
-        } else {
-            Status::Success
-        };
-        self.result = Some(result);
     }
 }
 
@@ -259,41 +242,47 @@ pub fn render_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
     lines
 }
 
-/// A message in the chat history
-pub struct Message {
-    pub id: MessageId,
+/// A turn in the conversation - one user or assistant response
+pub struct Turn {
+    pub id: TurnId,
     pub role: Role,
     pub status: Status,
-    pub content: Vec<Box<dyn ContentBlock>>,
+    pub content: Vec<Box<dyn Block>>,
     pub timestamp: DateTime<Utc>,
 }
 
-impl Message {
-    pub fn new(id: MessageId, role: Role, content: Vec<Box<dyn ContentBlock>>) -> Self {
+impl Turn {
+    pub fn new(id: TurnId, role: Role, content: Vec<Box<dyn Block>>) -> Self {
         Self {
             id,
             role,
-            status: Status::Success, // Default to complete for most messages
+            status: Status::Success,
             content,
             timestamp: Utc::now(),
         }
     }
 
-    /// Append text to the last text block, or create a new one
-    pub fn append_text(&mut self, text: &str) {
-        // Try to append to the last block if it's a text block
-        if let Some(block) = self.content.last_mut() {
-            if block.is_text_block() {
-                block.append_text(text);
-                return;
-            }
-        }
-        // No text block found, create one
+    /// Add a new text block and return its index for streaming
+    pub fn add_text_block(&mut self, text: &str) -> usize {
+        let idx = self.content.len();
         self.content.push(Box::new(TextBlock::new(text)));
+        idx
     }
 
-    /// Get a mutable tool block by call_id
-    pub fn get_tool_mut(&mut self, call_id: &str) -> Option<&mut (dyn ContentBlock + 'static)> {
+    /// Append text to a specific block by index
+    pub fn append_to_block(&mut self, idx: usize, text: &str) {
+        if let Some(block) = self.content.get_mut(idx) {
+            block.append_text(text);
+        }
+    }
+
+    /// Add a block
+    pub fn add_block(&mut self, block: Box<dyn Block>) {
+        self.content.push(block);
+    }
+
+    /// Get a mutable block by call_id
+    pub fn get_block_mut(&mut self, call_id: &str) -> Option<&mut (dyn Block + 'static)> {
         for block in &mut self.content {
             if block.call_id() == Some(call_id) {
                 return Some(block.as_mut());
@@ -302,7 +291,7 @@ impl Message {
         None
     }
 
-    /// Render all content blocks with given width
+    /// Render all blocks with given width
     pub fn render(&self, width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
         for block in &self.content {
@@ -312,49 +301,58 @@ impl Message {
     }
 }
 
-/// The chat transcript - display log of all messages for UI rendering
+/// The chat transcript - display log of all turns for UI rendering
 #[derive(Default)]
 pub struct Transcript {
-    messages: Vec<Message>,
+    turns: Vec<Turn>,
     next_id: usize,
 }
 
 impl Transcript {
     pub fn new() -> Self {
         Self {
-            messages: Vec::new(),
+            turns: Vec::new(),
             next_id: 0,
         }
     }
 
-    fn next_id(&mut self) -> MessageId {
-        let id = MessageId(self.next_id);
+    fn next_id(&mut self) -> TurnId {
+        let id = TurnId(self.next_id);
         self.next_id += 1;
         id
     }
 
-    pub fn add(&mut self, role: Role, block: impl ContentBlock + 'static) -> MessageId {
+    /// Add a new turn with a single block
+    pub fn add(&mut self, role: Role, block: impl Block + 'static) -> TurnId {
         let id = self.next_id();
-        self.messages.push(Message::new(id, role, vec![Box::new(block)]));
+        self.turns.push(Turn::new(id, role, vec![Box::new(block)]));
         id
     }
 
-    pub fn add_boxed(&mut self, role: Role, block: Box<dyn ContentBlock>) -> MessageId {
+    /// Add a new turn with a boxed block
+    pub fn add_boxed(&mut self, role: Role, block: Box<dyn Block>) -> TurnId {
         let id = self.next_id();
-        self.messages.push(Message::new(id, role, vec![block]));
+        self.turns.push(Turn::new(id, role, vec![block]));
         id
     }
 
-    pub fn get_mut(&mut self, id: MessageId) -> Option<&mut Message> {
-        self.messages.iter_mut().find(|m| m.id == id)
+    /// Add an empty turn (for streaming)
+    pub fn add_empty(&mut self, role: Role) -> TurnId {
+        let id = self.next_id();
+        self.turns.push(Turn::new(id, role, vec![]));
+        id
     }
 
-    pub fn messages(&self) -> &[Message] {
-        &self.messages
+    pub fn get_mut(&mut self, id: TurnId) -> Option<&mut Turn> {
+        self.turns.iter_mut().find(|t| t.id == id)
+    }
+
+    pub fn turns(&self) -> &[Turn] {
+        &self.turns
     }
 
     pub fn clear(&mut self) {
-        self.messages.clear();
+        self.turns.clear();
         self.next_id = 0;
     }
 }
@@ -373,13 +371,14 @@ mod tests {
     #[test]
     fn test_tool_block_status() {
         let mut block = ToolBlock::new("call_1", "test", serde_json::json!({}));
-        assert_eq!(block.status(), Some(Status::Pending));
+        assert_eq!(block.status(), Status::Pending);
 
-        block.approve();
-        assert_eq!(block.status(), Some(Status::Running));
+        block.set_status(Status::Running);
+        assert_eq!(block.status(), Status::Running);
 
-        block.complete("done".to_string(), false);
-        assert_eq!(block.status(), Some(Status::Success));
+        block.set_status(Status::Success);
+        block.set_result("done".to_string());
+        assert_eq!(block.status(), Status::Success);
     }
 
     #[test]
@@ -389,20 +388,22 @@ mod tests {
         let id1 = transcript.add(Role::User, TextBlock::new("Hello"));
         let id2 = transcript.add(Role::Assistant, TextBlock::new("Hi there!"));
 
-        assert_eq!(transcript.messages().len(), 2);
+        assert_eq!(transcript.turns().len(), 2);
         assert_eq!(transcript.get_mut(id1).unwrap().role, Role::User);
         assert_eq!(transcript.get_mut(id2).unwrap().role, Role::Assistant);
     }
     
     #[test]
-    fn test_message_append_text() {
-        let mut msg = Message::new(MessageId(0), Role::Assistant, vec![
-            Box::new(TextBlock::new("Hello"))
-        ]);
+    fn test_turn_streaming() {
+        let mut turn = Turn::new(TurnId(0), Role::Assistant, vec![]);
         
-        msg.append_text(" world");
+        // Start streaming - add a text block and get its index
+        let idx = turn.add_text_block("Hello");
+        assert_eq!(idx, 0);
         
-        // Should have appended to existing block, not created new one
-        assert_eq!(msg.content.len(), 1);
+        // Append to that block
+        turn.append_to_block(idx, " world");
+        
+        assert_eq!(turn.content.len(), 1);
     }
 }
