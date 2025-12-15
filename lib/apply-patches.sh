@@ -231,5 +231,8 @@ with open(path, 'w') as f:
 print("Patched successfully")
 PYPATCH
 
+# Create marker file for build.rs caching
+touch "$OUTPUT_DIR/.patched"
+
 echo ""
 echo "=== Done! Patched ratatui-core at: $OUTPUT_DIR ==="

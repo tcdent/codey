@@ -1,0 +1,14 @@
+# STUB - This file is replaced by lib/apply-patches.sh
+# Run `./lib/apply-patches.sh` then `cargo build`
+[package]
+name = "ratatui-core"
+version = "0.1.0-beta.0"
+edition = "2021"
+
+[features]
+default = []
+no-simd = []
+std = []
+layout-cache = ["std"]
+underline-color = []
+scrolling-regions = []
