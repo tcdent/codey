@@ -51,6 +51,7 @@ impl Block for WriteFileBlock {
             Status::Success => ("✓", Color::Green),
             Status::Error => ("✗", Color::Red),
             Status::Denied => ("⊘", Color::DarkGray),
+            Status::Cancelled => ("⊘", Color::Yellow),
         };
 
         let path = self.params["path"].as_str().unwrap_or("");
