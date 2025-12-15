@@ -68,3 +68,18 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# =============================================================================
+# SIMD-Optimized Dependencies (Optional)
+# =============================================================================
+# To enable SIMD-accelerated buffer diffing:
+#
+# 1. Run: ./lib/apply-patches.sh
+# 2. Uncomment the [patch.crates-io] section below
+# 3. Rebuild: cargo build --release
+#
+# See lib/README.md and research/render-performance.md for details.
+# =============================================================================
+
+# [patch.crates-io]
+# ratatui-core = { path = "lib/ratatui-core", features = ["simd-diff"] }
