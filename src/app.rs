@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::llm::{Agent, AgentStep, ToolDecision, Usage};
 use crate::transcript::{Role, Status, TextBlock, Transcript, TurnId};
 use crate::tools::ToolRegistry;
-use crate::ui::{ChatView, ConnectionStatus, InputBox, StatusBar};
+use crate::ui::{ChatView, ConnectionStatus, InputBox};
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -73,6 +73,8 @@ pub struct App {
     continue_session: bool,
     /// Queue of messages waiting to be sent (content, message_id)
     message_queue: Vec<(String, TurnId)>,
+    /// Whether UI needs redrawing
+    dirty: bool,
 }
 
 impl App {
@@ -81,8 +83,17 @@ impl App {
         // Setup terminal
         enable_raw_mode().context("Failed to enable raw mode")?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-            .context("Failed to setup terminal")?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            crossterm::terminal::SetTitle(format!("{} v{}", APP_NAME, APP_VERSION)),
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+            )
+        )
+        .context("Failed to setup terminal")?;
 
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend).context("Failed to create terminal")?;
@@ -109,16 +120,14 @@ impl App {
             should_quit: false,
             continue_session,
             message_queue: Vec::new(),
+            dirty: true,
         })
     }
 
     /// Run the main event loop
     pub async fn run(&mut self) -> Result<()> {
-        use genai::chat::ChatMessage;
-
-        // Create agent locally - genai handles auth via environment variables
         let tools = ToolRegistry::new();
-        let messages = vec![ChatMessage::system(SYSTEM_PROMPT)];
+        let messages = vec![(Role::System, SYSTEM_PROMPT.to_string())];
         let mut agent = Agent::new(
             &self.config.general.model,
             self.config.general.max_tokens,
@@ -143,7 +152,10 @@ impl App {
 
         // Main event loop
         loop {
-            self.draw()?;
+            if self.dirty {
+                self.draw()?;
+                self.dirty = false;
+            }
 
             // Process queued messages
             if let Some((content, msg_id)) = self.message_queue.first().cloned() {
@@ -151,10 +163,24 @@ impl App {
                 self.send_message(&mut agent, content, msg_id).await?;
             }
 
-            if event::poll(std::time::Duration::from_millis(100))? {
+            // Poll longer when idle (no queued messages)
+            let poll_timeout = if self.message_queue.is_empty() {
+                std::time::Duration::from_millis(500)
+            } else {
+                std::time::Duration::from_millis(50)
+            };
+
+            if event::poll(poll_timeout)? {
                 match event::read()? {
-                    Event::Key(key) => self.handle_key_event(key),
-                    Event::Mouse(mouse) => self.handle_mouse_event(mouse),
+                    Event::Key(key) => {
+                        self.handle_key_event(key);
+                        self.dirty = true;
+                    }
+                    Event::Mouse(mouse) => {
+                        self.handle_mouse_event(mouse);
+                        self.dirty = true;
+                    }
+                    Event::Resize(_, _) => self.dirty = true,
                     _ => {}
                 }
             }
@@ -169,30 +195,25 @@ impl App {
 
     /// Draw the UI
     fn draw(&mut self) -> Result<()> {
-        let status_bar = StatusBar::new(
-            APP_NAME,
-            APP_VERSION,
-            &self.config.general.model,
-            &self.status,
-        )
-        .usage(self.usage)
-        .show_tokens(self.config.ui.show_tokens);
         let chat_widget = self.chat.widget(&self.transcript);
-        let input_widget = self.input.widget();
+        let input_widget = self.input.widget(&self.config.general.model);
+
+        // Calculate input height based on content, with min 3 and max half screen
+        let input_height = self.input.required_height(self.terminal.size()?.width);
+        let max_input_height = self.terminal.size()?.height / 2;
+        let input_height = input_height.min(max_input_height).max(5);
 
         self.terminal.draw(|frame| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(1), // Status bar
-                    Constraint::Min(10),   // Chat area
-                    Constraint::Length(5), // Input area
+                    Constraint::Min(5),              // Chat area (minimum)
+                    Constraint::Length(input_height), // Input area (dynamic)
                 ])
                 .split(frame.area());
 
-            frame.render_widget(status_bar, chunks[0]);
-            frame.render_widget(chat_widget, chunks[1]);
-            frame.render_widget(input_widget, chunks[2]);
+            frame.render_widget(chat_widget, chunks[0]);
+            frame.render_widget(input_widget, chunks[1]);
         })?;
 
         Ok(())
@@ -247,8 +268,10 @@ impl App {
                 self.input.move_cursor_end();
             }
             KeyCode::Enter => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    // Shift+Enter inserts newline
+                if key.modifiers.contains(KeyModifiers::SHIFT)
+                    || key.modifiers.contains(KeyModifiers::ALT)
+                {
+                    // Shift+Enter or Alt+Enter inserts newline
                     self.input.insert_newline();
                 } else {
                     // Enter queues message
@@ -311,6 +334,8 @@ impl App {
         }
         // Add to queue with turn ID
         self.message_queue.push((content, id));
+        // Scroll to show new message
+        self.chat.enable_auto_scroll();
     }
 
     /// Send a message to the agent
@@ -466,7 +491,8 @@ impl App {
         execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            crossterm::event::PopKeyboardEnhancementFlags
         )
         .context("Failed to cleanup terminal")?;
         self.terminal

@@ -68,9 +68,18 @@ impl Agent {
         model: impl Into<String>,
         max_tokens: u32,
         max_retries: u32,
-        messages: Vec<ChatMessage>,
+        messages: Vec<(Role, String)>,
         tools: ToolRegistry,
     ) -> Self {
+        let messages = messages
+            .into_iter()
+            .map(|(role, text)| match role {
+                Role::User => ChatMessage::user(text),
+                Role::Assistant => ChatMessage::assistant(text),
+                Role::System => ChatMessage::system(text),
+            })
+            .collect();
+
         Self {
             client: Client::default(),
             model: model.into(),

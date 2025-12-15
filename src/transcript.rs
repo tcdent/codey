@@ -334,8 +334,12 @@ impl Turn {
     /// Render all blocks with given width
     pub fn render(&self, width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
-        for block in &self.content {
+        for (i, block) in self.content.iter().enumerate() {
             lines.extend(block.render(width));
+            // Add blank line between blocks (but not after last)
+            if i < self.content.len() - 1 {
+                lines.push(Line::from(""));
+            }
         }
         lines
     }

@@ -37,6 +37,34 @@ impl InputBox {
         self.cursor_position
     }
 
+    /// Calculate required height for the input box given a width
+    /// Returns height including border (2 lines for top/bottom border)
+    pub fn required_height(&self, width: u16) -> u16 {
+        let inner_width = width.saturating_sub(2) as usize; // account for borders
+        if inner_width == 0 {
+            return 3; // minimum height
+        }
+
+        let mut lines = 1usize;
+        let mut current_line_len = 0usize;
+
+        for ch in self.content.chars() {
+            if ch == '\n' {
+                lines += 1;
+                current_line_len = 0;
+            } else {
+                current_line_len += 1;
+                if current_line_len >= inner_width {
+                    lines += 1;
+                    current_line_len = 0;
+                }
+            }
+        }
+
+        // Add 2 for borders, minimum 5 lines total (3 content lines)
+        (lines as u16 + 2).max(5)
+    }
+
     /// Insert a character at the cursor position
     pub fn insert_char(&mut self, c: char) {
         self.content.insert(self.cursor_position, c);
@@ -173,9 +201,9 @@ impl InputBox {
         }
     }
 
-    /// Render the input box
-    pub fn widget(&self) -> InputBoxWidget<'_> {
-        InputBoxWidget { state: self }
+    /// Render the input box with model name as title
+    pub fn widget<'a>(&'a self, model: &'a str) -> InputBoxWidget<'a> {
+        InputBoxWidget { state: self, model }
     }
 }
 
@@ -188,6 +216,7 @@ impl Default for InputBox {
 /// Input box widget for rendering
 pub struct InputBoxWidget<'a> {
     state: &'a InputBox,
+    model: &'a str,
 }
 
 impl Widget for InputBoxWidget<'_> {
@@ -195,7 +224,7 @@ impl Widget for InputBoxWidget<'_> {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(" Input (Enter to send, Shift+Enter for newline) ");
+            .title(format!(" {} ", self.model));
 
         let inner = block.inner(area);
         block.render(area, buf);
