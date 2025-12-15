@@ -103,13 +103,27 @@ impl Agent {
     }
 
     /// Restore agent message history from a transcript
+    /// Preserves the existing system prompt (first message if it's a system message)
     pub fn restore_from_transcript(&mut self, transcript: &Transcript) {
+        // Preserve system prompt if present (should be first message)
+        let system_prompt = match self.messages.first() {
+            Some(msg) if matches!(msg.role, ChatRole::System) => Some(self.messages.remove(0)),
+            _ => None,
+        };
+        
         self.messages.clear();
+        
+        // Restore system prompt first
+        if let Some(system) = system_prompt {
+            self.messages.push(system);
+        }
         
         for turn in transcript.turns() {
             match turn.role {
-                Role::User | Role::System => {
-                    // For user/system turns, just collect text
+                // Skip system turns - we use our predefined system prompt
+                Role::System => continue,
+                Role::User => {
+                    // For user turns, just collect text
                     let text: String = turn.content
                         .iter()
                         .filter_map(|block| block.text_content())
@@ -117,12 +131,7 @@ impl Agent {
                         .join("\n");
                     
                     if !text.is_empty() {
-                        let message = if turn.role == Role::User {
-                            ChatMessage::user(text)
-                        } else {
-                            ChatMessage::system(text)
-                        };
-                        self.messages.push(message);
+                        self.messages.push(ChatMessage::user(text));
                     }
                 }
                 Role::Assistant => {
