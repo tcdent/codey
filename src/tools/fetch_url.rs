@@ -49,6 +49,7 @@ impl Block for FetchUrlBlock {
             Status::Success => ("✓", Color::Green),
             Status::Error => ("✗", Color::Red),
             Status::Denied => ("⊘", Color::DarkGray),
+            Status::Cancelled => ("⊘", Color::Yellow),
         };
 
         let url = self.params["url"].as_str().unwrap_or("");

@@ -17,6 +17,7 @@ use ratatui::{
 };
 use std::io::{self, Stdout};
 use std::path::PathBuf;
+use std::time::Duration;
 
 const APP_NAME: &str = "Codey";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -325,6 +326,24 @@ impl App {
         }
     }
 
+    /// Check for interrupt keys (Esc or Ctrl+C) without blocking
+    /// Returns true if an interrupt was requested
+    fn check_for_interrupt(&mut self) -> bool {
+        if event::poll(Duration::from_millis(0)).unwrap_or(false) {
+            if let Ok(Event::Key(key)) = event::read() {
+                match key.code {
+                    KeyCode::Esc => return true,
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.should_quit = true;
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
+
     /// Queue a message for sending
     fn queue_message(&mut self, content: String) {
         // Add to transcript and mark as pending
@@ -360,9 +379,24 @@ impl App {
         self.draw()?;
 
         loop {
-            let step = match stream.next().await {
-                Some(s) => s,
-                None => break,
+            // Check for interrupt before each step
+            if self.check_for_interrupt() {
+                // Mark turn as interrupted if it exists
+                if let Some(turn_id) = current_turn_id {
+                    if let Some(turn) = self.transcript.get_mut(turn_id) {
+                        turn.append_text_to_last_block(" [interrupted]");
+                        turn.status = Status::Cancelled;
+                    }
+                }
+                self.draw()?;
+                break;
+            }
+
+            // Use timeout on stream.next() to allow periodic interrupt checks
+            let step = match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
+                Ok(Some(s)) => s,
+                Ok(None) => break, // Stream ended
+                Err(_) => continue, // Timeout, go back to interrupt check
             };
 
             match step {
@@ -383,7 +417,7 @@ impl App {
                 AgentStep::ToolRequest { call_id, block, .. } => {
                     // Reset streaming block - next text will be a new block
                     streaming_block_idx = None;
-                    
+
                     // Add tool block to turn
                     if current_turn_id.is_none() {
                         current_turn_id = Some(self.transcript.add_boxed(Role::Assistant, block));
@@ -395,6 +429,16 @@ impl App {
 
                     // Wait for user approval
                     let decision = self.wait_for_tool_approval().await?;
+
+                    // If user quit during approval, break out
+                    if self.should_quit {
+                        if let Some(turn_id) = current_turn_id {
+                            if let Some(turn) = self.transcript.get_mut(turn_id) {
+                                turn.status = Status::Cancelled;
+                            }
+                        }
+                        break;
+                    }
 
                     // Update tool status based on decision
                     if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id)) {
