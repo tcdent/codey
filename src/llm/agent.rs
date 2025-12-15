@@ -6,9 +6,9 @@ use anyhow::Result;
 use futures::StreamExt;
 use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent, ChatStreamResponse,
-    ContentPart, MessageContent, Tool, ToolCall, ToolResponse,
+    ContentPart, MessageContent, ReasoningEffort, Tool, ToolCall, ToolResponse,
 };
-use genai::Client;
+use genai::{Client, Headers};
 use std::time::Duration;
 use tracing::{debug, error, info};
 
@@ -30,6 +30,8 @@ impl std::ops::AddAssign for Usage {
 pub enum AgentStep {
     /// Streaming text chunk
     TextDelta(String),
+    /// Streaming thinking/reasoning chunk (extended thinking)
+    ThinkingDelta(String),
     /// Agent wants to execute a tool, needs approval
     ToolRequest {
         call_id: String,
@@ -199,6 +201,7 @@ enum StreamState {
     Streaming {
         stream: futures::stream::BoxStream<'static, Result<ChatStreamEvent, genai::Error>>,
         full_text: String,
+        full_thinking: String,
         tool_calls: Vec<ToolCall>,
     },
     /// Waiting for tool approval decision
@@ -220,12 +223,22 @@ pub struct AgentStream<'a> {
     chat_options: ChatOptions,
 }
 
+/// Default thinking budget in tokens (16k allows substantial reasoning)
+const DEFAULT_THINKING_BUDGET: u32 = 16000;
+
 impl<'a> AgentStream<'a> {
     fn new(agent: &'a mut Agent) -> Self {
         let tools = agent.get_tools();
         let chat_options = ChatOptions::default()
             .with_max_tokens(agent.max_tokens)
-            .with_capture_tool_calls(true);
+            .with_capture_tool_calls(true)
+            .with_capture_reasoning_content(true)
+            .with_reasoning_effort(ReasoningEffort::Budget(DEFAULT_THINKING_BUDGET))
+            // Enable interleaved thinking (thinking between tool calls)
+            .with_extra_headers(Headers::from([(
+                "anthropic-beta".to_string(),
+                "interleaved-thinking-2025-05-14".to_string(),
+            )]));
 
         Self {
             agent,
@@ -290,6 +303,7 @@ impl<'a> AgentStream<'a> {
                             self.state = StreamState::Streaming {
                                 stream: Box::pin(response.stream),
                                 full_text: String::new(),
+                                full_thinking: String::new(),
                                 tool_calls: Vec::new(),
                             };
                             // Continue to process streaming state
@@ -307,6 +321,7 @@ impl<'a> AgentStream<'a> {
                 StreamState::Streaming {
                     stream,
                     full_text,
+                    full_thinking,
                     tool_calls,
                 } => {
                     while let Some(result) = stream.next().await {
@@ -318,7 +333,10 @@ impl<'a> AgentStream<'a> {
                                     return Some(AgentStep::TextDelta(chunk.content));
                                 }
                                 ChatStreamEvent::ToolCallChunk(_) => {}
-                                ChatStreamEvent::ReasoningChunk(_) => {}
+                                ChatStreamEvent::ReasoningChunk(chunk) => {
+                                    full_thinking.push_str(&chunk.content);
+                                    return Some(AgentStep::ThinkingDelta(chunk.content));
+                                }
                                 ChatStreamEvent::End(end) => {
                                     if let Some(ref usage) = end.captured_usage {
                                         self.agent.total_usage.input_tokens +=
@@ -342,6 +360,7 @@ impl<'a> AgentStream<'a> {
 
                     // Stream ended, process results
                     let full_text = std::mem::take(full_text);
+                    let _full_thinking = std::mem::take(full_thinking); // TODO: store in message history for interleaved thinking
                     let tool_calls = std::mem::take(tool_calls);
 
                     if tool_calls.is_empty() {
