@@ -1,5 +1,3 @@
-//! Codepal - A terminal-based AI coding assistant
-
 mod app;
 mod config;
 mod llm;
@@ -13,9 +11,9 @@ use clap::Parser;
 use std::path::PathBuf;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-/// Codepal - A terminal-based AI coding assistant
+/// Codey - A terminal-based AI coding assistant
 #[derive(Parser, Debug)]
-#[command(name = "codepal")]
+#[command(name = "codey")]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Working directory
@@ -30,7 +28,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Set up file-based logging
-    let log_file = std::fs::File::create("/tmp/codepal.log")?;
+    let log_file = std::fs::File::create("/tmp/codey.log")?;
     tracing_subscriber::registry()
         .with(EnvFilter::new("debug"))
         .with(fmt::layer().with_writer(log_file).with_ansi(false))

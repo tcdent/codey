@@ -1,5 +1,3 @@
-//! Main application state and event loop
-
 use crate::config::Config;
 use crate::llm::{Agent, AgentStep, ToolDecision, Usage};
 use crate::transcript::{Role, Status, TextBlock, Transcript, TurnId};
@@ -20,12 +18,12 @@ use ratatui::{
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 
-const APP_NAME: &str = "Codepal";
+const APP_NAME: &str = "Codey";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-const TRANSCRIPT_DIR: &str = ".codepal";
+const TRANSCRIPT_DIR: &str = ".codey";
 const TRANSCRIPT_FILE: &str = "transcript.json";
 
-const SYSTEM_PROMPT: &str = r#"You are Codepal, an AI coding assistant running in a terminal interface.
+const SYSTEM_PROMPT: &str = r#"You are Codey, an AI coding assistant running in a terminal interface.
 
 ## Capabilities
 You have access to the following tools:
@@ -137,7 +135,7 @@ impl App {
             self.transcript.add(
                 Role::Assistant,
                 TextBlock::new(
-                    "Welcome to Codepal! I'm your AI coding assistant. How can I help you today?",
+                    "Welcome to Codey! I'm your AI coding assistant. How can I help you today?",
                 ),
             );
         }

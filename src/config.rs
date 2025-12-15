@@ -161,7 +161,7 @@ impl Config {
 
     /// Get the default config file path
     pub fn default_config_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|p| p.join("codepal").join("config.toml"))
+        dirs::config_dir().map(|p| p.join("codey").join("config.toml"))
     }
 }
 

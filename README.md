@@ -1,6 +1,6 @@
-# Codepal
+# Codey
 
-A terminal-based AI coding assistant built in Rust, powered by Claude.
+A terminal-based AI coding assistant built in Rust.
 
 ## Features
 
@@ -25,30 +25,30 @@ cargo install --path .
 cargo build --release
 ```
 
-The binary will be at `target/release/codepal`.
+The binary will be at `target/release/codey`.
 
 ## Usage
 
 ```bash
 # Start with default settings
-codepal
+codey
 
 # Specify a working directory
-codepal --working-dir /path/to/project
+codey --working-dir /path/to/project
 
 # Use a specific model
-codepal --model claude-sonnet-4-20250514
+codey --model claude-sonnet-4-20250514
 
 # Use API key authentication
-ANTHROPIC_API_KEY=sk-ant-... codepal
+ANTHROPIC_API_KEY=sk-ant-... codey
 
 # Enable debug logging
-codepal --debug
+codey --debug
 ```
 
 ## Configuration
 
-Copy `config.example.toml` to `~/.config/codepal/config.toml` and customize:
+Copy `config.example.toml` to `~/.config/codey/config.toml` and customize:
 
 ```toml
 [general]
@@ -88,7 +88,7 @@ show_tokens = true
 
 ## Tools
 
-Codepal provides five core tools:
+Codey provides five core tools:
 
 ### read_file
 Read file contents with optional line ranges.
@@ -124,10 +124,10 @@ fetch_url(url, max_length?)
 
 ### OAuth (Recommended for Claude Max/Pro)
 
-1. Run `codepal`
+1. Run `codey`
 2. Visit the displayed URL
 3. Enter the code shown
-4. Tokens are saved to `~/.config/codepal/auth.json`
+4. Tokens are saved to `~/.config/codey/auth.json`
 
 ### API Key
 

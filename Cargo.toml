@@ -1,11 +1,11 @@
 [package]
-name = "codepal"
+name = "codey"
 version = "0.1.0"
 edition = "2021"
-authors = ["Codepal Contributors"]
+authors = ["Codey Contributors"]
 description = "A terminal-based AI coding assistant"
 license = "MIT"
-repository = "https://github.com/codepal/codepal"
+repository = "https://github.com/tcdent/codey"
 
 [dependencies]
 # TUI

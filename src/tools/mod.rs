@@ -1,5 +1,3 @@
-//! Tool system for Codepal
-
 mod edit_file;
 mod fetch_url;
 mod read_file;

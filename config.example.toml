@@ -1,5 +1,5 @@
-# Codepal Configuration Example
-# Copy this file to ~/.config/codepal/config.toml
+# Codey Configuration Example
+# Copy this file to ~/.config/codey/config.toml
 
 [general]
 # Default model to use

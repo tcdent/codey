@@ -116,7 +116,7 @@ impl FetchUrlTool {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .user_agent("Codepal/0.1")
+            .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
             .build()
             .expect("Failed to create HTTP client");
 

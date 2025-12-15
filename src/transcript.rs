@@ -474,7 +474,7 @@ mod tests {
 
         // Save to temp file
         let temp_dir = std::env::temp_dir();
-        let path = temp_dir.join("codepal_test_transcript.json");
+        let path = temp_dir.join("codey_test_transcript.json");
 
         transcript.save(&path).expect("Failed to save transcript");
 
@@ -506,7 +506,7 @@ mod tests {
 
         // Save to temp file
         let temp_dir = std::env::temp_dir();
-        let path = temp_dir.join("codepal_test_tool_transcript.json");
+        let path = temp_dir.join("codey_test_tool_transcript.json");
 
         transcript.save(&path).expect("Failed to save transcript");
 
