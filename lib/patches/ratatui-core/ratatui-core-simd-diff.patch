@@ -1,0 +1,293 @@
+diff --git a/src/buffer/buffer.rs b/src/buffer/buffer.rs
+index 1234567..abcdefg 100644
+--- a/src/buffer/buffer.rs
++++ b/src/buffer/buffer.rs
+@@ -1,6 +1,14 @@
+ use std::cmp;
+ use std::fmt;
+
++#[cfg(all(
++    feature = "simd-diff",
++    any(target_arch = "x86_64", target_arch = "aarch64")
++))]
++mod simd_diff;
++#[cfg(all(feature = "simd-diff", any(target_arch = "x86_64", target_arch = "aarch64")))]
++use simd_diff::find_changed_ranges;
++
+ use unicode_segmentation::UnicodeSegmentation;
+ use unicode_width::UnicodeWidthStr;
+
+@@ -200,6 +208,85 @@ impl Buffer {
+     /// of the buffers differ.
+     pub fn diff<'a>(&self, other: &'a Self) -> Vec<(u16, u16, &'a Cell)> {
+         let previous_buffer = &self.content;
+         let next_buffer = &other.content;
+
+         let mut updates: Vec<(u16, u16, &Cell)> = vec![];
++
++        // SIMD fast path: quickly identify unchanged regions
++        #[cfg(all(feature = "simd-diff", any(target_arch = "x86_64", target_arch = "aarch64")))]
++        {
++            return self.diff_simd(other);
++        }
++
++        // Scalar fallback
++        #[cfg(not(all(feature = "simd-diff", any(target_arch = "x86_64", target_arch = "aarch64"))))]
++        {
++            self.diff_scalar(other)
++        }
++    }
++
++    /// SIMD-accelerated diff implementation
++    #[cfg(all(feature = "simd-diff", any(target_arch = "x86_64", target_arch = "aarch64")))]
++    fn diff_simd<'a>(&self, other: &'a Self) -> Vec<(u16, u16, &'a Cell)> {
++        let previous_buffer = &self.content;
++        let next_buffer = &other.content;
++
++        // Pre-allocate with estimated capacity (usually <5% of cells change)
++        let mut updates: Vec<(u16, u16, &Cell)> = Vec::with_capacity(next_buffer.len() / 20);
++
++        // Find potentially changed ranges using SIMD
++        let changed_ranges = find_changed_ranges(previous_buffer, next_buffer);
++
++        // Only do scalar comparison on changed ranges
++        for (start, end) in changed_ranges {
++            let mut invalidated: usize = 0;
++            let mut to_skip: usize = 0;
++
++            for i in start..end.min(next_buffer.len()).min(previous_buffer.len()) {
++                let current = &next_buffer[i];
++                let previous = &previous_buffer[i];
++
++                if !current.skip && (current != previous || invalidated > 0) && to_skip == 0 {
++                    let (x, y) = self.pos_of(i);
++                    updates.push((x, y, &next_buffer[i]));
++
++                    let symbol = current.symbol();
++                    let cell_width = symbol.width();
++                    let contains_vs16 = symbol.chars().any(|c| c == '\u{FE0F}');
++
++                    if cell_width > 1 && contains_vs16 {
++                        for k in 1..cell_width {
++                            let j = i + k;
++                            if j >= next_buffer.len() || j >= previous_buffer.len() {
++                                break;
++                            }
++                            let prev_trailing = &previous_buffer[j];
++                            let next_trailing = &next_buffer[j];
++                            if !next_trailing.skip && prev_trailing != next_trailing {
++                                let (tx, ty) = self.pos_of(j);
++                                updates.push((tx, ty, next_trailing));
++                            }
++                        }
++                    }
++                }
++
++                to_skip = current.symbol().width().saturating_sub(1);
++                let affected_width = cmp::max(current.symbol().width(), previous.symbol().width());
++                invalidated = cmp::max(affected_width, invalidated).saturating_sub(1);
++            }
++        }
++
++        updates
++    }
++
++    /// Scalar diff implementation (original algorithm)
++    #[cfg(not(all(feature = "simd-diff", any(target_arch = "x86_64", target_arch = "aarch64"))))]
++    fn diff_scalar<'a>(&self, other: &'a Self) -> Vec<(u16, u16, &'a Cell)> {
++        let previous_buffer = &self.content;
++        let next_buffer = &other.content;
++        let mut updates: Vec<(u16, u16, &Cell)> = vec![];
+         let mut invalidated: usize = 0;
+         let mut to_skip: usize = 0;
+
+         for (i, (current, previous)) in next_buffer.iter().zip(previous_buffer.iter()).enumerate() {
+
+--- /dev/null
++++ b/src/buffer/simd_diff.rs
+@@ -0,0 +1,168 @@
++//! SIMD-accelerated buffer comparison for finding changed regions.
++//!
++//! This module provides fast detection of which regions of a buffer have changed,
++//! allowing the diff algorithm to skip large unchanged sections.
++
++use super::Cell;
++
++/// Minimum chunk size for SIMD comparison
++const MIN_SIMD_CHUNK: usize = 64;
++
++/// Find ranges of potentially changed cells using SIMD comparison.
++/// Returns a list of (start, end) ranges that need scalar comparison.
++///
++/// The algorithm works by comparing cells in chunks and identifying
++/// which chunks contain any differences. Adjacent changed chunks are
++/// merged to reduce overhead.
++pub fn find_changed_ranges(prev: &[Cell], curr: &[Cell]) -> Vec<(usize, usize)> {
++    let len = prev.len().min(curr.len());
++
++    // For small buffers, just return the whole range
++    if len < MIN_SIMD_CHUNK * 2 {
++        return vec![(0, len)];
++    }
++
++    #[cfg(target_arch = "x86_64")]
++    {
++        if is_x86_feature_detected!("avx2") {
++            return unsafe { find_changed_ranges_avx2(prev, curr) };
++        } else if is_x86_feature_detected!("sse4.1") {
++            return unsafe { find_changed_ranges_sse41(prev, curr) };
++        }
++    }
++
++    #[cfg(target_arch = "aarch64")]
++    {
++        return unsafe { find_changed_ranges_neon(prev, curr) };
++    }
++
++    // Fallback: return whole buffer
++    vec![(0, len)]
++}
++
++#[cfg(target_arch = "x86_64")]
++#[target_feature(enable = "avx2")]
++unsafe fn find_changed_ranges_avx2(prev: &[Cell], curr: &[Cell]) -> Vec<(usize, usize)> {
++    use std::arch::x86_64::*;
++
++    let len = prev.len().min(curr.len());
++    let mut ranges = Vec::new();
++    let mut range_start: Option<usize> = None;
++
++    // Process in chunks, comparing raw bytes
++    // We compare the memory representation of cells
++    let prev_ptr = prev.as_ptr() as *const u8;
++    let curr_ptr = curr.as_ptr() as *const u8;
++    let cell_size = std::mem::size_of::<Cell>();
++    let byte_len = len * cell_size;
++
++    let chunk_size = 32; // AVX2 processes 32 bytes at a time
++    let mut byte_offset = 0;
++
++    while byte_offset + chunk_size <= byte_len {
++        let prev_chunk = _mm256_loadu_si256(prev_ptr.add(byte_offset) as *const __m256i);
++        let curr_chunk = _mm256_loadu_si256(curr_ptr.add(byte_offset) as *const __m256i);
++
++        let cmp = _mm256_cmpeq_epi8(prev_chunk, curr_chunk);
++        let mask = _mm256_movemask_epi8(cmp);
++
++        let cell_offset = byte_offset / cell_size;
++        let cells_in_chunk = chunk_size / cell_size;
++
++        if mask != -1 {
++            // This chunk has differences
++            if range_start.is_none() {
++                range_start = Some(cell_offset);
++            }
++        } else {
++            // This chunk is identical - close any open range
++            if let Some(start) = range_start.take() {
++                ranges.push((start, cell_offset));
++            }
++        }
++
++        byte_offset += chunk_size;
++    }
++
++    // Handle remaining cells and close final range
++    if let Some(start) = range_start {
++        ranges.push((start, len));
++    } else if byte_offset < byte_len {
++        // Check remaining bytes with scalar
++        let remaining_start = byte_offset / cell_size;
++        for i in remaining_start..len {
++            if prev[i] != curr[i] {
++                ranges.push((remaining_start, len));
++                break;
++            }
++        }
++    }
++
++    // If no changes found, return empty
++    if ranges.is_empty() {
++        return ranges;
++    }
++
++    // Merge adjacent ranges (within 8 cells of each other)
++    merge_ranges(ranges, 8)
++}
++
++#[cfg(target_arch = "x86_64")]
++#[target_feature(enable = "sse4.1")]
++unsafe fn find_changed_ranges_sse41(prev: &[Cell], curr: &[Cell]) -> Vec<(usize, usize)> {
++    use std::arch::x86_64::*;
++
++    // Similar to AVX2 but with 16-byte chunks
++    let len = prev.len().min(curr.len());
++    let mut ranges = Vec::new();
++    let mut range_start: Option<usize> = None;
++
++    let prev_ptr = prev.as_ptr() as *const u8;
++    let curr_ptr = curr.as_ptr() as *const u8;
++    let cell_size = std::mem::size_of::<Cell>();
++    let byte_len = len * cell_size;
++
++    let chunk_size = 16;
++    let mut byte_offset = 0;
++
++    while byte_offset + chunk_size <= byte_len {
++        let prev_chunk = _mm_loadu_si128(prev_ptr.add(byte_offset) as *const __m128i);
++        let curr_chunk = _mm_loadu_si128(curr_ptr.add(byte_offset) as *const __m128i);
++
++        let cmp = _mm_cmpeq_epi8(prev_chunk, curr_chunk);
++        let mask = _mm_movemask_epi8(cmp);
++
++        let cell_offset = byte_offset / cell_size;
++
++        if mask != 0xFFFF {
++            if range_start.is_none() {
++                range_start = Some(cell_offset);
++            }
++        } else {
++            if let Some(start) = range_start.take() {
++                ranges.push((start, cell_offset));
++            }
++        }
++
++        byte_offset += chunk_size;
++    }
++
++    if let Some(start) = range_start {
++        ranges.push((start, len));
++    }
++
++    merge_ranges(ranges, 8)
++}
++
++#[cfg(target_arch = "aarch64")]
++unsafe fn find_changed_ranges_neon(prev: &[Cell], curr: &[Cell]) -> Vec<(usize, usize)> {
++    // TODO: Implement NEON version for ARM
++    // For now, return whole buffer
++    vec![(0, prev.len().min(curr.len()))]
++}
++
++fn merge_ranges(mut ranges: Vec<(usize, usize)>, gap_threshold: usize) -> Vec<(usize, usize)> {
++    if ranges.len() <= 1 {
++        return ranges;
++    }
++
++    ranges.sort_by_key(|r| r.0);
++
++    let mut merged = Vec::with_capacity(ranges.len());
++    let mut current = ranges[0];
++
++    for range in ranges.into_iter().skip(1) {
++        if range.0 <= current.1 + gap_threshold {
++            current.1 = current.1.max(range.1);
++        } else {
++            merged.push(current);
++            current = range;
++        }
++    }
++    merged.push(current);
++
++    merged
++}

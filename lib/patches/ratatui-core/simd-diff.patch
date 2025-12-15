@@ -1,0 +1,113 @@
+--- a/src/buffer/simd_diff.rs	2025-12-15 06:06:26.937115901 +0000
++++ b/src/buffer/simd_diff.rs	2025-12-15 06:12:43.411007325 +0000
+@@ -0,0 +1,110 @@
++//! SIMD-accelerated buffer diffing for improved render performance.
++
++extern crate std;
++use std::vec::Vec;
++use std::vec;
++use super::Cell;
++
++/// Find ranges of changed cells using SIMD comparisons.
++/// Returns a vector of (start, end) index pairs indicating changed regions.
++pub fn find_changed_ranges(prev: &[Cell], curr: &[Cell]) -> Vec<(usize, usize)> {
++    let len = prev.len().min(curr.len());
++    if len < 128 {
++        return vec![(0, len)];
++    }
++
++    #[cfg(target_arch = "x86_64")]
++    {
++        if std::is_x86_feature_detected!("avx2") {
++            return unsafe { avx2(prev, curr) };
++        }
++        if std::is_x86_feature_detected!("sse4.1") {
++            return unsafe { sse41(prev, curr) };
++        }
++    }
++
++    #[cfg(target_arch = "aarch64")]
++    {
++        return unsafe { neon(prev, curr) };
++    }
++
++    #[allow(unreachable_code)]
++    vec![(0, len)]
++}
++
++#[cfg(target_arch = "x86_64")]
++#[target_feature(enable = "avx2")]
++unsafe fn avx2(prev: &[Cell], curr: &[Cell]) -> Vec<(usize, usize)> {
++    use core::arch::x86_64::*;
++    let len = prev.len().min(curr.len());
++    let (pp, cp) = (prev.as_ptr() as *const u8, curr.as_ptr() as *const u8);
++    let cs = core::mem::size_of::<Cell>();
++    let bl = len * cs;
++    let (mut r, mut s, mut o) = (Vec::new(), None::<usize>, 0);
++    while o + 32 <= bl {
++        let pv = _mm256_loadu_si256(pp.add(o) as *const __m256i);
++        let cv = _mm256_loadu_si256(cp.add(o) as *const __m256i);
++        let m = _mm256_movemask_epi8(_mm256_cmpeq_epi8(pv, cv));
++        let co = o / cs;
++        if m != -1i32 { if s.is_none() { s = Some(co); } }
++        else if let Some(st) = s.take() { r.push((st, co + 1)); }
++        o += 32;
++    }
++    if let Some(st) = s { r.push((st, len)); }
++    merge(r)
++}
++
++#[cfg(target_arch = "x86_64")]
++#[target_feature(enable = "sse4.1")]
++unsafe fn sse41(prev: &[Cell], curr: &[Cell]) -> Vec<(usize, usize)> {
++    use core::arch::x86_64::*;
++    let len = prev.len().min(curr.len());
++    let (pp, cp) = (prev.as_ptr() as *const u8, curr.as_ptr() as *const u8);
++    let cs = core::mem::size_of::<Cell>();
++    let bl = len * cs;
++    let (mut r, mut s, mut o) = (Vec::new(), None::<usize>, 0);
++    while o + 16 <= bl {
++        let pv = _mm_loadu_si128(pp.add(o) as *const __m128i);
++        let cv = _mm_loadu_si128(cp.add(o) as *const __m128i);
++        let m = _mm_movemask_epi8(_mm_cmpeq_epi8(pv, cv));
++        let co = o / cs;
++        if m != 0xFFFF { if s.is_none() { s = Some(co); } }
++        else if let Some(st) = s.take() { r.push((st, co + 1)); }
++        o += 16;
++    }
++    if let Some(st) = s { r.push((st, len)); }
++    merge(r)
++}
++
++#[cfg(target_arch = "aarch64")]
++unsafe fn neon(prev: &[Cell], curr: &[Cell]) -> Vec<(usize, usize)> {
++    use core::arch::aarch64::*;
++    let len = prev.len().min(curr.len());
++    let (pp, cp) = (prev.as_ptr() as *const u8, curr.as_ptr() as *const u8);
++    let cs = core::mem::size_of::<Cell>();
++    let bl = len * cs;
++    let (mut r, mut s, mut o) = (Vec::new(), None::<usize>, 0);
++    while o + 16 <= bl {
++        let pv = vld1q_u8(pp.add(o));
++        let cv = vld1q_u8(cp.add(o));
++        let m = vminvq_u8(vceqq_u8(pv, cv));
++        let co = o / cs;
++        if m != 0xFF { if s.is_none() { s = Some(co); } }
++        else if let Some(st) = s.take() { r.push((st, co + 1)); }
++        o += 16;
++    }
++    if let Some(st) = s { r.push((st, len)); }
++    merge(r)
++}
++
++fn merge(mut r: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
++    if r.len() <= 1 { return r; }
++    r.sort_by_key(|x| x.0);
++    let mut m = vec![r[0]];
++    for (s, e) in r.into_iter().skip(1) {
++        let last = m.last_mut().unwrap();
++        if s <= last.1 + 8 { last.1 = last.1.max(e); }
++        else { m.push((s, e)); }
++    }
++    m
++}
