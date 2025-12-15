@@ -299,6 +299,7 @@ dependencies = [
  "pretty_assertions",
  "rand 0.8.5",
  "ratatui",
+ "ratatui-core",
  "ratskin",
  "reqwest",
  "serde",

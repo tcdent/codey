@@ -1,0 +1,12 @@
+--- a/src/buffer.rs	2025-12-15 06:11:58.644561978 +0000
++++ b/src/buffer.rs	2025-12-15 06:11:58.654562078 +0000
+@@ -1,6 +1,9 @@
+ #![warn(missing_docs)]
+ //! A module for the [`Buffer`] and [`Cell`] types.
+ 
++#[cfg(all(not(feature = "no-simd"), any(target_arch = "x86_64", target_arch = "aarch64")))]
++mod simd_diff;
++
+ mod assert;
+ mod buffer;
+ mod cell;
