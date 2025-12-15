@@ -7,21 +7,25 @@ use crate::ui::{ChatView, ConnectionStatus, InputBox};
 use anyhow::{Context, Result};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    execute, queue,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, BeginSynchronizedUpdate, EndSynchronizedUpdate},
 };
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     Terminal,
 };
-use std::io::{self, Stdout};
+use std::io::{self, Stdout, Write};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 const APP_NAME: &str = "Codey";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TRANSCRIPT_DIR: &str = ".codey";
 const TRANSCRIPT_FILE: &str = "transcript.json";
+
+/// Minimum time between frames (~60fps)
+const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
 
 const SYSTEM_PROMPT: &str = r#"You are Codey, an AI coding assistant running in a terminal interface.
 
@@ -73,8 +77,8 @@ pub struct App {
     continue_session: bool,
     /// Queue of messages waiting to be sent (content, message_id)
     message_queue: Vec<(String, TurnId)>,
-    /// Whether UI needs redrawing
-    dirty: bool,
+    /// Last render time for frame rate limiting
+    last_render: Instant,
 }
 
 impl App {
@@ -120,11 +124,11 @@ impl App {
             should_quit: false,
             continue_session,
             message_queue: Vec::new(),
-            dirty: true,
+            last_render: Instant::now(),
         })
     }
 
-    /// Run the main event loop
+    /// Run the main event loop - purely event-driven rendering
     pub async fn run(&mut self) -> Result<()> {
         let tools = ToolRegistry::new();
         let messages = vec![(Role::System, SYSTEM_PROMPT.to_string())];
@@ -150,38 +154,37 @@ impl App {
         }
         self.status = ConnectionStatus::Connected;
 
-        // Main event loop
-        loop {
-            if self.dirty {
-                self.draw()?;
-                self.dirty = false;
-            }
+        // Initial render
+        self.draw()?;
 
-            // Process queued messages
+        // Main event loop - only renders on actual events
+        loop {
+            // Process queued messages first (agent events trigger their own draws)
             if let Some((content, msg_id)) = self.message_queue.first().cloned() {
                 self.message_queue.remove(0);
                 self.send_message(&mut agent, content, msg_id).await?;
+                // send_message handles its own draw calls for streaming
+                continue;
             }
 
-            // Poll longer when idle (no queued messages)
-            let poll_timeout = if self.message_queue.is_empty() {
-                std::time::Duration::from_millis(500)
-            } else {
-                std::time::Duration::from_millis(50)
-            };
-
-            if event::poll(poll_timeout)? {
-                match event::read()? {
+            // Block until we get an event - no polling when idle
+            // This is the key optimization: we don't spin or redraw when nothing happens
+            if event::poll(std::time::Duration::from_secs(60))? {
+                let needs_redraw = match event::read()? {
                     Event::Key(key) => {
                         self.handle_key_event(key);
-                        self.dirty = true;
+                        true
                     }
                     Event::Mouse(mouse) => {
                         self.handle_mouse_event(mouse);
-                        self.dirty = true;
+                        true
                     }
-                    Event::Resize(_, _) => self.dirty = true,
-                    _ => {}
+                    Event::Resize(_, _) => true,
+                    _ => false,
+                };
+
+                if needs_redraw {
+                    self.draw()?;
                 }
             }
 
@@ -193,8 +196,10 @@ impl App {
         self.cleanup()
     }
 
-    /// Draw the UI
+    /// Draw the UI with synchronized updates to prevent tearing
     fn draw(&mut self) -> Result<()> {
+        self.last_render = Instant::now();
+
         let chat_widget = self.chat.widget(&self.transcript);
         let input_widget = self.input.widget(&self.config.general.model);
 
@@ -202,6 +207,9 @@ impl App {
         let input_height = self.input.required_height(self.terminal.size()?.width);
         let max_input_height = self.terminal.size()?.height / 2;
         let input_height = input_height.min(max_input_height).max(5);
+
+        // Begin synchronized update - terminal buffers all changes
+        queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
 
         self.terminal.draw(|frame| {
             let chunks = Layout::default()
@@ -216,7 +224,22 @@ impl App {
             frame.render_widget(input_widget, chunks[1]);
         })?;
 
+        // End synchronized update - terminal renders atomically
+        queue!(self.terminal.backend_mut(), EndSynchronizedUpdate)?;
+        self.terminal.backend_mut().flush()?;
+
         Ok(())
+    }
+
+    /// Draw with frame rate limiting - skips if called too frequently
+    /// Returns true if a draw actually occurred
+    fn draw_throttled(&mut self) -> Result<bool> {
+        if self.last_render.elapsed() >= MIN_FRAME_TIME {
+            self.draw()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Handle a key event
@@ -378,7 +401,8 @@ impl App {
                             turn.append_to_block(streaming_block_idx.unwrap(), &text);
                         }
                     }
-                    self.draw()?;
+                    // Use throttled draw for streaming - caps at 60fps
+                    self.draw_throttled()?;
                 }
                 AgentStep::ToolRequest { call_id, block, .. } => {
                     // Reset streaming block - next text will be a new block
@@ -444,6 +468,10 @@ impl App {
         }
 
         self.chat.enable_auto_scroll();
+
+        // Final draw to ensure complete state is rendered
+        // (throttled draws during streaming may have skipped the last few deltas)
+        self.draw()?;
 
         // Auto-save transcript after turn completes
         if let Err(e) = self.transcript.save(&self.transcript_path) {
