@@ -35,6 +35,7 @@ pub enum Status {
 }
 
 /// Trait for all blocks in a turn
+#[typetag::serde(tag = "type")]
 pub trait Block: Send + Sync {
     /// Render this block to terminal lines with given width for wrapping
     fn render(&self, width: u16) -> Vec<Line<'_>>;
@@ -58,6 +59,11 @@ pub trait Block: Send + Sync {
     fn call_id(&self) -> Option<&str> {
         None
     }
+
+    /// Get the text content of this block (for restoring agent context)
+    fn text_content(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Simple text content
@@ -76,6 +82,7 @@ impl TextBlock {
     }
 }
 
+#[typetag::serde]
 impl Block for TextBlock {
     fn render(&self, width: u16) -> Vec<Line<'_>> {
         // Use ratskin for markdown rendering
@@ -94,6 +101,10 @@ impl Block for TextBlock {
 
     fn append_text(&mut self, text: &str) {
         self.text.push_str(text);
+    }
+
+    fn text_content(&self) -> Option<&str> {
+        Some(&self.text)
     }
 }
 
@@ -119,6 +130,7 @@ impl ToolBlock {
     }
 }
 
+#[typetag::serde]
 impl Block for ToolBlock {
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
@@ -243,6 +255,7 @@ pub fn render_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
 }
 
 /// A turn in the conversation - one user or assistant response
+#[derive(Serialize, Deserialize)]
 pub struct Turn {
     pub id: TurnId,
     pub role: Role,
@@ -302,7 +315,7 @@ impl Turn {
 }
 
 /// The chat transcript - display log of all turns for UI rendering
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct Transcript {
     turns: Vec<Turn>,
     next_id: usize,
@@ -355,6 +368,24 @@ impl Transcript {
         self.turns.clear();
         self.next_id = 0;
     }
+
+    /// Save transcript to a JSON file
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::File::create(path)?;
+        serde_json::to_writer_pretty(file, self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+
+    /// Load transcript from a JSON file
+    pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
+        let file = std::fs::File::open(path)?;
+        serde_json::from_reader(file)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
 }
 
 #[cfg(test)]
@@ -405,5 +436,33 @@ mod tests {
         turn.append_to_block(idx, " world");
         
         assert_eq!(turn.content.len(), 1);
+    }
+
+    #[test]
+    fn test_transcript_save_load_roundtrip() {
+        let mut transcript = Transcript::new();
+        transcript.add(Role::User, TextBlock::new("Hello"));
+        transcript.add(Role::Assistant, TextBlock::new("Hi there!"));
+        transcript.add(Role::User, TextBlock::new("How are you?"));
+
+        // Save to temp file
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("codepal_test_transcript.json");
+
+        transcript.save(&path).expect("Failed to save transcript");
+
+        // Load and verify
+        let loaded = Transcript::load(&path).expect("Failed to load transcript");
+        assert_eq!(loaded.turns().len(), 3);
+        assert_eq!(loaded.turns()[0].role, Role::User);
+        assert_eq!(loaded.turns()[1].role, Role::Assistant);
+        assert_eq!(loaded.turns()[2].role, Role::User);
+
+        // Verify text content is preserved
+        let text = loaded.turns()[0].content[0].text_content();
+        assert_eq!(text, Some("Hello"));
+
+        // Clean up
+        let _ = std::fs::remove_file(path);
     }
 }

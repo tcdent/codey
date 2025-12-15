@@ -18,9 +18,12 @@ use ratatui::{
     Terminal,
 };
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 
 const APP_NAME: &str = "Codepal";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const TRANSCRIPT_DIR: &str = ".codepal";
+const TRANSCRIPT_FILE: &str = "transcript.json";
 
 const SYSTEM_PROMPT: &str = r#"You are Codepal, an AI coding assistant running in a terminal interface.
 
@@ -63,18 +66,20 @@ pub struct App {
     config: Config,
     terminal: Terminal<CrosstermBackend<Stdout>>,
     transcript: Transcript,
+    transcript_path: PathBuf,
     chat: ChatView,
     input: InputBox,
     status: ConnectionStatus,
     usage: Usage,
     should_quit: bool,
+    continue_session: bool,
     /// Queue of messages waiting to be sent (content, message_id)
     message_queue: Vec<(String, TurnId)>,
 }
 
 impl App {
     /// Create a new application
-    pub async fn new(config: Config) -> Result<Self> {
+    pub async fn new(config: Config, continue_session: bool) -> Result<Self> {
         // Setup terminal
         enable_raw_mode().context("Failed to enable raw mode")?;
         let mut stdout = io::stdout();
@@ -84,15 +89,27 @@ impl App {
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
+        // Set up transcript path in current working directory
+        let transcript_path = PathBuf::from(TRANSCRIPT_DIR).join(TRANSCRIPT_FILE);
+
+        // Load existing transcript if continuing
+        let transcript = if continue_session {
+            Transcript::load(&transcript_path).unwrap_or_default()
+        } else {
+            Transcript::new()
+        };
+
         Ok(Self {
             config,
             terminal,
-            transcript: Transcript::new(),
+            transcript,
+            transcript_path,
             chat: ChatView::new(),
             input: InputBox::new(),
             status: ConnectionStatus::Disconnected,
             usage: Usage::default(),
             should_quit: false,
+            continue_session,
             message_queue: Vec::new(),
         })
     }
@@ -112,13 +129,18 @@ impl App {
             tools,
         );
 
-        // Show welcome message
-        self.transcript.add(
-            Role::Assistant,
-            TextBlock::new(
-                "Welcome to Codepal! I'm your AI coding assistant. How can I help you today?",
-            ),
-        );
+        // Restore agent context if continuing session
+        if self.continue_session && !self.transcript.turns().is_empty() {
+            agent.restore_from_transcript(&self.transcript);
+        } else {
+            // Show welcome message only for new sessions
+            self.transcript.add(
+                Role::Assistant,
+                TextBlock::new(
+                    "Welcome to Codepal! I'm your AI coding assistant. How can I help you today?",
+                ),
+            );
+        }
         self.status = ConnectionStatus::Connected;
 
         // Main event loop
@@ -399,6 +421,11 @@ impl App {
         }
 
         self.chat.enable_auto_scroll();
+
+        // Auto-save transcript after turn completes
+        if let Err(e) = self.transcript.save(&self.transcript_path) {
+            tracing::error!("Failed to save transcript: {}", e);
+        }
 
         Ok(())
     }

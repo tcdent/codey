@@ -41,6 +41,7 @@ impl WriteFileBlock {
     }
 }
 
+#[typetag::serde]
 impl Block for WriteFileBlock {
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();

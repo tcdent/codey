@@ -44,6 +44,7 @@ impl ReadFileBlock {
     }
 }
 
+#[typetag::serde]
 impl Block for ReadFileBlock {
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();

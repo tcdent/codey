@@ -56,6 +56,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 dotenvy = "0.15.7"
 ratskin = "0.3"
+typetag = "0.2.21"
 
 [dev-dependencies]
 tokio-test = "0.4"

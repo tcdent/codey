@@ -45,6 +45,7 @@ impl ShellBlock {
     }
 }
 
+#[typetag::serde]
 impl Block for ShellBlock {
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();

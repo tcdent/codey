@@ -21,6 +21,10 @@ struct Args {
     /// Working directory
     #[arg(short, long)]
     working_dir: Option<PathBuf>,
+
+    /// Continue from previous session
+    #[arg(short, long)]
+    r#continue: bool,
 }
 
 #[tokio::main]
@@ -55,6 +59,6 @@ async fn main() -> Result<()> {
     }
 
     // Run the application
-    let mut app = app::App::new(config).await?;
+    let mut app = app::App::new(config, args.r#continue).await?;
     app.run().await
 }

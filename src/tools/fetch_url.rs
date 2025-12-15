@@ -36,6 +36,7 @@ impl FetchUrlBlock {
     }
 }
 
+#[typetag::serde]
 impl Block for FetchUrlBlock {
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();

@@ -1,6 +1,6 @@
 //! Agent loop for handling conversations with tool execution
 
-use crate::transcript::Block;
+use crate::transcript::{Block, Role, Transcript};
 use crate::tools::ToolRegistry;
 use anyhow::Result;
 use futures::StreamExt;
@@ -80,6 +80,34 @@ impl Agent {
             messages,
             total_usage: Usage::default(),
         }
+    }
+
+    /// Restore agent message history from a transcript
+    pub fn restore_from_transcript(&mut self, transcript: &Transcript) {
+        self.messages.clear();
+        
+        for turn in transcript.turns() {
+            // Collect all text from text blocks in this turn
+            let text: String = turn.content
+                .iter()
+                .filter_map(|block| block.text_content())
+                .collect::<Vec<_>>()
+                .join("\n");
+            
+            if text.is_empty() {
+                continue;
+            }
+            
+            let message = match turn.role {
+                Role::User => ChatMessage::user(text),
+                Role::Assistant => ChatMessage::assistant(text),
+                Role::System => ChatMessage::system(text),
+            };
+            
+            self.messages.push(message);
+        }
+        
+        info!("Restored {} messages from transcript", self.messages.len());
     }
 
     /// Get tool definitions in genai format
