@@ -52,6 +52,7 @@ impl Block for ShellBlock {
             Status::Success => ("✓", Color::Green),
             Status::Error => ("✗", Color::Red),
             Status::Denied => ("⊘", Color::DarkGray),
+            Status::Cancelled => ("⊘", Color::Yellow),
         };
 
         let command = self.params["command"].as_str().unwrap_or("");

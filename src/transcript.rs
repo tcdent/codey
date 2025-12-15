@@ -32,6 +32,7 @@ pub enum Status {
     Success,
     Error,
     Denied,
+    Cancelled,
 }
 
 /// Trait for all blocks in a turn
@@ -209,6 +210,7 @@ impl Block for ToolBlock {
             Status::Success => ("✓", Color::Green),
             Status::Error => ("✗", Color::Red),
             Status::Denied => ("⊘", Color::DarkGray),
+            Status::Cancelled => ("⊘", Color::Yellow),
         };
 
         // Tool name with status icon
@@ -389,6 +391,13 @@ impl Turn {
             }
         }
         None
+    }
+
+    /// Append text to the last text block (for adding "[interrupted]" marker)
+    pub fn append_text_to_last_block(&mut self, text: &str) {
+        if let Some(block) = self.content.last_mut() {
+            block.append_text(text);
+        }
     }
 
     /// Render all blocks with given width
