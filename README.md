@@ -4,12 +4,11 @@ A terminal-based AI coding assistant built in Rust.
 
 ## Features
 
-- **Real-time Streaming**: See Claude's responses as they're generated
+- **Real-time Streaming**: See responses as they're generated with live markdown rendering
 - **Tool Execution**: Execute file operations, shell commands, and web fetches
 - **Permission System**: All tool executions require user approval
-- **Syntax Highlighting**: Code blocks are highlighted with syntect
-- **OAuth Support**: Authenticate with Anthropic OAuth for Claude Max/Pro users
-- **Search/Replace Edits**: Precise file editing with exact match patterns
+- **Session Persistence**: Continue previous sessions with `--continue` flag
+- **Multi-provider Support**: Works with any LLM provider supported by the `genai` crate
 
 ## Installation
 
@@ -30,17 +29,17 @@ The binary will be at `target/release/codey`.
 ## Usage
 
 ```bash
-# Start with default settings
+# Start a new session
 codey
+
+# Continue from previous session
+codey --continue
 
 # Specify a working directory
 codey --working-dir /path/to/project
 
 # Use a specific model
 codey --model claude-sonnet-4-20250514
-
-# Use API key authentication
-ANTHROPIC_API_KEY=sk-ant-... codey
 
 # Enable debug logging
 codey --debug
@@ -55,36 +54,27 @@ Copy `config.example.toml` to `~/.config/codey/config.toml` and customize:
 model = "claude-sonnet-4-20250514"
 max_tokens = 8192
 
-[auth]
-method = "oauth"  # or "api_key"
-# api_key = "sk-ant-..."
-
 [ui]
 theme = "base16-ocean.dark"
-auto_scroll = true
-show_tokens = true
 ```
 
 ## Keybindings
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+Enter` | Send message |
-| `Enter` | New line in input |
+| `Enter` | Send message |
+| `Shift+Enter` | New line in input |
 | `Ctrl+C` | Quit |
-| `Ctrl+L` | Clear chat |
 | `Esc` | Clear input |
 | `Up/Down` | Scroll chat (when input empty: history) |
 | `PageUp/PageDown` | Page scroll |
 
-### Permission Dialog
+### Tool Approval
 
 | Key | Action |
 |-----|--------|
-| `y` / `Enter` | Allow |
-| `n` / `Esc` | Deny |
-| `a` | Allow for session |
-| `Tab` / `Arrow keys` | Navigate options |
+| `y` | Allow |
+| `n` | Deny |
 
 ## Tools
 
@@ -92,52 +82,22 @@ Codey provides five core tools:
 
 ### read_file
 Read file contents with optional line ranges.
-```
-read_file(path, start_line?, end_line?)
-```
 
 ### write_file
 Create new files (fails if file exists).
-```
-write_file(path, content)
-```
 
 ### edit_file
 Apply search/replace edits to existing files.
-```
-edit_file(path, edits: [{old_string, new_string}])
-```
 
 ### shell
 Execute bash commands with optional working directory.
-```
-shell(command, working_dir?)
-```
 
 ### fetch_url
 Fetch content from URLs (HTTP/HTTPS only).
-```
-fetch_url(url, max_length?)
-```
 
-## Authentication
+## Session Persistence
 
-### OAuth (Recommended for Claude Max/Pro)
-
-1. Run `codey`
-2. Visit the displayed URL
-3. Enter the code shown
-4. Tokens are saved to `~/.config/codey/auth.json`
-
-### API Key
-
-Set the `ANTHROPIC_API_KEY` environment variable or configure in `config.toml`:
-
-```toml
-[auth]
-method = "api_key"
-api_key = "sk-ant-..."
-```
+Sessions are automatically saved to `.codey/transcript.json` in the working directory. Use `codey --continue` to resume a previous session with full context restoration including tool call history.
 
 ## License
 
