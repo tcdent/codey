@@ -17,8 +17,8 @@ git clone --depth 1 --branch "$GENAI_TAG" --quiet \
 cp -r "$TEMP_DIR/genai" "$OUTPUT_DIR"
 
 echo "Applying patches..."
-patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/anthropic-extra-headers.patch"
-patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/streamer-thinking-fix.patch"
+# patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/anthropic-extra-headers.patch"
+patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/thinking-blocks-tool-use.patch"
 
 touch "$OUTPUT_DIR/.patched"
 echo "Done."

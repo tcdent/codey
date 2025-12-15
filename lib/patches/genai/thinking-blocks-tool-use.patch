@@ -1,0 +1,470 @@
+diff --git a/src/adapter/adapters/anthropic/adapter_impl.rs b/src/adapter/adapters/anthropic/adapter_impl.rs
+index 505a3f3..46a219f 100644
+--- a/src/adapter/adapters/anthropic/adapter_impl.rs
++++ b/src/adapter/adapters/anthropic/adapter_impl.rs
+@@ -88,12 +88,17 @@ impl Adapter for AnthropicAdapter {
+ 		let url = Self::get_service_url(&model, service_type, endpoint)?;
+ 
+ 		// -- headers
+-		let headers = Headers::from(vec![
++		let mut headers = Headers::from(vec![
+ 			// headers
+ 			("x-api-key".to_string(), api_key),
+ 			("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string()),
+ 		]);
+ 
++		// Merge extra headers from chat options (allows adding anthropic-beta for interleaved thinking)
++		if let Some(extra_headers) = options_set.extra_headers() {
++			headers.merge_with(extra_headers);
++		}
++
+ 		// -- Parts
+ 		let AnthropicRequestParts {
+ 			system,
+@@ -451,6 +456,8 @@ impl AnthropicAdapter {
+ 										"tool_use_id": tool_response.call_id,
+ 									}));
+ 								}
++								// Thinking is not valid in user content; skip gracefully.
++								ContentPart::Thinking(_) => {}
+ 							}
+ 						}
+ 						let values = apply_cache_control_to_parts(is_cache_control, values);
+@@ -458,14 +465,24 @@ impl AnthropicAdapter {
+ 					}
+ 				}
+ 
+-				// Assistant can mix text and tool_use entries.
++				// Assistant can mix text, thinking, and tool_use entries.
+ 				ChatRole::Assistant => {
+ 					let mut values: Vec<Value> = Vec::new();
+ 					let mut has_tool_use = false;
+ 					let mut has_text = false;
++					let mut has_thinking = false;
+ 
+ 					for part in msg.content {
+ 						match part {
++							ContentPart::Thinking(thinking) => {
++								has_thinking = true;
++								// Thinking blocks must be passed back with signature for tool use
++								values.push(json!({
++									"type": "thinking",
++									"thinking": thinking.thinking,
++									"signature": thinking.signature,
++								}));
++							}
+ 							ContentPart::Text(text) => {
+ 								has_text = true;
+ 								values.push(json!({"type": "text", "text": text}));
+@@ -486,7 +503,7 @@ impl AnthropicAdapter {
+ 						}
+ 					}
+ 
+-					if !has_tool_use && has_text && !is_cache_control && values.len() == 1 {
++					if !has_tool_use && !has_thinking && has_text && !is_cache_control && values.len() == 1 {
+ 						// Optimize to simple string when it's only one text part and no cache control.
+ 						let text = values
+ 							.first()
+diff --git a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/anthropic/streamer.rs
+index 843f484..d8551c4 100644
+--- a/src/adapter/adapters/anthropic/streamer.rs
++++ b/src/adapter/adapters/anthropic/streamer.rs
+@@ -1,6 +1,6 @@
+ use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions};
+ use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
+-use crate::chat::{ChatOptionsSet, ToolCall, Usage};
++use crate::chat::{ChatOptionsSet, Thinking, ToolCall, Usage};
+ use crate::{Error, ModelIden, Result};
+ use reqwest_eventsource::{Event, EventSource};
+ use serde_json::Value;
+@@ -23,7 +23,7 @@ pub struct AnthropicStreamer {
+ enum InProgressBlock {
+ 	Text,
+ 	ToolUse { id: String, name: String, input: String },
+-	Thinking,
++	Thinking { content: String, signature: String },
+ }
+ 
+ impl AnthropicStreamer {
+@@ -71,7 +71,10 @@ impl futures::Stream for AnthropicStreamer {
+ 
+ 							match data.x_get_str("/content_block/type") {
+ 								Ok("text") => self.in_progress_block = InProgressBlock::Text,
+-								Ok("thinking") => self.in_progress_block = InProgressBlock::Thinking,
++								Ok("thinking") => self.in_progress_block = InProgressBlock::Thinking {
++									content: String::new(),
++									signature: String::new(),
++								},
+ 								Ok("tool_use") => {
+ 									self.in_progress_block = InProgressBlock::ToolUse {
+ 										id: data.x_take("/content_block/id")?,
+@@ -114,18 +117,46 @@ impl futures::Stream for AnthropicStreamer {
+ 									input.push_str(data.x_get_str("/delta/partial_json")?);
+ 									continue;
+ 								}
+-								InProgressBlock::Thinking => {
+-									let thinking: String = data.x_take("/delta/thinking")?;
+-
+-									// Add to the captured_thinking if chat options say so
+-									if self.options.capture_reasoning_content {
+-										match self.captured_data.reasoning_content {
+-											Some(ref mut r) => r.push_str(&thinking),
+-											None => self.captured_data.reasoning_content = Some(thinking.clone()),
++								InProgressBlock::Thinking { content, signature } => {
++									// Check delta type - can be thinking_delta or signature_delta
++									match data.x_get_str("/delta/type") {
++										Ok("thinking_delta") => {
++											if let Ok(thinking) = data.x_take::<String>("/delta/thinking") {
++												content.push_str(&thinking);
++												// Add to the captured_thinking if chat options say so
++												if self.options.capture_reasoning_content {
++													match self.captured_data.reasoning_content {
++														Some(ref mut r) => r.push_str(&thinking),
++														None => self.captured_data.reasoning_content = Some(thinking.clone()),
++													}
++												}
++												return Poll::Ready(Some(Ok(InterStreamEvent::ReasoningChunk(thinking))));
++											}
++										}
++										Ok("signature_delta") => {
++											// Capture the signature for the thinking block
++											if let Ok(sig) = data.x_take::<String>("/delta/signature") {
++												signature.push_str(&sig);
++											}
++											continue;
++										}
++										_ => {
++											// Fallback: try to get thinking directly (older format)
++											if let Ok(thinking) = data.x_take::<String>("/delta/thinking") {
++												content.push_str(&thinking);
++												if self.options.capture_reasoning_content {
++													match self.captured_data.reasoning_content {
++														Some(ref mut r) => r.push_str(&thinking),
++														None => self.captured_data.reasoning_content = Some(thinking.clone()),
++													}
++												}
++												return Poll::Ready(Some(Ok(InterStreamEvent::ReasoningChunk(thinking))));
++											}
++											tracing::debug!("Thinking block delta without expected content: {:?}", data);
++											continue;
+ 										}
+ 									}
+-
+-									return Poll::Ready(Some(Ok(InterStreamEvent::ReasoningChunk(thinking))));
++									continue;
+ 								}
+ 							}
+ 						}
+@@ -148,6 +179,15 @@ impl futures::Stream for AnthropicStreamer {
+ 
+ 									return Poll::Ready(Some(Ok(InterStreamEvent::ToolCallChunk(tc))));
+ 								}
++								InProgressBlock::Thinking { content, signature } => {
++									// Capture the complete thinking block with signature
++									// This is needed for tool use - must be passed back to API
++									let thinking = Thinking::new(content, signature);
++									match self.captured_data.thinking_blocks {
++										Some(ref mut blocks) => blocks.push(thinking),
++										None => self.captured_data.thinking_blocks = Some(vec![thinking]),
++									}
++								}
+ 								_ => {
+ 									// no-op for remaining block types
+ 								}
+@@ -182,6 +222,7 @@ impl futures::Stream for AnthropicStreamer {
+ 								captured_text_content: self.captured_data.content.take(),
+ 								captured_reasoning_content: self.captured_data.reasoning_content.take(),
+ 								captured_tool_calls: self.captured_data.tool_calls.take(),
++								captured_thinking_blocks: self.captured_data.thinking_blocks.take(),
+ 							};
+ 
+ 							// TODO: Need to capture the data as needed
+@@ -193,7 +234,14 @@ impl futures::Stream for AnthropicStreamer {
+ 					}
+ 				}
+ 				Some(Err(err)) => {
+-					tracing::error!("Error: {}", err);
++					// Extract response body for status code errors
++					if let reqwest_eventsource::Error::InvalidStatusCode(status, response) = err {
++						let body = futures::executor::block_on(response.text()).unwrap_or_default();
++						return Poll::Ready(Some(Err(Error::ApiError {
++							status: status.as_u16(),
++							body,
++						})));
++					}
+ 					return Poll::Ready(Some(Err(Error::ReqwestEventSource(err.into()))));
+ 				}
+ 				None => return Poll::Ready(None),
+diff --git a/src/adapter/adapters/cohere/streamer.rs b/src/adapter/adapters/cohere/streamer.rs
+index c92bcb0..dc57b50 100644
+--- a/src/adapter/adapters/cohere/streamer.rs
++++ b/src/adapter/adapters/cohere/streamer.rs
+@@ -108,6 +108,7 @@ impl futures::Stream for CohereStreamer {
+ 										captured_text_content: self.captured_data.content.take(),
+ 										captured_reasoning_content: self.captured_data.reasoning_content.take(),
+ 										captured_tool_calls: self.captured_data.tool_calls.take(),
++										captured_thinking_blocks: None,
+ 									};
+ 
+ 									InterStreamEvent::End(inter_stream_end)
+diff --git a/src/adapter/adapters/gemini/adapter_impl.rs b/src/adapter/adapters/gemini/adapter_impl.rs
+index e232e82..3f1f8d3 100644
+--- a/src/adapter/adapters/gemini/adapter_impl.rs
++++ b/src/adapter/adapters/gemini/adapter_impl.rs
+@@ -458,6 +458,8 @@ impl GeminiAdapter {
+ 									}
+ 								}));
+ 							}
++							// Thinking is not supported by Gemini; skip
++							ContentPart::Thinking(_) => {}
+ 						}
+ 					}
+ 
+@@ -479,6 +481,7 @@ impl GeminiAdapter {
+ 							// Ignore unsupported parts for Assistant role
+ 							ContentPart::Binary(_) => {}
+ 							ContentPart::ToolResponse(_) => {}
++							ContentPart::Thinking(_) => {}
+ 						}
+ 					}
+ 					if !parts_values.is_empty() {
+diff --git a/src/adapter/adapters/gemini/streamer.rs b/src/adapter/adapters/gemini/streamer.rs
+index c076ab0..715c720 100644
+--- a/src/adapter/adapters/gemini/streamer.rs
++++ b/src/adapter/adapters/gemini/streamer.rs
+@@ -55,6 +55,7 @@ impl futures::Stream for GeminiStreamer {
+ 								captured_text_content: self.captured_data.content.take(),
+ 								captured_reasoning_content: self.captured_data.reasoning_content.take(),
+ 								captured_tool_calls: self.captured_data.tool_calls.take(),
++								captured_thinking_blocks: None,
+ 							};
+ 
+ 							InterStreamEvent::End(inter_stream_end)
+diff --git a/src/adapter/adapters/openai/adapter_impl.rs b/src/adapter/adapters/openai/adapter_impl.rs
+index 3ea3116..7bb85c9 100644
+--- a/src/adapter/adapters/openai/adapter_impl.rs
++++ b/src/adapter/adapters/openai/adapter_impl.rs
+@@ -479,6 +479,8 @@ impl OpenAIAdapter {
+ 								// TODO: Probably need to warn if it is a ToolCalls type of content
+ 								ContentPart::ToolCall(_) => (),
+ 								ContentPart::ToolResponse(_) => (),
++								// Thinking is Anthropic-specific; skip for OpenAI
++								ContentPart::Thinking(_) => (),
+ 							}
+ 						}
+ 						messages.push(json! ({"role": "user", "content": values}));
+@@ -508,6 +510,8 @@ impl OpenAIAdapter {
+ 							// TODO: Probably need towarn on this one (probably need to add binary here)
+ 							ContentPart::Binary(_) => (),
+ 							ContentPart::ToolResponse(_) => (),
++							// Thinking is Anthropic-specific; skip for OpenAI
++							ContentPart::Thinking(_) => (),
+ 						}
+ 					}
+ 					let content = texts.join("\n\n");
+diff --git a/src/adapter/adapters/openai/streamer.rs b/src/adapter/adapters/openai/streamer.rs
+index 65d4d44..15b3a9d 100644
+--- a/src/adapter/adapters/openai/streamer.rs
++++ b/src/adapter/adapters/openai/streamer.rs
+@@ -100,6 +100,7 @@ impl futures::Stream for OpenAIStreamer {
+ 							captured_text_content: self.captured_data.content.take(),
+ 							captured_reasoning_content: self.captured_data.reasoning_content.take(),
+ 							captured_tool_calls,
++							captured_thinking_blocks: None,
+ 						};
+ 
+ 						return Poll::Ready(Some(Ok(InterStreamEvent::End(inter_stream_end))));
+diff --git a/src/adapter/adapters/openai_resp/adapter_impl.rs b/src/adapter/adapters/openai_resp/adapter_impl.rs
+index 51fa543..a7f11d2 100644
+--- a/src/adapter/adapters/openai_resp/adapter_impl.rs
++++ b/src/adapter/adapters/openai_resp/adapter_impl.rs
+@@ -394,6 +394,8 @@ impl OpenAIRespAdapter {
+ 								// TODO: Probably need to warn if it is a ToolCalls type of content
+ 								ContentPart::ToolCall(_) => (),
+ 								ContentPart::ToolResponse(_) => (),
++								// Thinking is Anthropic-specific; skip for OpenAI
++								ContentPart::Thinking(_) => (),
+ 							}
+ 						}
+ 						input_items.push(json! ({"role": "user", "content": values}));
+@@ -436,6 +438,8 @@ impl OpenAIRespAdapter {
+ 							// TODO: Probably need towarn on this one (probably need to add binary here)
+ 							ContentPart::Binary(_) => (),
+ 							ContentPart::ToolResponse(_) => (),
++							// Thinking is Anthropic-specific; skip for OpenAI
++							ContentPart::Thinking(_) => (),
+ 						}
+ 					}
+ 
+diff --git a/src/adapter/adapters/support.rs b/src/adapter/adapters/support.rs
+index 98712f7..5f4e8b4 100644
+--- a/src/adapter/adapters/support.rs
++++ b/src/adapter/adapters/support.rs
+@@ -2,7 +2,7 @@
+ //! It should be private to the `crate::adapter::adapters` module.
+ 
+ use crate::ModelIden;
+-use crate::chat::{ChatOptionsSet, Usage};
++use crate::chat::{ChatOptionsSet, Thinking, Usage};
+ use crate::resolver::AuthData;
+ use crate::{Error, Result};
+ 
+@@ -46,6 +46,7 @@ pub struct StreamerCapturedData {
+ 	pub content: Option<String>,
+ 	pub reasoning_content: Option<String>,
+ 	pub tool_calls: Option<Vec<crate::chat::ToolCall>>,
++	pub thinking_blocks: Option<Vec<Thinking>>,
+ }
+ 
+ // endregion: --- Streamer Captured Data
+diff --git a/src/adapter/inter_stream.rs b/src/adapter/inter_stream.rs
+index 8b58ed5..3313131 100644
+--- a/src/adapter/inter_stream.rs
++++ b/src/adapter/inter_stream.rs
+@@ -5,7 +5,7 @@
+ //!
+ //! NOTE: This might be removed at some point as it may not be needed, and we could go directly to the GenAI stream.
+ 
+-use crate::chat::Usage;
++use crate::chat::{Thinking, Usage};
+ 
+ #[derive(Debug, Default)]
+ pub struct InterStreamEnd {
+@@ -20,6 +20,9 @@ pub struct InterStreamEnd {
+ 
+ 	// When `ChatOptions..capture_tool_calls == true`
+ 	pub captured_tool_calls: Option<Vec<crate::chat::ToolCall>>,
++
++	// Captured thinking blocks with signatures (for Anthropic extended thinking with tool use)
++	pub captured_thinking_blocks: Option<Vec<Thinking>>,
+ }
+ 
+ /// Intermediary StreamEvent
+diff --git a/src/chat/chat_stream.rs b/src/chat/chat_stream.rs
+index 15bf9d4..867b21b 100644
+--- a/src/chat/chat_stream.rs
++++ b/src/chat/chat_stream.rs
+@@ -1,5 +1,5 @@
+ use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
+-use crate::chat::{MessageContent, ToolCall, Usage};
++use crate::chat::{MessageContent, Thinking, ToolCall, Usage};
+ use futures::Stream;
+ use serde::{Deserialize, Serialize};
+ use std::pin::Pin;
+@@ -109,6 +109,10 @@ pub struct StreamEnd {
+ 
+ 	/// Captured reasoning content if `ChatOptions.capture_reasoning` is enabled.
+ 	pub captured_reasoning_content: Option<String>,
++
++	/// Captured thinking blocks with signatures (for Anthropic extended thinking with tool use).
++	/// Must be passed back to the API when continuing after tool execution.
++	pub captured_thinking_blocks: Option<Vec<Thinking>>,
+ }
+ 
+ impl From<InterStreamEnd> for StreamEnd {
+@@ -136,6 +140,7 @@ impl From<InterStreamEnd> for StreamEnd {
+ 			captured_usage: inter_end.captured_usage,
+ 			captured_content,
+ 			captured_reasoning_content: inter_end.captured_reasoning_content,
++			captured_thinking_blocks: inter_end.captured_thinking_blocks,
+ 		}
+ 	}
+ }
+diff --git a/src/chat/content_part.rs b/src/chat/content_part.rs
+index 9b71d62..34cb5cc 100644
+--- a/src/chat/content_part.rs
++++ b/src/chat/content_part.rs
+@@ -21,6 +21,11 @@ pub enum ContentPart {
+ 
+ 	#[from]
+ 	ToolResponse(ToolResponse),
++
++	/// Thinking block from extended thinking (Anthropic).
++	/// Must be preserved and passed back to API during tool use.
++	#[from]
++	Thinking(Thinking),
+ }
+ 
+ /// Constructors
+@@ -136,6 +141,24 @@ impl ContentPart {
+ 			None
+ 		}
+ 	}
++
++	/// Borrow the thinking block if present.
++	pub fn as_thinking(&self) -> Option<&Thinking> {
++		if let ContentPart::Thinking(thinking) = self {
++			Some(thinking)
++		} else {
++			None
++		}
++	}
++
++	/// Extract the thinking block, consuming the part.
++	pub fn into_thinking(self) -> Option<Thinking> {
++		if let ContentPart::Thinking(thinking) = self {
++			Some(thinking)
++		} else {
++			None
++		}
++	}
+ }
+ 
+ /// is_.. Accessors
+@@ -179,6 +202,11 @@ impl ContentPart {
+ 	pub fn is_tool_response(&self) -> bool {
+ 		matches!(self, ContentPart::ToolResponse(_))
+ 	}
++
++	/// Returns true if this part contains a thinking block.
++	pub fn is_thinking(&self) -> bool {
++		matches!(self, ContentPart::Thinking(_))
++	}
+ }
+ 
+ // endregion: --- Content Part
+@@ -255,6 +283,30 @@ pub enum BinarySource {
+ 
+ // endregion: --- BinarySource
+ 
++// region:    --- Thinking
++
++/// Thinking block from extended thinking (Anthropic Claude).
++/// Contains the model's internal reasoning and a signature for verification.
++#[derive(Debug, Clone, Serialize, Deserialize)]
++pub struct Thinking {
++	/// The thinking content (internal reasoning).
++	pub thinking: String,
++	/// Cryptographic signature to verify the thinking block was generated by Claude.
++	pub signature: String,
++}
++
++impl Thinking {
++	/// Create a new Thinking block.
++	pub fn new(thinking: impl Into<String>, signature: impl Into<String>) -> Self {
++		Self {
++			thinking: thinking.into(),
++			signature: signature.into(),
++		}
++	}
++}
++
++// endregion: --- Thinking
++
+ // No `Local` location; this would require handling errors like "file not found" etc.
+ // Such a file can be easily provided by the user as Base64, and we can implement a convenient
+ // TryFrom<File> to Base64 version. All LLMs accept local images only as Base64.
+diff --git a/src/error.rs b/src/error.rs
+index 745e1b0..44b1469 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -118,6 +118,9 @@ pub enum Error {
+ 	#[display("Reqwest EventSource error: {_0}")]
+ 	ReqwestEventSource(Box<reqwest_eventsource::Error>),
+ 
++	#[display("API error ({status}): {body}")]
++	ApiError { status: u16, body: String },
++
+ 	#[display("Serde JSON error: {_0}")]
+ 	#[from]
+ 	SerdeJson(serde_json::Error),

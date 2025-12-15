@@ -4,14 +4,6 @@ use crate::transcript::{Role, Status, TextBlock, ThinkingBlock, Transcript, Turn
 use crate::tools::ToolRegistry;
 use crate::ui::{ChatView, ConnectionStatus, InputBox};
 
-/// Tracks the currently active block during streaming
-enum ActiveBlock {
-    None,
-    Text(usize),
-    Thinking(usize),
-    Tool(usize),
-}
-
 use anyhow::{Context, Result};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind},
@@ -31,9 +23,113 @@ const APP_NAME: &str = "Codey";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const TRANSCRIPT_DIR: &str = ".codey";
 const TRANSCRIPT_FILE: &str = "transcript.json";
-
-/// Minimum time between frames (~60fps)
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
+
+/// Tracks the currently active block during streaming
+enum ActiveBlock {
+    None,
+    Text(usize),
+    Thinking(usize),
+    Tool(usize),
+}
+
+/// Input modes determine which keybindings are active
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputMode {
+    Normal,
+    Streaming,
+    ToolApproval,
+}
+
+/// Actions that can be triggered by key events
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Action {
+    InsertChar(char),
+    InsertNewline,
+    DeleteBack,
+    DeleteForward,
+    CursorLeft,
+    CursorRight,
+    CursorHome,
+    CursorEnd,
+    Submit,
+    ClearInput,
+    HistoryPrev,
+    HistoryNext,
+    ScrollUp,
+    ScrollDown,
+    PageUp,
+    PageDown,
+    ClearTranscript,
+    Interrupt,
+    Quit,
+    ApproveTool,
+    DenyTool,
+    ApproveToolSession,
+}
+
+/// Map a key event to an action based on the current input mode
+fn map_key(mode: InputMode, key: KeyEvent) -> Option<Action> {
+    // Global shortcuts (work in all modes)
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => return Some(Action::Quit),
+            _ => {}
+        }
+    }
+
+    match mode {
+        InputMode::Normal => map_key_normal(key),
+        InputMode::Streaming => map_key_streaming(key),
+        InputMode::ToolApproval => map_key_tool_approval(key),
+    }
+}
+
+fn map_key_normal(key: KeyEvent) -> Option<Action> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        return match key.code {
+            KeyCode::Char('l') => Some(Action::ClearTranscript),
+            KeyCode::Up => Some(Action::ScrollUp),
+            KeyCode::Down => Some(Action::ScrollDown),
+            _ => None,
+        };
+    }
+
+    match key.code {
+        KeyCode::Char(c) => Some(Action::InsertChar(c)),
+        KeyCode::Backspace => Some(Action::DeleteBack),
+        KeyCode::Delete => Some(Action::DeleteForward),
+        KeyCode::Left => Some(Action::CursorLeft),
+        KeyCode::Right => Some(Action::CursorRight),
+        KeyCode::Home => Some(Action::CursorHome),
+        KeyCode::End => Some(Action::CursorEnd),
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) 
+                      || key.modifiers.contains(KeyModifiers::ALT) => Some(Action::InsertNewline),
+        KeyCode::Enter => Some(Action::Submit),
+        KeyCode::Esc => Some(Action::ClearInput),
+        KeyCode::Up => Some(Action::HistoryPrev),
+        KeyCode::Down => Some(Action::HistoryNext),
+        KeyCode::PageUp => Some(Action::PageUp),
+        KeyCode::PageDown => Some(Action::PageDown),
+        _ => None,
+    }
+}
+
+fn map_key_streaming(key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Esc => Some(Action::Interrupt),
+        _ => None,
+    }
+}
+
+fn map_key_tool_approval(key: KeyEvent) -> Option<Action> {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Enter => Some(Action::ApproveTool),
+        KeyCode::Char('n') | KeyCode::Esc => Some(Action::DenyTool),
+        KeyCode::Char('a') => Some(Action::ApproveToolSession),
+        _ => None,
+    }
+}
 
 const SYSTEM_PROMPT: &str = r#"You are Codey, an AI coding assistant running in a terminal interface.
 
@@ -87,6 +183,8 @@ pub struct App {
     message_queue: Vec<(String, TurnId)>,
     /// Last render time for frame rate limiting
     last_render: Instant,
+    /// Alert message to display (cleared on next user input)
+    alert: Option<String>,
 }
 
 impl App {
@@ -133,6 +231,7 @@ impl App {
             continue_session,
             message_queue: Vec::new(),
             last_render: Instant::now(),
+            alert: None,
         })
     }
 
@@ -177,11 +276,12 @@ impl App {
             }
 
             // Block until we get an event - no polling when idle
-            // This is the key optimization: we don't spin or redraw when nothing happens
             if event::poll(std::time::Duration::from_secs(60))? {
                 let needs_redraw = match event::read()? {
                     Event::Key(key) => {
-                        self.handle_key_event(key);
+                        if let Some(action) = map_key(InputMode::Normal, key) {
+                            self.handle_action(action);
+                        }
                         true
                     }
                     Event::Mouse(mouse) => {
@@ -207,15 +307,21 @@ impl App {
 
     /// Draw the UI with synchronized updates to prevent tearing
     fn draw(&mut self) -> Result<()> {
+        use ratatui::style::{Color, Style};
+        use ratatui::widgets::Paragraph;
+        
         self.last_render = Instant::now();
 
         let chat_widget = self.chat.widget(&self.transcript);
         let input_widget = self.input.widget(&self.config.general.model);
+        let alert = self.alert.clone();
 
         // Calculate input height based on content, with min 3 and max half screen
         let input_height = self.input.required_height(self.terminal.size()?.width);
         let max_input_height = self.terminal.size()?.height / 2;
         let input_height = input_height.min(max_input_height).max(5);
+        
+        let alert_height = if alert.is_some() { 1 } else { 0 };
 
         // Begin synchronized update - terminal buffers all changes
         queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
@@ -224,13 +330,20 @@ impl App {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Min(5),              // Chat area (minimum)
+                    Constraint::Min(5),               // Chat area (minimum)
                     Constraint::Length(input_height), // Input area (dynamic)
+                    Constraint::Length(alert_height), // Alert bar (0 or 1)
                 ])
                 .split(frame.area());
 
             frame.render_widget(chat_widget, chunks[0]);
             frame.render_widget(input_widget, chunks[1]);
+            
+            if let Some(ref msg) = alert {
+                let alert_widget = Paragraph::new(msg.as_str())
+                    .style(Style::default().fg(Color::Red));
+                frame.render_widget(alert_widget, chunks[2]);
+            }
         })?;
 
         // End synchronized update - terminal renders atomically
@@ -251,92 +364,49 @@ impl App {
         }
     }
 
-    /// Handle a key event
-    fn handle_key_event(&mut self, key: KeyEvent) {
-        // Global shortcuts
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Char('c') => {
-                    self.should_quit = true;
-                    return;
-                }
-                KeyCode::Char('l') => {
-                    self.transcript.clear();
-                    return;
-                }
-                KeyCode::Up => {
-                    self.chat.scroll_up();
-                    return;
-                }
-                KeyCode::Down => {
-                    self.chat.scroll_down();
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        // Input handling - always enabled now
-        match key.code {
-            KeyCode::Char(c) => {
-                self.input.insert_char(c);
-            }
-            KeyCode::Backspace => {
-                self.input.delete_char();
-            }
-            KeyCode::Delete => {
-                self.input.delete_char_forward();
-            }
-            KeyCode::Left => {
-                self.input.move_cursor_left();
-            }
-            KeyCode::Right => {
-                self.input.move_cursor_right();
-            }
-            KeyCode::Home => {
-                self.input.move_cursor_start();
-            }
-            KeyCode::End => {
-                self.input.move_cursor_end();
-            }
-            KeyCode::Enter => {
-                if key.modifiers.contains(KeyModifiers::SHIFT)
-                    || key.modifiers.contains(KeyModifiers::ALT)
-                {
-                    // Shift+Enter or Alt+Enter inserts newline
-                    self.input.insert_newline();
-                } else {
-                    // Enter queues message
-                    let content = self.input.submit();
-                    if !content.trim().is_empty() {
-                        self.queue_message(content);
-                    }
+    /// Handle an action
+    fn handle_action(&mut self, action: Action) {
+        // Clear alert on any input action
+        self.alert = None;
+        
+        match action {
+            Action::InsertChar(c) => self.input.insert_char(c),
+            Action::InsertNewline => self.input.insert_newline(),
+            Action::DeleteBack => self.input.delete_char(),
+            Action::DeleteForward => self.input.delete_char_forward(),
+            Action::CursorLeft => self.input.move_cursor_left(),
+            Action::CursorRight => self.input.move_cursor_right(),
+            Action::CursorHome => self.input.move_cursor_start(),
+            Action::CursorEnd => self.input.move_cursor_end(),
+            Action::Submit => {
+                let content = self.input.submit();
+                if !content.trim().is_empty() {
+                    self.queue_message(content);
                 }
             }
-            KeyCode::Esc => {
-                self.input.clear();
-            }
-            KeyCode::Up => {
+            Action::ClearInput => self.input.clear(),
+            Action::HistoryPrev => {
                 if self.input.content().is_empty() {
                     self.input.history_prev();
                 } else {
                     self.chat.scroll_up();
                 }
             }
-            KeyCode::Down => {
+            Action::HistoryNext => {
                 if self.input.content().is_empty() {
                     self.input.history_next();
                 } else {
                     self.chat.scroll_down();
                 }
             }
-            KeyCode::PageUp => {
-                self.chat.page_up(10);
-            }
-            KeyCode::PageDown => {
-                self.chat.page_down(10);
-            }
-            _ => {}
+            Action::ScrollUp => self.chat.scroll_up(),
+            Action::ScrollDown => self.chat.scroll_down(),
+            Action::PageUp => self.chat.page_up(10),
+            Action::PageDown => self.chat.page_down(10),
+            Action::ClearTranscript => self.transcript.clear(),
+            Action::Quit => self.should_quit = true,
+            // These are handled in specific contexts
+            Action::Interrupt | Action::ApproveTool | Action::DenyTool | Action::ApproveToolSession => {}
         }
     }
 
@@ -345,34 +415,34 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.chat.scroll_up();
-                self.chat.scroll_up();
-                self.chat.scroll_up();
             }
             MouseEventKind::ScrollDown => {
-                self.chat.scroll_down();
-                self.chat.scroll_down();
                 self.chat.scroll_down();
             }
             _ => {}
         }
     }
 
-    /// Check for interrupt keys (Esc or Ctrl+C) without blocking
+    /// Check for interrupt keys without blocking
     /// Returns true if an interrupt was requested
     fn check_for_interrupt(&mut self) -> bool {
-        if event::poll(Duration::from_millis(0)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                match key.code {
-                    KeyCode::Esc => return true,
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.should_quit = true;
-                        return true;
-                    }
-                    _ => {}
-                }
-            }
+        if !event::poll(Duration::from_millis(0)).unwrap_or(false) {
+            return false;
         }
-        false
+        let Ok(Event::Key(key)) = event::read() else {
+            return false;
+        };
+        let Some(action) = map_key(InputMode::Streaming, key) else {
+            return false;
+        };
+        match action {
+            Action::Interrupt => true,
+            Action::Quit => {
+                self.should_quit = true;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Queue a message for sending
@@ -417,8 +487,14 @@ impl App {
 
             // Use timeout on stream.next() to allow periodic interrupt checks
             let step = match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
-                Ok(Some(s)) => s,
-                Ok(None) => break, // Stream ended
+                Ok(Some(s)) => {
+                    tracing::debug!("Stream step: {:?}", std::mem::discriminant(&s));
+                    s
+                }
+                Ok(None) => {
+                    tracing::debug!("Stream ended (None)");
+                    break;
+                }
                 Err(_) => continue, // Timeout, go back to interrupt check
             };
 
@@ -442,7 +518,7 @@ impl App {
                     if let Some(turn) = self.transcript.get_mut(turn_id) {
                         match active_block {
                             ActiveBlock::Thinking(idx) => turn.append_to_block(idx, &text),
-                            _ => active_block = ActiveBlock::Thinking(turn.add_block(Box::new(ThinkingBlock::new(&text)))),
+                            _ => active_block = ActiveBlock::Thinking(turn.add_block(Box::new(ThinkingBlock::new(&text, "")))),
                         }
                     }
                     self.draw()?;
@@ -474,11 +550,13 @@ impl App {
                     self.draw()?;
 
                     // Tell agent what to do and get the result
+                    let tool_result = stream.decide_tool(decision).await;
+                    tracing::debug!("decide_tool returned: {:?}", tool_result.as_ref().map(|s| std::mem::discriminant(s)));
                     if let Some(AgentStep::ToolResult {
                         result,
                         is_error,
                         ..
-                    }) = stream.decide_tool(decision).await
+                    }) = tool_result
                     {
                         if let ActiveBlock::Tool(idx) = active_block {
                             if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id)) {
@@ -499,11 +577,40 @@ impl App {
                         ConnectionStatus::Error(format!("Retry {} - {}", attempt, error));
                     self.draw()?;
                 }
-                AgentStep::Finished { usage } => {
+                AgentStep::Finished { usage, thinking_signatures } => {
                     self.usage = usage;
                     self.status = ConnectionStatus::Connected;
+                    
+                    // Update thinking blocks with their signatures
+                    if let Some(turn_id) = current_turn_id {
+                        if let Some(turn) = self.transcript.get_mut(turn_id) {
+                            let mut sig_iter = thinking_signatures.into_iter();
+                            for block in &mut turn.content {
+                                // If this block has a signature field (is a ThinkingBlock)
+                                if block.signature().is_some() {
+                                    if let Some(sig) = sig_iter.next() {
+                                        block.set_signature(&sig);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 AgentStep::Error(msg) => {
+                    // Try to parse API error JSON to extract message
+                    let alert_msg = if let Some(start) = msg.find('{') {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&msg[start..]) {
+                            json["error"]["message"]
+                                .as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| msg.clone())
+                        } else {
+                            msg.clone()
+                        }
+                    } else {
+                        msg.clone()
+                    };
+                    self.alert = Some(alert_msg);
                     self.status = ConnectionStatus::Error(msg);
                 }
             }
@@ -533,18 +640,20 @@ impl App {
         loop {
             if event::poll(std::time::Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Char('y') | KeyCode::Enter => {
-                            return Ok(ToolDecision::Approve);
+                    if let Some(action) = map_key(InputMode::ToolApproval, key) {
+                        match action {
+                            Action::ApproveTool => return Ok(ToolDecision::Approve),
+                            Action::DenyTool => return Ok(ToolDecision::Deny),
+                            Action::ApproveToolSession => {
+                                // TODO: implement allow for session
+                                return Ok(ToolDecision::Approve);
+                            }
+                            Action::Quit => {
+                                self.should_quit = true;
+                                return Ok(ToolDecision::Deny);
+                            }
+                            _ => {}
                         }
-                        KeyCode::Char('n') | KeyCode::Esc => {
-                            return Ok(ToolDecision::Deny);
-                        }
-                        KeyCode::Char('a') => {
-                            // TODO: implement allow for session
-                            return Ok(ToolDecision::Approve);
-                        }
-                        _ => {}
                     }
                 }
             }

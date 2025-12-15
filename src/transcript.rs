@@ -80,6 +80,14 @@ pub trait Block: Send + Sync {
     fn result(&self) -> Option<&str> {
         None
     }
+
+    /// Get thinking signature for restoring agent context
+    fn signature(&self) -> Option<&str> {
+        None
+    }
+
+    /// Set the thinking signature (called after streaming completes)
+    fn set_signature(&mut self, _signature: &str) {}
 }
 
 /// Simple text content
@@ -128,11 +136,17 @@ impl Block for TextBlock {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingBlock {
     pub text: String,
+    /// Signature for verification (required by Anthropic API for tool use continuation)
+    #[serde(default)]
+    pub signature: String,
 }
 
 impl ThinkingBlock {
-    pub fn new(text: impl Into<String>) -> Self {
-        Self { text: text.into() }
+    pub fn new(text: impl Into<String>, signature: impl Into<String>) -> Self {
+        Self { 
+            text: text.into(),
+            signature: signature.into(),
+        }
     }
 }
 
@@ -173,6 +187,14 @@ impl Block for ThinkingBlock {
 
     fn text_content(&self) -> Option<&str> {
         Some(&self.text)
+    }
+
+    fn signature(&self) -> Option<&str> {
+        Some(&self.signature)
+    }
+
+    fn set_signature(&mut self, signature: &str) {
+        self.signature = signature.to_string();
     }
 }
 

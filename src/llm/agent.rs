@@ -6,7 +6,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use genai::chat::{
     ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent, ChatStreamResponse,
-    ContentPart, MessageContent, ReasoningEffort, Tool, ToolCall, ToolResponse,
+    ContentPart, MessageContent, ReasoningEffort, Thinking, Tool, ToolCall, ToolResponse,
 };
 use genai::{Client, Headers};
 use std::time::Duration;
@@ -46,7 +46,11 @@ pub enum AgentStep {
     /// Retrying after error
     Retrying { attempt: u32, error: String },
     /// Agent finished processing this message
-    Finished { usage: Usage },
+    Finished { 
+        usage: Usage,
+        /// Signatures for thinking blocks (in order they appeared)
+        thinking_signatures: Vec<String>,
+    },
     /// Error occurred
     Error(String),
 }
@@ -117,42 +121,48 @@ impl Agent {
                     }
                 }
                 Role::Assistant => {
-                    // For assistant turns, collect text and tool calls
+                    // Build message content: thinking first, then text, then tool calls
+                    let mut content = MessageContent::default();
+                    let mut has_content = false;
+                    
+                    // Process blocks in order, but thinking blocks must come first
+                    // First pass: add thinking blocks
+                    for block in &turn.content {
+                        if let (Some(text), Some(sig)) = (block.text_content(), block.signature()) {
+                            content = content.append(ContentPart::Thinking(Thinking::new(text, sig)));
+                            has_content = true;
+                        }
+                    }
+                    
+                    // Second pass: add text blocks (those without signatures)
                     let text: String = turn.content
                         .iter()
+                        .filter(|block| block.signature().is_none())
                         .filter_map(|block| block.text_content())
                         .collect::<Vec<_>>()
                         .join("\n");
                     
-                    // Collect tool calls from blocks
-                    let tool_calls: Vec<ToolCall> = turn.content
-                        .iter()
-                        .filter_map(|block| {
-                            let call_id = block.call_id()?;
-                            let tool_name = block.tool_name()?;
-                            let params = block.params()?;
-                            Some(ToolCall {
+                    if !text.is_empty() {
+                        content = content.append(ContentPart::Text(text));
+                        has_content = true;
+                    }
+                    
+                    // Third pass: add tool calls
+                    for block in &turn.content {
+                        if let (Some(call_id), Some(tool_name), Some(params)) = 
+                            (block.call_id(), block.tool_name(), block.params()) 
+                        {
+                            let tc = ToolCall {
                                 call_id: call_id.to_string(),
                                 fn_name: tool_name.to_string(),
                                 fn_arguments: params.clone(),
-                            })
-                        })
-                        .collect();
+                            };
+                            content = content.append(ContentPart::ToolCall(tc));
+                            has_content = true;
+                        }
+                    }
                     
-                    if !text.is_empty() || !tool_calls.is_empty() {
-                        // Build message content with text and tool calls
-                        let content = if tool_calls.is_empty() {
-                            MessageContent::from_text(&text)
-                        } else if text.is_empty() {
-                            MessageContent::from(tool_calls.clone())
-                        } else {
-                            let mut content = MessageContent::from_text(&text);
-                            for tc in &tool_calls {
-                                content = content.append(ContentPart::ToolCall(tc.clone()));
-                            }
-                            content
-                        };
-                        
+                    if has_content {
                         self.messages.push(ChatMessage {
                             role: ChatRole::Assistant,
                             content,
@@ -203,11 +213,13 @@ enum StreamState {
         full_text: String,
         full_thinking: String,
         tool_calls: Vec<ToolCall>,
+        thinking_blocks: Vec<Thinking>,
     },
     /// Waiting for tool approval decision
     AwaitingToolDecision {
         assistant_text: String,
         all_tool_calls: Vec<ToolCall>,
+        thinking_blocks: Vec<Thinking>,
         current_tool_index: usize,
         tool_responses: Vec<ToolResponse>,
     },
@@ -305,6 +317,7 @@ impl<'a> AgentStream<'a> {
                                 full_text: String::new(),
                                 full_thinking: String::new(),
                                 tool_calls: Vec::new(),
+                                thinking_blocks: Vec::new(),
                             };
                             // Continue to process streaming state
                         }
@@ -323,6 +336,7 @@ impl<'a> AgentStream<'a> {
                     full_text,
                     full_thinking,
                     tool_calls,
+                    thinking_blocks,
                 } => {
                     while let Some(result) = stream.next().await {
                         match result {
@@ -337,12 +351,16 @@ impl<'a> AgentStream<'a> {
                                     full_thinking.push_str(&chunk.content);
                                     return Some(AgentStep::ThinkingDelta(chunk.content));
                                 }
-                                ChatStreamEvent::End(end) => {
+                                ChatStreamEvent::End(mut end) => {
                                     if let Some(ref usage) = end.captured_usage {
                                         self.agent.total_usage.input_tokens +=
                                             usage.prompt_tokens.unwrap_or(0) as u32;
                                         self.agent.total_usage.output_tokens +=
                                             usage.completion_tokens.unwrap_or(0) as u32;
+                                    }
+                                    // Capture thinking blocks first (before consuming end)
+                                    if let Some(captured) = end.captured_thinking_blocks.take() {
+                                        *thinking_blocks = captured;
                                     }
                                     if let Some(captured) = end.captured_into_tool_calls() {
                                         *tool_calls = captured;
@@ -360,15 +378,20 @@ impl<'a> AgentStream<'a> {
 
                     // Stream ended, process results
                     let full_text = std::mem::take(full_text);
-                    let _full_thinking = std::mem::take(full_thinking); // TODO: store in message history for interleaved thinking
+                    let _full_thinking = std::mem::take(full_thinking);
                     let tool_calls = std::mem::take(tool_calls);
+                    let thinking_blocks = std::mem::take(thinking_blocks);
 
                     if tool_calls.is_empty() {
                         // No tool calls, just add text message
                         self.agent.messages.push(ChatMessage::assistant(&full_text));
+                        let signatures: Vec<String> = thinking_blocks.iter()
+                            .map(|t| t.signature.clone())
+                            .collect();
                         self.state = StreamState::Finished;
                         return Some(AgentStep::Finished {
                             usage: self.agent.total_usage,
+                            thinking_signatures: signatures,
                         });
                     }
 
@@ -376,6 +399,7 @@ impl<'a> AgentStream<'a> {
                     self.state = StreamState::AwaitingToolDecision {
                         assistant_text: full_text,
                         all_tool_calls: tool_calls,
+                        thinking_blocks,
                         current_tool_index: 0,
                         tool_responses: Vec::new(),
                     };
@@ -383,7 +407,7 @@ impl<'a> AgentStream<'a> {
                 }
 
                 StreamState::AwaitingToolDecision {
-                    all_tool_calls,
+                    ref all_tool_calls,
                     current_tool_index,
                     ..
                 } => {
@@ -411,6 +435,7 @@ impl<'a> AgentStream<'a> {
             StreamState::AwaitingToolDecision {
                 assistant_text,
                 all_tool_calls,
+                thinking_blocks,
                 current_tool_index,
                 mut tool_responses,
             } => {
@@ -440,21 +465,36 @@ impl<'a> AgentStream<'a> {
                     self.state = StreamState::AwaitingToolDecision {
                         assistant_text,
                         all_tool_calls,
+                        thinking_blocks,
                         current_tool_index: next_index,
                         tool_responses,
                     };
                 } else {
-                    // All tools processed - build the assistant message with tool calls
-                    // Only include text if non-empty
-                    let content = if assistant_text.is_empty() {
-                        MessageContent::from(all_tool_calls.clone())
-                    } else {
-                        let mut content = MessageContent::from_text(&assistant_text);
-                        for tc in &all_tool_calls {
-                            content = content.append(ContentPart::ToolCall(tc.clone()));
-                        }
-                        content
-                    };
+                    // All tools processed - build the assistant message with thinking + text + tool calls
+                    // Per Anthropic docs: thinking blocks must come first, then text/tool_use
+                    let mut content = MessageContent::default();
+                    
+                    debug!("Building assistant message with {} thinking blocks, text={}, {} tool calls",
+                        thinking_blocks.len(),
+                        !assistant_text.is_empty(),
+                        all_tool_calls.len());
+                    
+                    // Add thinking blocks first (required for extended thinking with tool use)
+                    for thinking in &thinking_blocks {
+                        debug!("Adding thinking block: signature len={}", thinking.signature.len());
+                        content = content.append(ContentPart::Thinking(thinking.clone()));
+                    }
+                    
+                    // Add text if non-empty
+                    if !assistant_text.is_empty() {
+                        content = content.append(ContentPart::Text(assistant_text));
+                    }
+                    
+                    // Add tool calls
+                    for tc in &all_tool_calls {
+                        content = content.append(ContentPart::ToolCall(tc.clone()));
+                    }
+                    
                     self.agent.messages.push(ChatMessage {
                         role: ChatRole::Assistant,
                         content,
