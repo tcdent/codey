@@ -64,6 +64,21 @@ pub trait Block: Send + Sync {
     fn text_content(&self) -> Option<&str> {
         None
     }
+
+    /// Get the tool name (for restoring agent context)
+    fn tool_name(&self) -> Option<&str> {
+        None
+    }
+
+    /// Get the tool params (for restoring agent context)
+    fn params(&self) -> Option<&serde_json::Value> {
+        None
+    }
+
+    /// Get the tool result (for restoring agent context)
+    fn result(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Simple text content
@@ -204,6 +219,18 @@ impl Block for ToolBlock {
 
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
+    }
+
+    fn tool_name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
+
+    fn params(&self) -> Option<&serde_json::Value> {
+        Some(&self.params)
+    }
+
+    fn result(&self) -> Option<&str> {
+        self.result.as_deref()
     }
 }
 
@@ -461,6 +488,40 @@ mod tests {
         // Verify text content is preserved
         let text = loaded.turns()[0].content[0].text_content();
         assert_eq!(text, Some("Hello"));
+
+        // Clean up
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_transcript_save_load_with_tool_blocks() {
+        let mut transcript = Transcript::new();
+        transcript.add(Role::User, TextBlock::new("Run ls"));
+        
+        // Add an assistant turn with a tool block
+        let mut tool_block = ToolBlock::new("call_123", "shell", serde_json::json!({"command": "ls"}));
+        tool_block.set_status(Status::Success);
+        tool_block.set_result("file1.txt\nfile2.txt".to_string());
+        transcript.add_boxed(Role::Assistant, Box::new(tool_block));
+
+        // Save to temp file
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join("codepal_test_tool_transcript.json");
+
+        transcript.save(&path).expect("Failed to save transcript");
+
+        // Load and verify
+        let loaded = Transcript::load(&path).expect("Failed to load transcript");
+        assert_eq!(loaded.turns().len(), 2);
+        
+        // Verify tool block is preserved
+        let tool_turn = &loaded.turns()[1];
+        assert_eq!(tool_turn.role, Role::Assistant);
+        let block = &tool_turn.content[0];
+        assert_eq!(block.tool_name(), Some("shell"));
+        assert_eq!(block.call_id(), Some("call_123"));
+        assert!(block.params().is_some());
+        assert_eq!(block.result(), Some("file1.txt\nfile2.txt"));
 
         // Clean up
         let _ = std::fs::remove_file(path);

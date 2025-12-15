@@ -17,31 +17,27 @@ use tokio::process::Command;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShellBlock {
     pub call_id: String,
-    pub command: String,
-    pub working_dir: Option<String>,
+    pub tool_name: String,
+    pub params: serde_json::Value,
     pub status: Status,
     pub output: Option<String>,
 }
 
 impl ShellBlock {
-    pub fn new(call_id: impl Into<String>, command: impl Into<String>, working_dir: Option<String>) -> Self {
+    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value) -> Self {
         Self {
             call_id: call_id.into(),
-            command: command.into(),
-            working_dir,
+            tool_name: tool_name.into(),
+            params,
             status: Status::Pending,
             output: None,
         }
     }
 
     /// Create from tool params JSON
-    pub fn from_params(call_id: &str, params: &serde_json::Value) -> Option<Self> {
-        let command = params.get("command")?.as_str()?;
-        let working_dir = params
-            .get("working_dir")
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        Some(Self::new(call_id, command, working_dir))
+    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value) -> Option<Self> {
+        let _: ShellParams = serde_json::from_value(params.clone()).ok()?;
+        Some(Self::new(call_id, tool_name, params))
     }
 }
 
@@ -58,15 +54,18 @@ impl Block for ShellBlock {
             Status::Denied => ("⊘", Color::DarkGray),
         };
 
+        let command = self.params["command"].as_str().unwrap_or("");
+        let working_dir = self.params.get("working_dir").and_then(|v| v.as_str());
+
         // Shell icon and command
         lines.push(Line::from(vec![
             Span::styled(format!("{} ", icon), Style::default().fg(color)),
             Span::styled("$ ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&self.command, Style::default().fg(Color::White)),
+            Span::styled(command, Style::default().fg(Color::White)),
         ]));
 
         // Working directory if set
-        if let Some(ref dir) = self.working_dir {
+        if let Some(dir) = working_dir {
             lines.push(Line::from(Span::styled(
                 format!("  in {}", dir),
                 Style::default().fg(Color::DarkGray),
@@ -108,6 +107,18 @@ impl Block for ShellBlock {
 
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
+    }
+
+    fn tool_name(&self) -> Option<&str> {
+        Some(&self.tool_name)
+    }
+
+    fn params(&self) -> Option<&serde_json::Value> {
+        Some(&self.params)
+    }
+
+    fn result(&self) -> Option<&str> {
+        self.output.as_deref()
     }
 }
 
@@ -165,7 +176,7 @@ impl Tool for ShellTool {
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
-        if let Some(block) = ShellBlock::from_params(call_id, &params) {
+        if let Some(block) = ShellBlock::from_params(call_id, self.name(), params.clone()) {
             Box::new(block)
         } else {
             // Fallback to generic if params don't parse

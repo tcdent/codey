@@ -216,9 +216,24 @@ impl Widget for InputBoxWidget<'_> {
 
         // Render cursor
         if inner.width > 0 && inner.height > 0 {
-            // Calculate cursor position in the wrapped text
-            let cursor_x = self.state.cursor_position % inner.width as usize;
-            let cursor_y = self.state.cursor_position / inner.width as usize;
+            // Calculate cursor position accounting for unicode and newlines
+            let text_before_cursor = &self.state.content[..self.state.cursor_position];
+            let mut cursor_x: usize = 0;
+            let mut cursor_y: usize = 0;
+
+            for ch in text_before_cursor.chars() {
+                if ch == '\n' {
+                    cursor_y += 1;
+                    cursor_x = 0;
+                } else {
+                    cursor_x += 1;
+                    // Handle line wrapping
+                    if cursor_x >= inner.width as usize {
+                        cursor_y += 1;
+                        cursor_x = 0;
+                    }
+                }
+            }
 
             if cursor_y < inner.height as usize {
                 let x = inner.x + cursor_x as u16;

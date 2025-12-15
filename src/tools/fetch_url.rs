@@ -15,24 +15,26 @@ use serde_json::json;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchUrlBlock {
     pub call_id: String,
-    pub url: String,
+    pub tool_name: String,
+    pub params: serde_json::Value,
     pub status: Status,
     pub result: Option<String>,
 }
 
 impl FetchUrlBlock {
-    pub fn new(call_id: impl Into<String>, url: impl Into<String>) -> Self {
+    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value) -> Self {
         Self {
             call_id: call_id.into(),
-            url: url.into(),
+            tool_name: tool_name.into(),
+            params,
             status: Status::Pending,
             result: None,
         }
     }
 
-    pub fn from_params(call_id: &str, params: &serde_json::Value) -> Option<Self> {
-        let url = params.get("url")?.as_str()?;
-        Some(Self::new(call_id, url))
+    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value) -> Option<Self> {
+        let _: FetchUrlParams = serde_json::from_value(params.clone()).ok()?;
+        Some(Self::new(call_id, tool_name, params))
     }
 }
 
@@ -49,10 +51,12 @@ impl Block for FetchUrlBlock {
             Status::Denied => ("⊘", Color::DarkGray),
         };
 
+        let url = self.params["url"].as_str().unwrap_or("");
+
         lines.push(Line::from(vec![
             Span::styled(format!("{} ", icon), Style::default().fg(color)),
             Span::styled("fetch ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&self.url, Style::default().fg(Color::Blue)),
+            Span::styled(url, Style::default().fg(Color::Blue)),
         ]));
 
         if self.status == Status::Pending {
@@ -87,6 +91,18 @@ impl Block for FetchUrlBlock {
 
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
+    }
+
+    fn tool_name(&self) -> Option<&str> {
+        Some(&self.tool_name)
+    }
+
+    fn params(&self) -> Option<&serde_json::Value> {
+        Some(&self.params)
+    }
+
+    fn result(&self) -> Option<&str> {
+        self.result.as_deref()
     }
 }
 
@@ -153,7 +169,7 @@ impl Tool for FetchUrlTool {
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
-        if let Some(block) = FetchUrlBlock::from_params(call_id, &params) {
+        if let Some(block) = FetchUrlBlock::from_params(call_id, self.name(), params.clone()) {
             Box::new(block)
         } else {
             Box::new(ToolBlock::new(call_id, self.name(), params))

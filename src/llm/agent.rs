@@ -87,24 +87,77 @@ impl Agent {
         self.messages.clear();
         
         for turn in transcript.turns() {
-            // Collect all text from text blocks in this turn
-            let text: String = turn.content
-                .iter()
-                .filter_map(|block| block.text_content())
-                .collect::<Vec<_>>()
-                .join("\n");
-            
-            if text.is_empty() {
-                continue;
+            match turn.role {
+                Role::User | Role::System => {
+                    // For user/system turns, just collect text
+                    let text: String = turn.content
+                        .iter()
+                        .filter_map(|block| block.text_content())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    
+                    if !text.is_empty() {
+                        let message = if turn.role == Role::User {
+                            ChatMessage::user(text)
+                        } else {
+                            ChatMessage::system(text)
+                        };
+                        self.messages.push(message);
+                    }
+                }
+                Role::Assistant => {
+                    // For assistant turns, collect text and tool calls
+                    let text: String = turn.content
+                        .iter()
+                        .filter_map(|block| block.text_content())
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    
+                    // Collect tool calls from blocks
+                    let tool_calls: Vec<ToolCall> = turn.content
+                        .iter()
+                        .filter_map(|block| {
+                            let call_id = block.call_id()?;
+                            let tool_name = block.tool_name()?;
+                            let params = block.params()?;
+                            Some(ToolCall {
+                                call_id: call_id.to_string(),
+                                fn_name: tool_name.to_string(),
+                                fn_arguments: params.clone(),
+                            })
+                        })
+                        .collect();
+                    
+                    if !text.is_empty() || !tool_calls.is_empty() {
+                        // Build message content with text and tool calls
+                        let content = if tool_calls.is_empty() {
+                            MessageContent::from_text(&text)
+                        } else if text.is_empty() {
+                            MessageContent::from(tool_calls.clone())
+                        } else {
+                            let mut content = MessageContent::from_text(&text);
+                            for tc in &tool_calls {
+                                content = content.append(ContentPart::ToolCall(tc.clone()));
+                            }
+                            content
+                        };
+                        
+                        self.messages.push(ChatMessage {
+                            role: ChatRole::Assistant,
+                            content,
+                            options: None,
+                        });
+                        
+                        // Add tool responses for each tool call
+                        for block in &turn.content {
+                            if let (Some(call_id), Some(result)) = (block.call_id(), block.result()) {
+                                let response = ToolResponse::new(call_id.to_string(), result.to_string());
+                                self.messages.push(ChatMessage::from(response));
+                            }
+                        }
+                    }
+                }
             }
-            
-            let message = match turn.role {
-                Role::User => ChatMessage::user(text),
-                Role::Assistant => ChatMessage::assistant(text),
-                Role::System => ChatMessage::system(text),
-            };
-            
-            self.messages.push(message);
         }
         
         info!("Restored {} messages from transcript", self.messages.len());

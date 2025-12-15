@@ -17,27 +17,26 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteFileBlock {
     pub call_id: String,
-    pub path: String,
-    pub content_len: usize,
+    pub tool_name: String,
+    pub params: serde_json::Value,
     pub status: Status,
     pub result: Option<String>,
 }
 
 impl WriteFileBlock {
-    pub fn new(call_id: impl Into<String>, path: impl Into<String>, content_len: usize) -> Self {
+    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value) -> Self {
         Self {
             call_id: call_id.into(),
-            path: path.into(),
-            content_len,
+            tool_name: tool_name.into(),
+            params,
             status: Status::Pending,
             result: None,
         }
     }
 
-    pub fn from_params(call_id: &str, params: &serde_json::Value) -> Option<Self> {
-        let path = params.get("path")?.as_str()?;
-        let content_len = params.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
-        Some(Self::new(call_id, path, content_len))
+    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value) -> Option<Self> {
+        let _: WriteFileParams = serde_json::from_value(params.clone()).ok()?;
+        Some(Self::new(call_id, tool_name, params))
     }
 }
 
@@ -54,12 +53,15 @@ impl Block for WriteFileBlock {
             Status::Denied => ("⊘", Color::DarkGray),
         };
 
+        let path = self.params["path"].as_str().unwrap_or("");
+        let content_len = self.params.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
+
         lines.push(Line::from(vec![
             Span::styled(format!("{} ", icon), Style::default().fg(color)),
             Span::styled("write ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&self.path, Style::default().fg(Color::Green)),
+            Span::styled(path, Style::default().fg(Color::Green)),
             Span::styled(
-                format!(" ({} bytes)", self.content_len),
+                format!(" ({} bytes)", content_len),
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
@@ -96,6 +98,18 @@ impl Block for WriteFileBlock {
 
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
+    }
+
+    fn tool_name(&self) -> Option<&str> {
+        Some(&self.tool_name)
+    }
+
+    fn params(&self) -> Option<&serde_json::Value> {
+        Some(&self.params)
+    }
+
+    fn result(&self) -> Option<&str> {
+        self.result.as_deref()
     }
 }
 
@@ -137,7 +151,7 @@ impl Tool for WriteFileTool {
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
-        if let Some(block) = WriteFileBlock::from_params(call_id, &params) {
+        if let Some(block) = WriteFileBlock::from_params(call_id, self.name(), params.clone()) {
             Box::new(block)
         } else {
             Box::new(ToolBlock::new(call_id, self.name(), params))
