@@ -141,19 +141,18 @@ impl Block for ThinkingBlock {
     fn render(&self, width: u16) -> Vec<Line<'_>> {
         use ratatui::style::{Color, Style};
 
-        // Render thinking with dimmed style and prefix
-        let prefix = "💭 ";
+        // Render thinking with dimmed style
         let skin = ratskin::RatSkin::default();
         let text = ratskin::RatSkin::parse_text(&self.text);
-        let mut lines = skin.parse(text, width.saturating_sub(prefix.len() as u16));
+        let mut lines = skin.parse(text, width);
 
-        // Add prefix and dim styling to all lines
+        // Apply dim styling to all lines
         let dim_style = Style::default().fg(Color::DarkGray);
         for line in &mut lines {
-            let spans: Vec<_> = std::iter::once(ratatui::text::Span::styled(prefix, dim_style))
-                .chain(line.spans.iter().map(|s| {
-                    ratatui::text::Span::styled(s.content.clone(), dim_style)
-                }))
+            let spans: Vec<_> = line
+                .spans
+                .iter()
+                .map(|s| ratatui::text::Span::styled(s.content.clone(), dim_style))
                 .collect();
             *line = Line::from(spans);
         }

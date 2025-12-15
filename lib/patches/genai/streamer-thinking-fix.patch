@@ -1,0 +1,39 @@
+diff --git a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/anthropic/streamer.rs
+--- a/src/adapter/adapters/anthropic/streamer.rs
++++ b/src/adapter/adapters/anthropic/streamer.rs
+@@ -115,17 +115,26 @@ impl futures::Stream for AnthropicStreamer {
+ 									continue;
+ 								}
+ 								InProgressBlock::Thinking => {
+-									let thinking: String = data.x_take("/delta/thinking")?;
+-
+-									// Add to the captured_thinking if chat options say so
+-									if self.options.capture_reasoning_content {
+-										match self.captured_data.reasoning_content {
+-											Some(ref mut r) => r.push_str(&thinking),
+-											None => self.captured_data.reasoning_content = Some(thinking.clone()),
++									// Try to get thinking delta, but handle cases where it might be missing
++									// (e.g., signature deltas at end of thinking block)
++									match data.x_take::<String>("/delta/thinking") {
++										Ok(thinking) => {
++											// Add to the captured_thinking if chat options say so
++											if self.options.capture_reasoning_content {
++												match self.captured_data.reasoning_content {
++													Some(ref mut r) => r.push_str(&thinking),
++													None => self.captured_data.reasoning_content = Some(thinking.clone()),
++												}
++											}
++											return Poll::Ready(Some(Ok(InterStreamEvent::ReasoningChunk(thinking))));
++										}
++										Err(_) => {
++											// Delta doesn't have thinking content - might be a signature or other type
++											// Just skip it and continue
++											tracing::debug!("Thinking block delta without /delta/thinking: {:?}", data);
++											continue;
+ 										}
+ 									}
+-
+-									return Poll::Ready(Some(Ok(InterStreamEvent::ReasoningChunk(thinking))));
+ 								}
+ 							}
+ 						}
