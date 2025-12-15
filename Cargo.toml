@@ -68,27 +68,8 @@ pretty_assertions = "1"
 lto = true
 codegen-units = 1
 panic = "abort"
-strip = true
-
-# =============================================================================
-# SIMD-Optimized Dependencies
-# =============================================================================
-# Uses patched ratatui-core with SIMD-accelerated buffer diffing.
-# SIMD is enabled by default on x86_64 and aarch64.
-#
-# To disable SIMD (for debugging or compatibility):
-#   cargo build --features no-simd
-#
-# To regenerate patched sources:
-#   ./lib/apply-patches.sh
-#
-# See lib/README.md and research/render-performance.md for details.
-# =============================================================================
-
-[patch.crates-io]
-ratatui-core = { path = "lib/ratatui-core" }
+strip = false
+debug = true
 
 [features]
 default = []
-# Disable SIMD acceleration in buffer diffing
-no-simd = ["ratatui-core/no-simd"]

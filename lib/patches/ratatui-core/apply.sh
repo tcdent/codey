@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PATCHES_DIR="$SCRIPT_DIR/patches"
-OUTPUT_DIR="$SCRIPT_DIR/ratatui-core"
+PATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(dirname "$(dirname "$PATCH_DIR")")"
+OUTPUT_DIR="$LIB_DIR/ratatui-core"
 RATATUI_TAG="ratatui-core-v0.1.0-beta.0"
 
 [ -d "$OUTPUT_DIR" ] && rm -rf "$OUTPUT_DIR"
@@ -17,10 +17,10 @@ git clone --depth 1 --branch "$RATATUI_TAG" --quiet \
 cp -r "$TEMP_DIR/ratatui/ratatui-core" "$OUTPUT_DIR"
 
 echo "Applying patches..."
-cp "$PATCHES_DIR/Cargo.toml.template" "$OUTPUT_DIR/Cargo.toml"
-patch -d "$OUTPUT_DIR" -p1 -s < "$PATCHES_DIR/buffer-mod.patch"
-patch -d "$OUTPUT_DIR" -p1 -s < "$PATCHES_DIR/simd-diff.patch"
-patch -d "$OUTPUT_DIR" -p1 -s < "$PATCHES_DIR/buffer-diff.patch"
+cp "$PATCH_DIR/Cargo.toml.template" "$OUTPUT_DIR/Cargo.toml"
+patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/buffer-mod.patch"
+patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/simd-diff.patch"
+patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/buffer-diff.patch"
 
 touch "$OUTPUT_DIR/.patched"
 echo "Done."

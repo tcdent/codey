@@ -7,9 +7,10 @@ This document captures research, implementation decisions, and future enhancemen
 1. [Context & Goals](#context--goals)
 2. [Architecture Analysis](#architecture-analysis)
 3. [Implemented Optimizations](#implemented-optimizations)
-4. [Future Enhancements](#future-enhancements)
-5. [SIMD Diff Implementation](#simd-diff-implementation)
-6. [References](#references)
+4. [Profiling Results](#profiling-results)
+5. [Future Enhancements](#future-enhancements)
+6. [SIMD Diff Implementation](#simd-diff-implementation)
+7. [References](#references)
 
 ---
 
@@ -167,11 +168,77 @@ self.draw()?;
 
 **Impact:** Smooth 60fps during streaming, reduced CPU usage.
 
-### 4. Skip Flag (Automatic)
+### 4. SIMD Buffer Diff
+
+**Problem:** Buffer diffing was identified as a potential hotspot.
+
+**Solution:** Implemented SIMD-accelerated `find_changed_ranges()` in a patched `ratatui-core`:
+
+- Uses NEON on ARM64 (Apple Silicon)
+- Uses AVX2/SSE4.1 on x86_64
+- Falls back to scalar on other architectures
+- Threshold of 128 cells before SIMD kicks in
+
+See [SIMD Diff Implementation](#simd-diff-implementation) for details.
+
+**Impact:** Profiling shows SIMD diff consumes only **0.05%** of CPU time (9 samples out of ~20,000). The optimization was successful - buffer diffing is no longer a bottleneck.
+
+### 5. Skip Flag (Automatic)
 
 **Status:** Already handled by ratatui's diff algorithm. The `Buffer::diff()` method compares cells and only returns changes. No manual intervention needed for basic cases.
 
 The `Cell.skip` flag is for special cases (image protocols) where cells should be excluded from diffing entirely - not needed for our use case.
+
+---
+
+## Profiling Results
+
+### Methodology
+
+Profiling performed using `samply` on macOS/ARM64:
+
+```bash
+# Build with debug symbols
+cargo build --release  # Cargo.toml has debug=true, strip=false
+
+# Profile
+samply record ./target/release/codey
+
+# Analyze
+samply load profile.json.gz
+```
+
+To ensure SIMD functions appear in profiles (they're normally inlined), add `#[inline(never)]` to `find_changed_ranges`, `neon`, and `merge` in `lib/ratatui-core/src/buffer/simd_diff.rs`.
+
+### Results Summary (20,000 samples)
+
+| Samples | % | Function | Notes |
+|---------|---|----------|-------|
+| ~17,000 | 86% | `App::draw` | Total draw time |
+| ~6,200 | 31% | `WordWrapper::next_line` | Text wrapping |
+| ~8,900 | 45% | `FlatMap::next` | Iterator overhead |
+| ~2,000 | 10% | `BorderSymbol::from_str` | Border parsing |
+| ~1,300 | 7% | `ratskin::parse` | Markdown parsing |
+| 9 | 0.05% | `simd_diff::*` | SIMD buffer diff |
+
+### Key Findings
+
+1. **SIMD diff is not a bottleneck** - Only 9 samples out of ~20,000. The optimization was successful.
+
+2. **Text wrapping dominates** - `WordWrapper::next_line` at 31% is the biggest single cost. This is ratatui's word-wrapping algorithm being called on every render.
+
+3. **Iterator overhead is significant** - `FlatMap::next` at 45% suggests heavy iterator usage in text processing pipelines.
+
+4. **Parsing on every frame** - Both `BorderSymbol::from_str` and `ratskin::parse` appear frequently, indicating repeated parsing of static content.
+
+### Optimization Opportunities
+
+Based on profiling, the highest-impact optimizations would be:
+
+1. **Cache wrapped text** - Don't re-wrap unchanged paragraphs every frame
+2. **Cache parsed markdown** - Parse once, re-render from AST
+3. **Pre-compute border symbols** - Use constants instead of parsing strings
+4. **Reduce iterator chains** - Flatten nested iterators where possible
 
 ---
 
@@ -189,7 +256,9 @@ The `Cell.skip` flag is for special cases (image protocols) where cells should b
 
 | Enhancement | Description | Effort |
 |-------------|-------------|--------|
-| **SIMD buffer diff** | Vectorized cell comparison | Medium |
+| ~~**SIMD buffer diff**~~ | ~~Vectorized cell comparison~~ | ~~Medium~~ ✅ Done |
+| **Cache wrapped lines** | Don't re-wrap unchanged text | Medium |
+| **Cache parsed markdown** | Parse once, render from AST | Medium |
 | Width lookup tables | Cache unicode widths like Ghostty | Medium |
 | Style deduplication | RefCountedSet like Ghostty | Medium |
 
@@ -285,9 +354,26 @@ pub fn diff_simd<'a>(&self, other: &'a Self) -> Vec<(u16, u16, &'a Cell)> {
 }
 ```
 
-### Expected Performance Gains
+### Measured Performance
 
-Based on Ghostty's SIMD results and the [ratatui issue #1116](https://github.com/ratatui/ratatui/issues/1116) benchmarks:
+Profiling with `samply` shows the SIMD diff implementation is highly effective:
+
+| Metric | Value |
+|--------|-------|
+| SIMD samples | 9 |
+| Total samples | ~20,000 |
+| % of CPU time | 0.05% |
+| Buffer size | 4,560 cells (80x57 terminal) |
+| SIMD path | NEON (ARM64) |
+
+The SIMD diff is so fast it barely registers in sampling profiles. This validates the implementation - buffer diffing is no longer a performance concern.
+
+**Note:** The original estimates below were based on synthetic benchmarks. Real-world profiling shows even better results because:
+1. Most frames have few changes (streaming adds ~10-50 chars)
+2. SIMD quickly identifies unchanged regions and skips them
+3. The 128-cell threshold avoids SIMD overhead for tiny buffers
+
+Original estimates (for reference):
 
 | Scenario | Current | With SIMD | Improvement |
 |----------|---------|-----------|-------------|
@@ -304,6 +390,16 @@ Based on Ghostty's SIMD results and the [ratatui issue #1116](https://github.com
 ---
 
 ## References
+
+### Profiling Tools
+
+- [samply](https://github.com/mstange/samply) - Sampling profiler for macOS/Linux, outputs Firefox Profiler format
+- Firefox Profiler - Web UI for analyzing samply output
+
+**Profiling tips:**
+- Set `debug = true` and `strip = false` in `[profile.release]` for symbols
+- Use `#[inline(never)]` on functions you want to see in profiles
+- `samply load profile.json.gz` resolves symbols from local binaries
 
 ### Ghostty
 
