@@ -10,6 +10,7 @@ repository = "https://github.com/tcdent/codey"
 [dependencies]
 # TUI
 ratatui = "0.30.0-beta.0"
+ratatui-core = "0.1.0-beta.0"  # Explicit dep for feature forwarding
 tui-scrollview = "0.6.0-alpha.0"
 crossterm = "0.28"
 
@@ -70,16 +71,24 @@ panic = "abort"
 strip = true
 
 # =============================================================================
-# SIMD-Optimized Dependencies (Optional)
+# SIMD-Optimized Dependencies
 # =============================================================================
-# To enable SIMD-accelerated buffer diffing:
+# Uses patched ratatui-core with SIMD-accelerated buffer diffing.
+# SIMD is enabled by default on x86_64 and aarch64.
 #
-# 1. Run: ./lib/apply-patches.sh
-# 2. Uncomment the [patch.crates-io] section below
-# 3. Rebuild: cargo build --release
+# To disable SIMD (for debugging or compatibility):
+#   cargo build --features no-simd
+#
+# To regenerate patched sources:
+#   ./lib/apply-patches.sh
 #
 # See lib/README.md and research/render-performance.md for details.
 # =============================================================================
 
-# [patch.crates-io]
-# ratatui-core = { path = "lib/ratatui-core", features = ["simd-diff"] }
+[patch.crates-io]
+ratatui-core = { path = "lib/ratatui-core" }
+
+[features]
+default = []
+# Disable SIMD acceleration in buffer diffing
+no-simd = ["ratatui-core/no-simd"]
