@@ -1,0 +1,57 @@
+--- a/src/buffer/buffer.rs	2025-12-15 06:21:06.444011287 +0000
++++ b/src/buffer/buffer.rs	2025-12-15 06:21:06.489011735 +0000
+@@ -482,6 +482,54 @@
+     /// Updates: `0: a, 1: コ` (double width symbol at index 1 - skip index 2)
+     /// ```
+     pub fn diff<'a>(&self, other: &'a Self) -> Vec<(u16, u16, &'a Cell)> {
++        #[cfg(all(not(feature = "no-simd"), any(target_arch = "x86_64", target_arch = "aarch64")))]
++        {
++            return self.diff_simd(other);
++        }
++        #[cfg(any(feature = "no-simd", not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
++        {
++            self.diff_scalar(other)
++        }
++    }
++
++    #[cfg(all(not(feature = "no-simd"), any(target_arch = "x86_64", target_arch = "aarch64")))]
++    fn diff_simd<'a>(&self, other: &'a Self) -> Vec<(u16, u16, &'a Cell)> {
++        let (prev, next) = (&self.content, &other.content);
++        let changed = super::simd_diff::find_changed_ranges(prev, next);
++        let mut updates: Vec<(u16, u16, &Cell)> = Vec::with_capacity(
++            changed.iter().map(|(s, e)| e - s).sum::<usize>() / 4 + 1
++        );
++        for (range_start, range_end) in changed {
++            let mut invalidated: usize = 0;
++            let mut to_skip: usize = 0;
++            for i in range_start..range_end.min(next.len()).min(prev.len()) {
++                let (current, previous) = (&next[i], &prev[i]);
++                if !current.skip && (current != previous || invalidated > 0) && to_skip == 0 {
++                    let (x, y) = self.pos_of(i);
++                    updates.push((x, y, &next[i]));
++                    let symbol = current.symbol();
++                    let cell_width = symbol.width();
++                    if cell_width > 1 && symbol.chars().any(|c| c == '\u{FE0F}') {
++                        for k in 1..cell_width {
++                            let j = i + k;
++                            if j >= next.len() || j >= prev.len() { break; }
++                            if !next[j].skip && prev[j] != next[j] {
++                                let (tx, ty) = self.pos_of(j);
++                                updates.push((tx, ty, &next[j]));
++                            }
++                        }
++                    }
++                }
++                to_skip = current.symbol().width().saturating_sub(1);
++                invalidated = cmp::max(current.symbol().width(), previous.symbol().width())
++                    .max(invalidated).saturating_sub(1);
++            }
++        }
++        updates
++    }
++
++    #[cfg(any(feature = "no-simd", not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
++    fn diff_scalar<'a>(&self, other: &'a Self) -> Vec<(u16, u16, &'a Cell)> {
+         let previous_buffer = &self.content;
+         let next_buffer = &other.content;
+ 
