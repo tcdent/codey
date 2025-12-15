@@ -6,14 +6,13 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Widget},
+    widgets::Widget,
 };
 
 /// Connection status
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectionStatus {
     Connected,
-    Connecting,
     Disconnected,
     Error(String),
 }
@@ -22,7 +21,6 @@ impl ConnectionStatus {
     pub fn symbol(&self) -> &str {
         match self {
             ConnectionStatus::Connected => "●",
-            ConnectionStatus::Connecting => "◐",
             ConnectionStatus::Disconnected => "○",
             ConnectionStatus::Error(_) => "✗",
         }
@@ -31,7 +29,6 @@ impl ConnectionStatus {
     pub fn color(&self) -> Color {
         match self {
             ConnectionStatus::Connected => Color::Green,
-            ConnectionStatus::Connecting => Color::Yellow,
             ConnectionStatus::Disconnected => Color::Gray,
             ConnectionStatus::Error(_) => Color::Red,
         }
@@ -40,7 +37,6 @@ impl ConnectionStatus {
     pub fn text(&self) -> &str {
         match self {
             ConnectionStatus::Connected => "Connected",
-            ConnectionStatus::Connecting => "Connecting...",
             ConnectionStatus::Disconnected => "Disconnected",
             ConnectionStatus::Error(msg) => msg,
         }

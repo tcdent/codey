@@ -1,12 +1,115 @@
 //! Edit file tool with search/replace
 
 use super::{Tool, ToolResult};
+use crate::message::{render_approval_prompt, render_result, ContentBlock, ToolBlock, Status};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Deserialize;
+use ratatui::{
+    style::{Color, Style},
+    text::{Line, Span},
+};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
 use std::path::Path;
+
+/// Edit file display block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditFileBlock {
+    pub call_id: String,
+    pub path: String,
+    pub edit_count: usize,
+    pub status: Status,
+    pub result: Option<String>,
+}
+
+impl EditFileBlock {
+    pub fn new(call_id: impl Into<String>, path: impl Into<String>, edit_count: usize) -> Self {
+        Self {
+            call_id: call_id.into(),
+            path: path.into(),
+            edit_count,
+            status: Status::Pending,
+            result: None,
+        }
+    }
+
+    pub fn from_params(call_id: &str, params: &serde_json::Value) -> Option<Self> {
+        let path = params.get("path")?.as_str()?;
+        let edit_count = params.get("edits").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        Some(Self::new(call_id, path, edit_count))
+    }
+}
+
+impl ContentBlock for EditFileBlock {
+    fn render(&self, _width: u16) -> Vec<Line<'_>> {
+        let mut lines = Vec::new();
+
+        let (icon, color) = match self.status {
+            Status::Pending => ("?", Color::Yellow),
+            Status::Running => ("⚙", Color::Blue),
+            Status::Success => ("✓", Color::Green),
+            Status::Error => ("✗", Color::Red),
+            Status::Denied => ("⊘", Color::DarkGray),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", icon), Style::default().fg(color)),
+            Span::styled("edit ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&self.path, Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(" ({} edit{})", self.edit_count, if self.edit_count == 1 { "" } else { "s" }),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+
+        if self.status == Status::Pending {
+            lines.push(render_approval_prompt());
+        }
+
+        if let Some(ref result) = self.result {
+            lines.extend(render_result(result, 5));
+        }
+
+        if self.status == Status::Denied {
+            lines.push(Line::from(Span::styled(
+                "  Denied by user",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        lines
+    }
+
+    fn status(&self) -> Option<Status> {
+        Some(self.status)
+    }
+
+    fn tool_name(&self) -> Option<&str> {
+        Some("edit_file")
+    }
+
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.call_id)
+    }
+
+    fn approve(&mut self) {
+        self.status = Status::Running;
+    }
+
+    fn deny(&mut self) {
+        self.status = Status::Denied;
+    }
+
+    fn complete(&mut self, result: String, is_error: bool) {
+        self.status = if is_error {
+            Status::Error
+        } else {
+            Status::Success
+        };
+        self.result = Some(result);
+    }
+}
 
 /// Tool for editing existing files with search/replace
 pub struct EditFileTool;
@@ -64,6 +167,14 @@ impl Tool for EditFileTool {
             },
             "required": ["path", "edits"]
         })
+    }
+
+    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn ContentBlock> {
+        if let Some(block) = EditFileBlock::from_params(call_id, &params) {
+            Box::new(block)
+        } else {
+            Box::new(ToolBlock::new(call_id, self.name(), params))
+        }
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<ToolResult> {

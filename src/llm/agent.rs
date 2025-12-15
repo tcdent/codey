@@ -1,360 +1,371 @@
 //! Agent loop for handling conversations with tool execution
 
-use super::client::AnthropicClient;
-use super::stream::{StreamEvent, StreamHandler, StreamedMessage};
-use super::types::*;
-use crate::tools::{ToolRegistry, ToolResult as ToolExecResult};
-use crate::ui::{PermissionHandler, PermissionRequest, PermissionResponse, RiskLevel};
-use anyhow::{Context, Result};
-use tokio::sync::mpsc;
+use crate::message::ContentBlock;
+use crate::tools::ToolRegistry;
+use anyhow::Result;
+use futures::StreamExt;
+use genai::chat::{
+    ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent, ChatStreamResponse,
+    ContentPart, MessageContent, Tool, ToolCall, ToolResponse,
+};
+use genai::Client;
+use std::time::Duration;
+use tracing::{debug, error, info};
 
-/// Agent for handling conversations
-pub struct Agent {
-    client: AnthropicClient,
-    tools: ToolRegistry,
-    messages: Vec<Message>,
-    permission_handler: Box<dyn PermissionHandler>,
-    total_usage: Usage,
+/// Token usage tracking
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Usage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
 }
 
-/// Events emitted by the agent during processing
-#[derive(Debug, Clone)]
-pub enum AgentEvent {
-    /// Streaming text delta
+impl std::ops::AddAssign for Usage {
+    fn add_assign(&mut self, other: Self) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+    }
+}
+
+/// Steps yielded by the agent during processing
+pub enum AgentStep {
+    /// Streaming text chunk
     TextDelta(String),
-    /// Full text message completed
-    TextComplete(String),
-    /// Tool use requested
-    ToolRequested {
-        id: String,
-        name: String,
-        input: serde_json::Value,
+    /// Agent wants to execute a tool, needs approval
+    ToolRequest {
+        call_id: String,
+        block: Box<dyn ContentBlock>,
     },
-    /// Tool execution started (after permission granted)
-    ToolExecuting {
-        id: String,
-        name: String,
-    },
-    /// Tool execution completed
-    ToolCompleted {
-        id: String,
-        name: String,
+    /// Tool finished executing
+    ToolResult {
+        call_id: String,
         result: String,
         is_error: bool,
     },
-    /// Tool execution denied by user
-    ToolDenied {
-        id: String,
-        name: String,
-    },
-    /// Agent finished processing
-    Finished {
-        usage: Usage,
-    },
+    /// Retrying after error
+    Retrying { attempt: u32, error: String },
+    /// Agent finished processing this message
+    Finished { usage: Usage },
     /// Error occurred
     Error(String),
 }
 
+pub use crate::permission::ToolDecision;
+
+/// Agent for handling conversations
+pub struct Agent {
+    client: Client,
+    model: String,
+    max_tokens: u32,
+    max_retries: u32,
+    tools: ToolRegistry,
+    messages: Vec<ChatMessage>,
+    total_usage: Usage,
+}
+
 impl Agent {
-    /// Create a new agent
+    /// Create a new agent with initial messages
     pub fn new(
-        client: AnthropicClient,
+        model: impl Into<String>,
+        max_tokens: u32,
+        max_retries: u32,
+        messages: Vec<ChatMessage>,
         tools: ToolRegistry,
-        permission_handler: Box<dyn PermissionHandler>,
     ) -> Self {
         Self {
-            client,
+            client: Client::default(),
+            model: model.into(),
+            max_tokens,
+            max_retries,
             tools,
-            messages: Vec::new(),
-            permission_handler,
+            messages,
             total_usage: Usage::default(),
         }
     }
 
-    /// Set the system prompt
-    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.client = self.client.with_system_prompt(prompt);
-        self
+    /// Get tool definitions in genai format
+    fn get_tools(&self) -> Vec<Tool> {
+        self.tools
+            .values()
+            .map(|tool| {
+                Tool::new(tool.name())
+                    .with_description(tool.description())
+                    .with_schema(tool.schema())
+            })
+            .collect()
     }
 
-    /// Get the tool definitions for the API
-    fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.definitions()
+    /// Start processing a user message, returns a stream of steps
+    pub fn process_message(&mut self, user_input: &str) -> AgentStream<'_> {
+        self.messages.push(ChatMessage::user(user_input));
+        AgentStream::new(self)
+    }
+}
+
+/// Internal state for the agent stream
+enum StreamState {
+    /// Need to make a new chat API request
+    NeedsChatRequest,
+    /// Currently streaming response from API
+    Streaming {
+        stream: futures::stream::BoxStream<'static, Result<ChatStreamEvent, genai::Error>>,
+        full_text: String,
+        tool_calls: Vec<ToolCall>,
+    },
+    /// Waiting for tool approval decision
+    AwaitingToolDecision {
+        assistant_text: String,
+        all_tool_calls: Vec<ToolCall>,
+        current_tool_index: usize,
+        tool_responses: Vec<ToolResponse>,
+    },
+    /// Processing completed
+    Finished,
+}
+
+/// Stream that yields AgentSteps and accepts ToolDecisions
+pub struct AgentStream<'a> {
+    agent: &'a mut Agent,
+    state: StreamState,
+    tools: Vec<Tool>,
+    chat_options: ChatOptions,
+}
+
+impl<'a> AgentStream<'a> {
+    fn new(agent: &'a mut Agent) -> Self {
+        let tools = agent.get_tools();
+        let chat_options = ChatOptions::default()
+            .with_max_tokens(agent.max_tokens)
+            .with_capture_tool_calls(true);
+
+        Self {
+            agent,
+            state: StreamState::NeedsChatRequest,
+            tools,
+            chat_options,
+        }
     }
 
-    /// Get total token usage
-    pub fn total_usage(&self) -> Usage {
-        self.total_usage
-    }
+    /// Execute a chat request with retry and exponential backoff
+    async fn exec_chat_with_retry(&self) -> Result<ChatStreamResponse, AgentStep> {
+        let request =
+            ChatRequest::new(self.agent.messages.clone())
+                .with_tools(self.tools.clone());
 
-    /// Get current messages
-    pub fn messages(&self) -> &[Message] {
-        &self.messages
-    }
+        info!(
+            "Making chat request with {} messages",
+            self.agent.messages.len()
+        );
+        for (i, msg) in self.agent.messages.iter().enumerate() {
+            debug!("Message {}: role={:?}, content={:?}", i, msg.role, msg.content);
+        }
 
-    /// Clear conversation history
-    pub fn clear_history(&mut self) {
-        self.messages.clear();
-        self.total_usage = Usage::default();
-    }
+        let mut attempt = 0u32;
+        let _delay = Duration::from_millis(500); // TODO: implement exponential backoff
 
-    /// Process a user message with streaming
-    pub async fn process_message(
-        &mut self,
-        user_input: &str,
-        event_tx: mpsc::Sender<AgentEvent>,
-    ) -> Result<()> {
-        // Add user message
-        self.messages.push(Message::user(user_input));
-
-        // Main agent loop
         loop {
-            // Get streaming response
-            let response = self
+            attempt += 1;
+            match self
+                .agent
                 .client
-                .create_message_stream(&self.messages, &self.tool_definitions())
+                .exec_chat_stream(&self.agent.model, request.clone(), Some(&self.chat_options))
                 .await
-                .context("Failed to create message")?;
-
-            // Process stream
-            let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(100);
-            let handler = StreamHandler::new(stream_tx);
-
-            // Spawn stream processing task
-            let stream_handle = tokio::spawn(async move {
-                handler.process(response).await
-            });
-
-            // Build message from stream events
-            let mut streamed_msg = StreamedMessage::new();
-
-            while let Some(event) = stream_rx.recv().await {
-                // Send text deltas to UI
-                if let StreamEvent::TextDelta { ref text, .. } = event {
-                    let _ = event_tx.send(AgentEvent::TextDelta(text.clone())).await;
+            {
+                Ok(resp) => {
+                    info!("Chat request successful");
+                    return Ok(resp);
                 }
-
-                if let StreamEvent::Error { ref message } = event {
-                    let _ = event_tx
-                        .send(AgentEvent::Error(message.clone()))
-                        .await;
-                    return Err(anyhow::anyhow!("Stream error: {}", message));
+                Err(e) => {
+                    let err = format!("{:#}", e);
+                    error!("Chat request failed: {}", err);
+                    if attempt >= self.agent.max_retries {
+                        return Err(AgentStep::Error(format!(
+                            "API error ({}): {}",
+                            self.agent.model, err
+                        )));
+                    }
+                    // Return retry step, caller should call next() again
+                    return Err(AgentStep::Retrying { attempt, error: err });
                 }
-
-                streamed_msg.apply_event(event);
             }
+        }
+    }
 
-            // Wait for stream to complete
-            stream_handle.await??;
-
-            // Update usage
-            self.total_usage += streamed_msg.usage;
-
-            // Check stop reason and handle accordingly
-            let stop_reason = streamed_msg.stop_reason;
-            let content = streamed_msg.into_content();
-
-            // Send text complete event
-            let text: String = content
-                .iter()
-                .filter_map(|c| match c {
-                    Content::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
-
-            if !text.is_empty() {
-                let _ = event_tx.send(AgentEvent::TextComplete(text)).await;
-            }
-
-            // Add assistant message to history
-            self.messages.push(Message::assistant(content.clone()));
-
-            match stop_reason {
-                Some(StopReason::EndTurn) => {
-                    // Finished
-                    let _ = event_tx
-                        .send(AgentEvent::Finished {
-                            usage: self.total_usage,
-                        })
-                        .await;
-                    return Ok(());
+    /// Get the next step from the agent
+    pub async fn next(&mut self) -> Option<AgentStep> {
+        loop {
+            match &mut self.state {
+                StreamState::NeedsChatRequest => {
+                    match self.exec_chat_with_retry().await {
+                        Ok(response) => {
+                            self.state = StreamState::Streaming {
+                                stream: Box::pin(response.stream),
+                                full_text: String::new(),
+                                tool_calls: Vec::new(),
+                            };
+                            // Continue to process streaming state
+                        }
+                        Err(step) => {
+                            // Retrying or Error
+                            if matches!(step, AgentStep::Retrying { .. }) {
+                                // Stay in NeedsChatRequest, will retry on next call
+                            }
+                            return Some(step);
+                        }
+                    }
                 }
-                Some(StopReason::ToolUse) => {
-                    // Extract tool uses and execute
-                    let tool_uses: Vec<ToolUse> = content
-                        .iter()
-                        .filter_map(|c| match c {
-                            Content::ToolUse(tu) => Some(tu.clone()),
-                            _ => None,
-                        })
-                        .collect();
 
-                    let mut tool_results = Vec::new();
-
-                    for tool_use in tool_uses {
-                        // Notify UI of tool request
-                        let _ = event_tx
-                            .send(AgentEvent::ToolRequested {
-                                id: tool_use.id.clone(),
-                                name: tool_use.name.clone(),
-                                input: tool_use.input.clone(),
-                            })
-                            .await;
-
-                        // Request permission
-                        let permission_request = PermissionRequest {
-                            tool_name: tool_use.name.clone(),
-                            params: tool_use.input.clone(),
-                            description: self.format_tool_description(&tool_use),
-                            risk_level: self.get_risk_level(&tool_use.name),
-                        };
-
-                        let permission = self
-                            .permission_handler
-                            .request_permission(permission_request)
-                            .await;
-
-                        match permission {
-                            PermissionResponse::Allow | PermissionResponse::AllowOnce => {
-                                // Execute tool
-                                let _ = event_tx
-                                    .send(AgentEvent::ToolExecuting {
-                                        id: tool_use.id.clone(),
-                                        name: tool_use.name.clone(),
-                                    })
-                                    .await;
-
-                                let result = self
-                                    .tools
-                                    .execute(&tool_use.name, tool_use.input.clone())
-                                    .await;
-
-                                let (content, is_error) = match result {
-                                    Ok(ToolExecResult { content, .. }) => (content, false),
-                                    Err(e) => (format!("Error: {}", e), true),
-                                };
-
-                                let _ = event_tx
-                                    .send(AgentEvent::ToolCompleted {
-                                        id: tool_use.id.clone(),
-                                        name: tool_use.name.clone(),
-                                        result: content.clone(),
-                                        is_error,
-                                    })
-                                    .await;
-
-                                tool_results.push(ToolResult {
-                                    tool_use_id: tool_use.id,
-                                    content,
-                                    is_error,
-                                });
-                            }
-                            PermissionResponse::Deny => {
-                                let _ = event_tx
-                                    .send(AgentEvent::ToolDenied {
-                                        id: tool_use.id.clone(),
-                                        name: tool_use.name.clone(),
-                                    })
-                                    .await;
-
-                                tool_results.push(ToolResult::error(
-                                    tool_use.id,
-                                    "User denied permission to execute this tool",
-                                ));
-                            }
-                            PermissionResponse::AllowForSession => {
-                                // TODO: Implement session-wide permission
-                                // For now, treat as Allow
-                                let result = self
-                                    .tools
-                                    .execute(&tool_use.name, tool_use.input.clone())
-                                    .await;
-
-                                let (content, is_error) = match result {
-                                    Ok(ToolExecResult { content, .. }) => (content, false),
-                                    Err(e) => (format!("Error: {}", e), true),
-                                };
-
-                                tool_results.push(ToolResult {
-                                    tool_use_id: tool_use.id,
-                                    content,
-                                    is_error,
-                                });
+                StreamState::Streaming {
+                    stream,
+                    full_text,
+                    tool_calls,
+                } => {
+                    while let Some(result) = stream.next().await {
+                        match result {
+                            Ok(event) => match event {
+                                ChatStreamEvent::Start => {}
+                                ChatStreamEvent::Chunk(chunk) => {
+                                    full_text.push_str(&chunk.content);
+                                    return Some(AgentStep::TextDelta(chunk.content));
+                                }
+                                ChatStreamEvent::ToolCallChunk(_) => {}
+                                ChatStreamEvent::ReasoningChunk(_) => {}
+                                ChatStreamEvent::End(end) => {
+                                    if let Some(ref usage) = end.captured_usage {
+                                        self.agent.total_usage.input_tokens +=
+                                            usage.prompt_tokens.unwrap_or(0) as u32;
+                                        self.agent.total_usage.output_tokens +=
+                                            usage.completion_tokens.unwrap_or(0) as u32;
+                                    }
+                                    if let Some(captured) = end.captured_into_tool_calls() {
+                                        *tool_calls = captured;
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                let err_msg = format!("Stream error: {:#}", e);
+                                error!("Stream error: {:?}", e);
+                                self.state = StreamState::Finished;
+                                return Some(AgentStep::Error(err_msg));
                             }
                         }
                     }
 
-                    // Add tool results to messages
-                    self.messages.push(Message::tool_results(tool_results));
+                    // Stream ended, process results
+                    let full_text = std::mem::take(full_text);
+                    let tool_calls = std::mem::take(tool_calls);
 
-                    // Continue loop to get next response
+                    if tool_calls.is_empty() {
+                        // No tool calls, just add text message
+                        self.agent.messages.push(ChatMessage::assistant(&full_text));
+                        self.state = StreamState::Finished;
+                        return Some(AgentStep::Finished {
+                            usage: self.agent.total_usage,
+                        });
+                    }
+
+                    // Start processing tool calls (don't add message yet - wait until all done)
+                    self.state = StreamState::AwaitingToolDecision {
+                        assistant_text: full_text,
+                        all_tool_calls: tool_calls,
+                        current_tool_index: 0,
+                        tool_responses: Vec::new(),
+                    };
+                    // Continue to process tool decision state
                 }
-                Some(StopReason::MaxTokens) => {
-                    let _ = event_tx
-                        .send(AgentEvent::Error(
-                            "Response exceeded maximum tokens".to_string(),
-                        ))
-                        .await;
-                    return Err(anyhow::anyhow!("Response exceeded maximum tokens"));
+
+                StreamState::AwaitingToolDecision {
+                    all_tool_calls,
+                    current_tool_index,
+                    ..
+                } => {
+                    // Yield the current tool request
+                    let tool_call = &all_tool_calls[*current_tool_index];
+                    let tool = self.agent.tools.get(&tool_call.fn_name);
+                    let block = tool.create_block(&tool_call.call_id, tool_call.fn_arguments.clone());
+
+                    return Some(AgentStep::ToolRequest {
+                        call_id: tool_call.call_id.clone(),
+                        block,
+                    });
                 }
-                Some(StopReason::StopSequence) | None => {
-                    let _ = event_tx
-                        .send(AgentEvent::Finished {
-                            usage: self.total_usage,
-                        })
-                        .await;
-                    return Ok(());
+
+                StreamState::Finished => {
+                    return None;
                 }
             }
         }
     }
 
-    /// Format a human-readable description of a tool use
-    fn format_tool_description(&self, tool_use: &ToolUse) -> String {
-        match tool_use.name.as_str() {
-            "read_file" => {
-                let path = tool_use.input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-                format!("Read file: {}", path)
-            }
-            "write_file" => {
-                let path = tool_use.input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-                format!("Write file: {}", path)
-            }
-            "edit_file" => {
-                let path = tool_use.input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-                let edits = tool_use
-                    .input
-                    .get("edits")
-                    .and_then(|v| v.as_array())
-                    .map(|a| a.len())
-                    .unwrap_or(0);
-                format!("Edit file: {} ({} edits)", path, edits)
-            }
-            "shell" => {
-                let command = tool_use
-                    .input
-                    .get("command")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                format!("Execute: {}", command)
-            }
-            "fetch_url" => {
-                let url = tool_use.input.get("url").and_then(|v| v.as_str()).unwrap_or("?");
-                format!("Fetch URL: {}", url)
-            }
-            _ => format!("{}: {:?}", tool_use.name, tool_use.input),
-        }
-    }
+    /// Respond to a tool approval request
+    pub async fn decide_tool(&mut self, decision: ToolDecision) -> Option<AgentStep> {
+        match std::mem::replace(&mut self.state, StreamState::Finished) {
+            StreamState::AwaitingToolDecision {
+                assistant_text,
+                all_tool_calls,
+                current_tool_index,
+                mut tool_responses,
+            } => {
+                let tool_call = &all_tool_calls[current_tool_index];
+                let tool = self.agent.tools.get(&tool_call.fn_name);
+                let params = tool_call.fn_arguments.clone();
 
-    /// Get the risk level for a tool
-    fn get_risk_level(&self, tool_name: &str) -> RiskLevel {
-        match tool_name {
-            "read_file" | "fetch_url" => RiskLevel::Low,
-            "write_file" | "edit_file" => RiskLevel::Medium,
-            "shell" => RiskLevel::High,
-            _ => RiskLevel::Medium,
+                let (content, is_error) = match decision {
+                    ToolDecision::Approve => match tool.execute(params).await {
+                        Ok(res) => (res.content, res.is_error),
+                        Err(e) => (format!("Error: {}", e), true),
+                    },
+                    ToolDecision::Deny => ("Denied by user".to_string(), true),
+                };
+
+                let result_step = AgentStep::ToolResult {
+                    call_id: tool_call.call_id.clone(),
+                    result: content.clone(),
+                    is_error,
+                };
+
+                tool_responses.push(ToolResponse::new(tool_call.call_id.clone(), content));
+
+                let next_index = current_tool_index + 1;
+                if next_index < all_tool_calls.len() {
+                    // More tool calls to process
+                    self.state = StreamState::AwaitingToolDecision {
+                        assistant_text,
+                        all_tool_calls,
+                        current_tool_index: next_index,
+                        tool_responses,
+                    };
+                } else {
+                    // All tools processed - build the assistant message with tool calls
+                    // Only include text if non-empty
+                    let content = if assistant_text.is_empty() {
+                        MessageContent::from(all_tool_calls.clone())
+                    } else {
+                        let mut content = MessageContent::from_text(&assistant_text);
+                        for tc in &all_tool_calls {
+                            content = content.append(ContentPart::ToolCall(tc.clone()));
+                        }
+                        content
+                    };
+                    self.agent.messages.push(ChatMessage {
+                        role: ChatRole::Assistant,
+                        content,
+                        options: None,
+                    });
+
+                    // Add tool responses
+                    for response in tool_responses {
+                        self.agent.messages.push(ChatMessage::from(response));
+                    }
+                    self.state = StreamState::NeedsChatRequest;
+                }
+
+                Some(result_step)
+            }
+            other => {
+                // Put state back and return None
+                self.state = other;
+                None
+            }
         }
     }
 }

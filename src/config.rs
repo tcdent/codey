@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,14 +32,16 @@ pub struct GeneralConfig {
     pub model: String,
     pub working_dir: Option<PathBuf>,
     pub max_tokens: u32,
+    pub max_retries: u32,
 }
 
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-opus-4-5-20251101".to_string(),
             working_dir: None,
             max_tokens: 8192,
+            max_retries: 5,
         }
     }
 }
@@ -54,7 +56,7 @@ pub struct AuthConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            method: AuthMethod::OAuth,
+            method: AuthMethod::ApiKey,
             api_key: None,
         }
     }
@@ -142,14 +144,10 @@ impl Default for ShellConfig {
 
 impl Config {
     /// Load configuration from file, falling back to defaults
-    pub fn load(path: Option<&Path>) -> Result<Self> {
-        let config_path = path
-            .map(PathBuf::from)
-            .or_else(Self::default_config_path);
-
-        if let Some(ref path) = config_path {
+    pub fn load() -> Result<Self> {
+        if let Some(path) = Self::default_config_path() {
             if path.exists() {
-                let content = std::fs::read_to_string(path)
+                let content = std::fs::read_to_string(&path)
                     .with_context(|| format!("Failed to read config file: {}", path.display()))?;
                 let config: Config = toml::from_str(&content)
                     .with_context(|| format!("Failed to parse config file: {}", path.display()))?;
@@ -165,20 +163,6 @@ impl Config {
     pub fn default_config_path() -> Option<PathBuf> {
         dirs::config_dir().map(|p| p.join("codepal").join("config.toml"))
     }
-
-    /// Ensure the config directory exists
-    pub fn ensure_config_dir() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .context("Could not determine config directory")?
-            .join("codepal");
-
-        if !config_dir.exists() {
-            std::fs::create_dir_all(&config_dir)
-                .with_context(|| format!("Failed to create config directory: {}", config_dir.display()))?;
-        }
-
-        Ok(config_dir)
-    }
 }
 
 #[cfg(test)]
@@ -188,7 +172,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.general.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.general.model, "claude-opus-4-5-20251101");
         assert!(config.tools.enabled.contains(&"read_file".to_string()));
     }
 

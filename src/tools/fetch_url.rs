@@ -1,10 +1,106 @@
 //! URL fetching tool
 
 use super::{Tool, ToolResult};
+use crate::message::{render_approval_prompt, render_result, ContentBlock, ToolBlock, Status};
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Deserialize;
+use ratatui::{
+    style::{Color, Style},
+    text::{Line, Span},
+};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// Fetch URL display block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FetchUrlBlock {
+    pub call_id: String,
+    pub url: String,
+    pub status: Status,
+    pub result: Option<String>,
+}
+
+impl FetchUrlBlock {
+    pub fn new(call_id: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            call_id: call_id.into(),
+            url: url.into(),
+            status: Status::Pending,
+            result: None,
+        }
+    }
+
+    pub fn from_params(call_id: &str, params: &serde_json::Value) -> Option<Self> {
+        let url = params.get("url")?.as_str()?;
+        Some(Self::new(call_id, url))
+    }
+}
+
+impl ContentBlock for FetchUrlBlock {
+    fn render(&self, _width: u16) -> Vec<Line<'_>> {
+        let mut lines = Vec::new();
+
+        let (icon, color) = match self.status {
+            Status::Pending => ("?", Color::Yellow),
+            Status::Running => ("⚙", Color::Blue),
+            Status::Success => ("✓", Color::Green),
+            Status::Error => ("✗", Color::Red),
+            Status::Denied => ("⊘", Color::DarkGray),
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("{} ", icon), Style::default().fg(color)),
+            Span::styled("fetch ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&self.url, Style::default().fg(Color::Blue)),
+        ]));
+
+        if self.status == Status::Pending {
+            lines.push(render_approval_prompt());
+        }
+
+        if let Some(ref result) = self.result {
+            lines.extend(render_result(result, 5));
+        }
+
+        if self.status == Status::Denied {
+            lines.push(Line::from(Span::styled(
+                "  Denied by user",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        lines
+    }
+
+    fn status(&self) -> Option<Status> {
+        Some(self.status)
+    }
+
+    fn tool_name(&self) -> Option<&str> {
+        Some("fetch_url")
+    }
+
+    fn call_id(&self) -> Option<&str> {
+        Some(&self.call_id)
+    }
+
+    fn approve(&mut self) {
+        self.status = Status::Running;
+    }
+
+    fn deny(&mut self) {
+        self.status = Status::Denied;
+    }
+
+    fn complete(&mut self, result: String, is_error: bool) {
+        self.status = if is_error {
+            Status::Error
+        } else {
+            Status::Success
+        };
+        self.result = Some(result);
+    }
+}
 
 /// Tool for fetching web content
 pub struct FetchUrlTool {
@@ -66,6 +162,14 @@ impl Tool for FetchUrlTool {
             },
             "required": ["url"]
         })
+    }
+
+    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn ContentBlock> {
+        if let Some(block) = FetchUrlBlock::from_params(call_id, &params) {
+            Box::new(block)
+        } else {
+            Box::new(ToolBlock::new(call_id, self.name(), params))
+        }
     }
 
     async fn execute(&self, params: serde_json::Value) -> Result<ToolResult> {

@@ -3,18 +3,16 @@
 mod edit_file;
 mod fetch_url;
 mod read_file;
-mod schema;
 mod shell;
 mod write_file;
 
 pub use edit_file::EditFileTool;
 pub use fetch_url::FetchUrlTool;
 pub use read_file::ReadFileTool;
-pub use schema::*;
 pub use shell::ShellTool;
 pub use write_file::WriteFileTool;
 
-use crate::llm::ToolDefinition;
+use crate::message::{ContentBlock, ToolBlock};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -57,13 +55,10 @@ pub trait Tool: Send + Sync {
     /// Execute the tool with the given parameters
     async fn execute(&self, params: serde_json::Value) -> Result<ToolResult>;
 
-    /// Convert to a tool definition for the API
-    fn definition(&self) -> ToolDefinition {
-        ToolDefinition {
-            name: self.name().to_string(),
-            description: self.description().to_string(),
-            input_schema: self.schema(),
-        }
+    /// Create a content block for displaying this tool call
+    /// Default implementation returns a generic ToolBlock
+    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn ContentBlock> {
+        Box::new(ToolBlock::new(call_id, self.name(), params))
     }
 }
 
@@ -93,29 +88,17 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
-    /// Get tool definitions for the API
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|t| t.definition()).collect()
-    }
-
-    /// Execute a tool by name
-    pub async fn execute(&self, name: &str, params: serde_json::Value) -> Result<ToolResult> {
-        let tool = self
-            .tools
-            .get(name)
-            .ok_or_else(|| anyhow::anyhow!("Unknown tool: {}", name))?;
-
-        tool.execute(params).await
-    }
-
     /// Get a tool by name
-    pub fn get(&self, name: &str) -> Option<&dyn Tool> {
-        self.tools.get(name).map(|t| t.as_ref())
+    pub fn get(&self, name: &str) -> &dyn Tool {
+        self.tools
+            .get(name)
+            .map(|t| t.as_ref())
+            .expect("unknown tool")
     }
 
-    /// List all tool names
-    pub fn names(&self) -> Vec<&str> {
-        self.tools.keys().map(|s| s.as_str()).collect()
+    /// List all tools
+    pub fn values(&self) -> impl Iterator<Item = &dyn Tool> {
+        self.tools.values().map(|t| t.as_ref())
     }
 }
 

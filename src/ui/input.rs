@@ -3,25 +3,16 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
-
-/// Input mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputMode {
-    Normal,
-    Insert,
-    Disabled,
-}
 
 /// Input box widget state
 #[derive(Debug, Clone)]
 pub struct InputBox {
     content: String,
     cursor_position: usize,
-    mode: InputMode,
     history: Vec<String>,
     history_index: Option<usize>,
 }
@@ -31,7 +22,6 @@ impl InputBox {
         Self {
             content: String::new(),
             cursor_position: 0,
-            mode: InputMode::Insert,
             history: Vec::new(),
             history_index: None,
         }
@@ -47,33 +37,15 @@ impl InputBox {
         self.cursor_position
     }
 
-    /// Get the current mode
-    pub fn mode(&self) -> InputMode {
-        self.mode
-    }
-
-    /// Set the input mode
-    pub fn set_mode(&mut self, mode: InputMode) {
-        self.mode = mode;
-    }
-
-    /// Check if input is disabled
-    pub fn is_disabled(&self) -> bool {
-        self.mode == InputMode::Disabled
-    }
-
     /// Insert a character at the cursor position
     pub fn insert_char(&mut self, c: char) {
-        if self.mode == InputMode::Disabled {
-            return;
-        }
         self.content.insert(self.cursor_position, c);
         self.cursor_position += c.len_utf8();
     }
 
     /// Delete the character before the cursor
     pub fn delete_char(&mut self) {
-        if self.mode == InputMode::Disabled || self.cursor_position == 0 {
+        if self.cursor_position == 0 {
             return;
         }
 
@@ -89,7 +61,7 @@ impl InputBox {
 
     /// Delete the character at the cursor
     pub fn delete_char_forward(&mut self) {
-        if self.mode == InputMode::Disabled || self.cursor_position >= self.content.len() {
+        if self.cursor_position >= self.content.len() {
             return;
         }
 
@@ -220,22 +192,16 @@ pub struct InputBoxWidget<'a> {
 
 impl Widget for InputBoxWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let (border_style, title) = match self.state.mode {
-            InputMode::Normal => (Style::default().fg(Color::Gray), " Input (press i to type) "),
-            InputMode::Insert => (Style::default().fg(Color::Cyan), " Input (Ctrl+Enter to send, Esc to cancel) "),
-            InputMode::Disabled => (Style::default().fg(Color::DarkGray), " Waiting for response... "),
-        };
-
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(border_style)
-            .title(title);
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Input (Enter to send, Shift+Enter for newline) ");
 
         let inner = block.inner(area);
         block.render(area, buf);
 
         // Render content
-        let content = if self.state.content.is_empty() && self.state.mode != InputMode::Disabled {
+        let content = if self.state.content.is_empty() {
             Span::styled(
                 "Type your message here...",
                 Style::default().fg(Color::DarkGray),
@@ -249,7 +215,7 @@ impl Widget for InputBoxWidget<'_> {
         paragraph.render(inner, buf);
 
         // Render cursor
-        if self.state.mode == InputMode::Insert && inner.width > 0 && inner.height > 0 {
+        if inner.width > 0 && inner.height > 0 {
             // Calculate cursor position in the wrapped text
             let cursor_x = self.state.cursor_position % inner.width as usize;
             let cursor_y = self.state.cursor_position / inner.width as usize;
@@ -259,8 +225,7 @@ impl Widget for InputBoxWidget<'_> {
                 let y = inner.y + cursor_y as u16;
 
                 if x < inner.x + inner.width && y < inner.y + inner.height {
-                    buf.get_mut(x, y)
-                        .set_style(Style::default().bg(Color::White).fg(Color::Black));
+                    buf[(x, y)].set_style(Style::default().bg(Color::White).fg(Color::Black));
                 }
             }
         }

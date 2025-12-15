@@ -1,156 +1,56 @@
 //! Chat view component
 
-use crate::llm::Role;
-use chrono::{DateTime, Utc};
+use crate::message::{Message, Role, Status, Transcript};
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Rect, Size},
     style::{Color, Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Widget, Wrap},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, StatefulWidget, Widget},
 };
+use tui_scrollview::{ScrollView, ScrollViewState};
 
-/// A displayable message in the chat
-#[derive(Debug, Clone)]
-pub struct DisplayMessage {
-    pub role: Role,
-    pub content: Vec<DisplayContent>,
-    pub timestamp: DateTime<Utc>,
-}
-
-impl DisplayMessage {
-    pub fn user(text: impl Into<String>) -> Self {
-        Self {
-            role: Role::User,
-            content: vec![DisplayContent::Text(text.into())],
-            timestamp: Utc::now(),
-        }
-    }
-
-    pub fn assistant(content: Vec<DisplayContent>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content,
-            timestamp: Utc::now(),
-        }
-    }
-
-    pub fn assistant_text(text: impl Into<String>) -> Self {
-        Self {
-            role: Role::Assistant,
-            content: vec![DisplayContent::Text(text.into())],
-            timestamp: Utc::now(),
-        }
-    }
-}
-
-/// Content type for display
-#[derive(Debug, Clone)]
-pub enum DisplayContent {
-    Text(String),
-    CodeBlock {
-        language: String,
-        code: String,
-    },
-    ToolCall {
-        name: String,
-        summary: String,
-        result: Option<String>,
-        is_error: bool,
-    },
-}
-
-/// Chat view state
-#[derive(Debug)]
+/// Chat view state - renders from a Transcript
+#[derive(Debug, Default)]
 pub struct ChatView {
-    messages: Vec<DisplayMessage>,
-    scroll_offset: usize,
+    /// Scroll state managed by tui-scrollview
+    pub scroll_state: ScrollViewState,
+    /// Track if we should auto-scroll to bottom
     auto_scroll: bool,
-    streaming_text: Option<String>,
 }
 
 impl ChatView {
     pub fn new() -> Self {
         Self {
-            messages: Vec::new(),
-            scroll_offset: 0,
+            scroll_state: ScrollViewState::new(),
             auto_scroll: true,
-            streaming_text: None,
         }
-    }
-
-    /// Add a message to the chat
-    pub fn add_message(&mut self, message: DisplayMessage) {
-        self.messages.push(message);
-        if self.auto_scroll {
-            self.scroll_to_bottom();
-        }
-    }
-
-    /// Set streaming text (partial response)
-    pub fn set_streaming_text(&mut self, text: Option<String>) {
-        self.streaming_text = text;
-        if self.auto_scroll {
-            self.scroll_to_bottom();
-        }
-    }
-
-    /// Append to streaming text
-    pub fn append_streaming_text(&mut self, text: &str) {
-        if let Some(ref mut streaming) = self.streaming_text {
-            streaming.push_str(text);
-        } else {
-            self.streaming_text = Some(text.to_string());
-        }
-        if self.auto_scroll {
-            self.scroll_to_bottom();
-        }
-    }
-
-    /// Clear streaming text and optionally add as message
-    pub fn finish_streaming(&mut self) -> Option<String> {
-        self.streaming_text.take()
-    }
-
-    /// Get all messages
-    pub fn messages(&self) -> &[DisplayMessage] {
-        &self.messages
-    }
-
-    /// Clear all messages
-    pub fn clear(&mut self) {
-        self.messages.clear();
-        self.scroll_offset = 0;
-        self.streaming_text = None;
     }
 
     /// Scroll up by one line
     pub fn scroll_up(&mut self) {
         self.auto_scroll = false;
-        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+        self.scroll_state.scroll_up();
     }
 
     /// Scroll down by one line
     pub fn scroll_down(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_add(1);
+        self.scroll_state.scroll_down();
     }
 
     /// Scroll up by a page
     pub fn page_up(&mut self, page_size: usize) {
         self.auto_scroll = false;
-        self.scroll_offset = self.scroll_offset.saturating_sub(page_size);
+        for _ in 0..page_size {
+            self.scroll_state.scroll_up();
+        }
     }
 
     /// Scroll down by a page
     pub fn page_down(&mut self, page_size: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_add(page_size);
-    }
-
-    /// Scroll to bottom
-    pub fn scroll_to_bottom(&mut self) {
-        self.auto_scroll = true;
-        // Scroll offset will be calculated during render
-        self.scroll_offset = usize::MAX;
+        for _ in 0..page_size {
+            self.scroll_state.scroll_down();
+        }
     }
 
     /// Enable auto-scroll
@@ -158,109 +58,71 @@ impl ChatView {
         self.auto_scroll = true;
     }
 
-    /// Render the chat view
-    pub fn widget(&self) -> ChatViewWidget<'_> {
-        ChatViewWidget { state: self }
-    }
-}
-
-impl Default for ChatView {
-    fn default() -> Self {
-        Self::new()
+    /// Create a widget that renders the given transcript
+    pub fn widget<'a>(&'a mut self, transcript: &'a Transcript) -> ChatViewWidget<'a> {
+        ChatViewWidget {
+            view: self,
+            transcript,
+        }
     }
 }
 
 /// Chat view widget for rendering
 pub struct ChatViewWidget<'a> {
-    state: &'a ChatView,
+    view: &'a mut ChatView,
+    transcript: &'a Transcript,
 }
 
 impl ChatViewWidget<'_> {
-    fn render_message<'a>(msg: &'a DisplayMessage) -> Vec<Line<'a>> {
+    fn render_message(msg: &Message, width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
         // Role header
         let (role_text, role_style) = match msg.role {
             Role::User => (
                 "You",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
             Role::Assistant => (
                 "Claude",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Role::System => (
+                "System",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ),
         };
 
-        lines.push(Line::from(vec![
+        // Status indicator for non-complete messages
+        let status_span = match msg.status {
+            Status::Pending => Some(Span::styled(" (queued)", Style::default().fg(Color::Yellow))),
+            Status::Running => {
+                Some(Span::styled(" (sending...)", Style::default().fg(Color::Blue)))
+            }
+            Status::Error => Some(Span::styled(" (error)", Style::default().fg(Color::Red))),
+            Status::Success | Status::Denied => None,
+        };
+
+        let mut header = vec![
             Span::styled(role_text, role_style),
             Span::styled(
                 format!(" ({})", msg.timestamp.format("%H:%M:%S")),
                 Style::default().fg(Color::DarkGray),
             ),
-        ]));
-
-        // Content
-        for content in &msg.content {
-            match content {
-                DisplayContent::Text(text) => {
-                    for line in text.lines() {
-                        lines.push(Line::from(Span::raw(line.to_string())));
-                    }
-                }
-                DisplayContent::CodeBlock { language, code } => {
-                    lines.push(Line::from(Span::styled(
-                        format!("```{}", language),
-                        Style::default().fg(Color::Yellow),
-                    )));
-                    for line in code.lines() {
-                        lines.push(Line::from(Span::styled(
-                            line.to_string(),
-                            Style::default().fg(Color::Gray),
-                        )));
-                    }
-                    lines.push(Line::from(Span::styled(
-                        "```",
-                        Style::default().fg(Color::Yellow),
-                    )));
-                }
-                DisplayContent::ToolCall {
-                    name,
-                    summary,
-                    result,
-                    is_error,
-                } => {
-                    let icon = if *is_error { "✗" } else { "✓" };
-                    let color = if *is_error { Color::Red } else { Color::Green };
-
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("{} ", icon),
-                            Style::default().fg(color),
-                        ),
-                        Span::styled(
-                            format!("{}: ", name),
-                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(summary.clone()),
-                    ]));
-
-                    if let Some(result_text) = result {
-                        // Show truncated result
-                        let preview: String = result_text.lines().take(5).collect::<Vec<_>>().join("\n");
-                        lines.push(Line::from(Span::styled(
-                            format!("  {}", preview.replace('\n', "\n  ")),
-                            Style::default().fg(Color::DarkGray),
-                        )));
-                        if result_text.lines().count() > 5 {
-                            lines.push(Line::from(Span::styled(
-                                "  ...",
-                                Style::default().fg(Color::DarkGray),
-                            )));
-                        }
-                    }
-                }
-            }
+        ];
+        if let Some(status) = status_span {
+            header.push(status);
         }
+        lines.push(Line::from(header));
+
+        // Render all content blocks via trait
+        lines.extend(msg.render(width));
 
         // Separator
         lines.push(Line::from(""));
@@ -283,66 +145,43 @@ impl Widget for ChatViewWidget<'_> {
             return;
         }
 
-        // Build all lines
+        // Build all lines from transcript
         let mut all_lines: Vec<Line> = Vec::new();
+        // inner accounts for the border, subtract scrollbar (1) + small margin (1)
+        let content_width = inner.width.saturating_sub(2);
 
-        for msg in &self.state.messages {
-            all_lines.extend(Self::render_message(msg));
+        for msg in self.transcript.messages() {
+            all_lines.extend(Self::render_message(msg, content_width));
         }
 
-        // Add streaming text if present
-        if let Some(ref streaming) = self.state.streaming_text {
-            all_lines.push(Line::from(vec![
-                Span::styled(
-                    "Claude",
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" (streaming...)", Style::default().fg(Color::DarkGray)),
-            ]));
-            for line in streaming.lines() {
-                all_lines.push(Line::from(Span::raw(line.to_string())));
-            }
-            // Add blinking cursor
-            all_lines.push(Line::from(Span::styled(
-                "▌",
-                Style::default().fg(Color::Cyan),
-            )));
+        // TODO: This scroll/height calculation is brittle. We manually track line counts
+        // and calculate scroll offsets because tui-scrollview's scroll_to_bottom() doesn't
+        // work reliably when content size changes between frames. Revisit when tui-scrollview
+        // stabilizes or consider alternative approaches (e.g., tracking content height
+        // separately, or using a different scrolling widget).
+        
+        // Calculate content size for ScrollView
+        // Markdown renderer already handles wrapping at content_width
+        // Ensure minimum height to avoid scroll issues
+        let content_height = (all_lines.len() as u16).max(1);
+
+        // If auto-scroll is enabled, calculate offset to show bottom
+        if self.view.auto_scroll {
+            let max_offset = content_height.saturating_sub(inner.height);
+            self.view.scroll_state.set_offset(ratatui::layout::Position::new(0, max_offset));
         }
 
-        // Calculate scroll position
-        let total_lines = all_lines.len();
-        let visible_lines = inner.height as usize;
-        let max_scroll = total_lines.saturating_sub(visible_lines);
+        // Create scroll view with content size, always show vertical scrollbar
+        let mut scroll_view = ScrollView::new(Size::new(content_width, content_height))
+            .vertical_scrollbar_visibility(tui_scrollview::ScrollbarVisibility::Always)
+            .horizontal_scrollbar_visibility(tui_scrollview::ScrollbarVisibility::Never);
 
-        let scroll_offset = if self.state.auto_scroll || self.state.scroll_offset >= max_scroll {
-            max_scroll
-        } else {
-            self.state.scroll_offset.min(max_scroll)
-        };
+        // Render paragraph into scroll view's buffer (no wrap - markdown already wrapped)
+        let paragraph = Paragraph::new(all_lines);
+        scroll_view.render_widget(paragraph, Rect::new(0, 0, content_width, content_height));
 
-        // Create paragraph with scroll
-        let text = Text::from(all_lines);
-        let paragraph = Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll_offset as u16, 0));
-
-        paragraph.render(inner, buf);
-
-        // Render scrollbar if needed
-        if total_lines > visible_lines {
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-            let mut scrollbar_state = ScrollbarState::new(total_lines)
-                .position(scroll_offset);
-
-            let scrollbar_area = Rect {
-                x: area.x + area.width - 1,
-                y: area.y + 1,
-                width: 1,
-                height: area.height - 2,
-            };
-
-            scrollbar.render(scrollbar_area, buf, &mut scrollbar_state);
-        }
+        // Render the scroll view
+        scroll_view.render(inner, buf, &mut self.view.scroll_state);
     }
 }
 
@@ -351,35 +190,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_chat_view_add_message() {
-        let mut chat = ChatView::new();
-
-        chat.add_message(DisplayMessage::user("Hello"));
-        assert_eq!(chat.messages().len(), 1);
-
-        chat.add_message(DisplayMessage::assistant_text("Hi there!"));
-        assert_eq!(chat.messages().len(), 2);
-    }
-
-    #[test]
-    fn test_chat_view_streaming() {
-        let mut chat = ChatView::new();
-
-        chat.set_streaming_text(Some("Hello".to_string()));
-        chat.append_streaming_text(" world");
-
-        let text = chat.finish_streaming();
-        assert_eq!(text, Some("Hello world".to_string()));
-    }
-
-    #[test]
     fn test_chat_view_scroll() {
         let mut chat = ChatView::new();
+        assert!(chat.auto_scroll);
 
         chat.scroll_up();
         assert!(!chat.auto_scroll);
 
-        chat.scroll_to_bottom();
+        chat.enable_auto_scroll();
         assert!(chat.auto_scroll);
     }
 }
