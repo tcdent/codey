@@ -123,6 +123,59 @@ impl Block for TextBlock {
     }
 }
 
+/// Thinking/reasoning content (extended thinking)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThinkingBlock {
+    pub text: String,
+}
+
+impl ThinkingBlock {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self { text: text.into() }
+    }
+}
+
+#[typetag::serde]
+impl Block for ThinkingBlock {
+    fn render(&self, width: u16) -> Vec<Line<'_>> {
+        use ratatui::style::{Color, Style};
+
+        // Render thinking with dimmed style and prefix
+        let prefix = "💭 ";
+        let skin = ratskin::RatSkin::default();
+        let text = ratskin::RatSkin::parse_text(&self.text);
+        let mut lines = skin.parse(text, width.saturating_sub(prefix.len() as u16));
+
+        // Add prefix and dim styling to all lines
+        let dim_style = Style::default().fg(Color::DarkGray);
+        for line in &mut lines {
+            let spans: Vec<_> = std::iter::once(ratatui::text::Span::styled(prefix, dim_style))
+                .chain(line.spans.iter().map(|s| {
+                    ratatui::text::Span::styled(s.content.clone(), dim_style)
+                }))
+                .collect();
+            *line = Line::from(spans);
+        }
+        lines
+    }
+
+    fn status(&self) -> Status {
+        Status::Success
+    }
+
+    fn set_status(&mut self, _status: Status) {
+        // Thinking blocks don't have mutable status
+    }
+
+    fn append_text(&mut self, text: &str) {
+        self.text.push_str(text);
+    }
+
+    fn text_content(&self) -> Option<&str> {
+        Some(&self.text)
+    }
+}
+
 /// Generic tool content (fallback for tools without specialized display)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolBlock {
@@ -306,6 +359,13 @@ impl Turn {
     pub fn add_text_block(&mut self, text: &str) -> usize {
         let idx = self.content.len();
         self.content.push(Box::new(TextBlock::new(text)));
+        idx
+    }
+
+    /// Add a new thinking block and return its index for streaming
+    pub fn add_thinking_block(&mut self, text: &str) -> usize {
+        let idx = self.content.len();
+        self.content.push(Box::new(ThinkingBlock::new(text)));
         idx
     }
 

@@ -349,6 +349,7 @@ impl App {
         // Track the current assistant turn being built
         let mut current_turn_id: Option<TurnId> = None;
         let mut streaming_block_idx: Option<usize> = None;
+        let mut thinking_block_idx: Option<usize> = None;
 
         // Create the stream - agent is borrowed mutably for its lifetime
         let mut stream = agent.process_message(&content);
@@ -371,6 +372,10 @@ impl App {
                     if current_turn_id.is_none() {
                         current_turn_id = Some(self.transcript.add_empty(Role::Assistant));
                     }
+                    // When text starts after thinking, reset thinking block
+                    if thinking_block_idx.is_some() {
+                        thinking_block_idx = None;
+                    }
                     if let Some(turn) = self.transcript.get_mut(current_turn_id.unwrap()) {
                         if streaming_block_idx.is_none() {
                             streaming_block_idx = Some(turn.add_text_block(&text));
@@ -380,10 +385,29 @@ impl App {
                     }
                     self.draw()?;
                 }
+                AgentStep::ThinkingDelta(text) => {
+                    // Create turn on first chunk, append on subsequent
+                    if current_turn_id.is_none() {
+                        current_turn_id = Some(self.transcript.add_empty(Role::Assistant));
+                    }
+                    // When thinking starts after text, reset text block (for interleaved thinking)
+                    if streaming_block_idx.is_some() {
+                        streaming_block_idx = None;
+                    }
+                    if let Some(turn) = self.transcript.get_mut(current_turn_id.unwrap()) {
+                        if thinking_block_idx.is_none() {
+                            thinking_block_idx = Some(turn.add_thinking_block(&text));
+                        } else {
+                            turn.append_to_block(thinking_block_idx.unwrap(), &text);
+                        }
+                    }
+                    self.draw()?;
+                }
                 AgentStep::ToolRequest { call_id, block, .. } => {
-                    // Reset streaming block - next text will be a new block
+                    // Reset streaming blocks - next text/thinking will be new blocks
                     streaming_block_idx = None;
-                    
+                    thinking_block_idx = None;
+
                     // Add tool block to turn
                     if current_turn_id.is_none() {
                         current_turn_id = Some(self.transcript.add_boxed(Role::Assistant, block));
