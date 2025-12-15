@@ -29,7 +29,7 @@ pub enum Role {
 pub enum Status {
     Pending,
     Running,
-    Success,
+    Complete,
     Error,
     Denied,
     Cancelled,
@@ -93,7 +93,7 @@ impl TextBlock {
     pub fn new(text: impl Into<String>) -> Self {
         Self { 
             text: text.into(),
-            status: Status::Success,
+            status: Status::Complete,
         }
     }
 }
@@ -160,7 +160,7 @@ impl Block for ThinkingBlock {
     }
 
     fn status(&self) -> Status {
-        Status::Success
+        Status::Complete
     }
 
     fn set_status(&mut self, _status: Status) {
@@ -206,7 +206,7 @@ impl Block for ToolBlock {
         let (icon, color) = match self.status {
             Status::Pending => ("?", Color::Yellow),
             Status::Running => ("⚙", Color::Blue),
-            Status::Success => ("✓", Color::Green),
+            Status::Complete => ("✓", Color::Green),
             Status::Error => ("✗", Color::Red),
             Status::Denied => ("⊘", Color::DarkGray),
             Status::Cancelled => ("⊘", Color::Yellow),
@@ -346,27 +346,21 @@ pub struct Turn {
 }
 
 impl Turn {
-    pub fn new(id: TurnId, role: Role, content: Vec<Box<dyn Block>>) -> Self {
+    pub fn new(id: TurnId, role: Role, content: Vec<Box<dyn Block>>, status: Status) -> Self {
         Self {
             id,
             role,
-            status: Status::Success,
+            status,
             content,
             timestamp: Utc::now(),
         }
     }
 
-    /// Add a new text block and return its index for streaming
-    pub fn add_text_block(&mut self, text: &str) -> usize {
-        let idx = self.content.len();
-        self.content.push(Box::new(TextBlock::new(text)));
-        idx
-    }
 
-    /// Add a new thinking block and return its index for streaming
-    pub fn add_thinking_block(&mut self, text: &str) -> usize {
+    /// Add a block and return its index
+    pub fn add_block(&mut self, block: Box<dyn Block>) -> usize {
         let idx = self.content.len();
-        self.content.push(Box::new(ThinkingBlock::new(text)));
+        self.content.push(block);
         idx
     }
 
@@ -377,26 +371,9 @@ impl Turn {
         }
     }
 
-    /// Add a block
-    pub fn add_block(&mut self, block: Box<dyn Block>) {
-        self.content.push(block);
-    }
-
-    /// Get a mutable block by call_id
-    pub fn get_block_mut(&mut self, call_id: &str) -> Option<&mut (dyn Block + 'static)> {
-        for block in &mut self.content {
-            if block.call_id() == Some(call_id) {
-                return Some(block.as_mut());
-            }
-        }
-        None
-    }
-
-    /// Append text to the last text block (for adding "[interrupted]" marker)
-    pub fn append_text_to_last_block(&mut self, text: &str) {
-        if let Some(block) = self.content.last_mut() {
-            block.append_text(text);
-        }
+    /// Get a mutable block by index
+    pub fn get_block_mut(&mut self, idx: usize) -> Option<&mut (dyn Block + 'static)> {
+        self.content.get_mut(idx).map(|b| b.as_mut())
     }
 
     /// Render all blocks with given width
@@ -435,23 +412,23 @@ impl Transcript {
     }
 
     /// Add a new turn with a single block
-    pub fn add(&mut self, role: Role, block: impl Block + 'static) -> TurnId {
+    pub fn add(&mut self, role: Role, block: impl Block + 'static, status: Status) -> TurnId {
         let id = self.next_id();
-        self.turns.push(Turn::new(id, role, vec![Box::new(block)]));
+        self.turns.push(Turn::new(id, role, vec![Box::new(block)], status));
         id
     }
 
     /// Add a new turn with a boxed block
-    pub fn add_boxed(&mut self, role: Role, block: Box<dyn Block>) -> TurnId {
+    pub fn add_boxed(&mut self, role: Role, block: Box<dyn Block>, status: Status) -> TurnId {
         let id = self.next_id();
-        self.turns.push(Turn::new(id, role, vec![block]));
+        self.turns.push(Turn::new(id, role, vec![block], status));
         id
     }
 
     /// Add an empty turn (for streaming)
-    pub fn add_empty(&mut self, role: Role) -> TurnId {
+    pub fn add_empty(&mut self, role: Role, status: Status) -> TurnId {
         let id = self.next_id();
-        self.turns.push(Turn::new(id, role, vec![]));
+        self.turns.push(Turn::new(id, role, vec![], status));
         id
     }
 
@@ -506,17 +483,17 @@ mod tests {
         block.set_status(Status::Running);
         assert_eq!(block.status(), Status::Running);
 
-        block.set_status(Status::Success);
+        block.set_status(Status::Complete);
         block.set_result("done".to_string());
-        assert_eq!(block.status(), Status::Success);
+        assert_eq!(block.status(), Status::Complete);
     }
 
     #[test]
     fn test_transcript_add_and_get() {
         let mut transcript = Transcript::new();
 
-        let id1 = transcript.add(Role::User, TextBlock::new("Hello"));
-        let id2 = transcript.add(Role::Assistant, TextBlock::new("Hi there!"));
+        let id1 = transcript.add(Role::User, TextBlock::new("Hello"), Status::Complete);
+        let id2 = transcript.add(Role::Assistant, TextBlock::new("Hi there!"), Status::Complete);
 
         assert_eq!(transcript.turns().len(), 2);
         assert_eq!(transcript.get_mut(id1).unwrap().role, Role::User);
@@ -525,10 +502,10 @@ mod tests {
     
     #[test]
     fn test_turn_streaming() {
-        let mut turn = Turn::new(TurnId(0), Role::Assistant, vec![]);
+        let mut turn = Turn::new(TurnId(0), Role::Assistant, vec![], Status::Running);
         
         // Start streaming - add a text block and get its index
-        let idx = turn.add_text_block("Hello");
+        let idx = turn.add_block(Box::new(TextBlock::new("Hello")));
         assert_eq!(idx, 0);
         
         // Append to that block
@@ -540,9 +517,9 @@ mod tests {
     #[test]
     fn test_transcript_save_load_roundtrip() {
         let mut transcript = Transcript::new();
-        transcript.add(Role::User, TextBlock::new("Hello"));
-        transcript.add(Role::Assistant, TextBlock::new("Hi there!"));
-        transcript.add(Role::User, TextBlock::new("How are you?"));
+        transcript.add(Role::User, TextBlock::new("Hello"), Status::Complete);
+        transcript.add(Role::Assistant, TextBlock::new("Hi there!"), Status::Complete);
+        transcript.add(Role::User, TextBlock::new("How are you?"), Status::Complete);
 
         // Save to temp file
         let temp_dir = std::env::temp_dir();
@@ -568,13 +545,13 @@ mod tests {
     #[test]
     fn test_transcript_save_load_with_tool_blocks() {
         let mut transcript = Transcript::new();
-        transcript.add(Role::User, TextBlock::new("Run ls"));
+        transcript.add(Role::User, TextBlock::new("Run ls"), Status::Complete);
         
         // Add an assistant turn with a tool block
         let mut tool_block = ToolBlock::new("call_123", "shell", serde_json::json!({"command": "ls"}));
-        tool_block.set_status(Status::Success);
+        tool_block.set_status(Status::Complete);
         tool_block.set_result("file1.txt\nfile2.txt".to_string());
-        transcript.add_boxed(Role::Assistant, Box::new(tool_block));
+        transcript.add_boxed(Role::Assistant, Box::new(tool_block), Status::Complete);
 
         // Save to temp file
         let temp_dir = std::env::temp_dir();

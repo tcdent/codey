@@ -48,7 +48,7 @@ impl Block for WriteFileBlock {
         let (icon, color) = match self.status {
             Status::Pending => ("?", Color::Yellow),
             Status::Running => ("⚙", Color::Blue),
-            Status::Success => ("✓", Color::Green),
+            Status::Complete => ("✓", Color::Green),
             Status::Error => ("✗", Color::Red),
             Status::Denied => ("⊘", Color::DarkGray),
             Status::Cancelled => ("⊘", Color::Yellow),

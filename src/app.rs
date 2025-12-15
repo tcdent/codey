@@ -1,8 +1,16 @@
 use crate::config::Config;
 use crate::llm::{Agent, AgentStep, ToolDecision, Usage};
-use crate::transcript::{Role, Status, TextBlock, Transcript, TurnId};
+use crate::transcript::{Role, Status, TextBlock, ThinkingBlock, Transcript, TurnId};
 use crate::tools::ToolRegistry;
 use crate::ui::{ChatView, ConnectionStatus, InputBox};
+
+/// Tracks the currently active block during streaming
+enum ActiveBlock {
+    None,
+    Text(usize),
+    Thinking(usize),
+    Tool(usize),
+}
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -150,6 +158,7 @@ impl App {
                 TextBlock::new(
                     "Welcome to Codey! I'm your AI coding assistant. How can I help you today?",
                 ),
+                Status::Complete,
             );
         }
         self.status = ConnectionStatus::Connected;
@@ -368,14 +377,8 @@ impl App {
 
     /// Queue a message for sending
     fn queue_message(&mut self, content: String) {
-        // Add to transcript and mark as pending
-        let id = self.transcript.add(Role::User, TextBlock::new(&content));
-        if let Some(turn) = self.transcript.get_mut(id) {
-            turn.status = Status::Pending;
-        }
-        // Add to queue with turn ID
+        let id = self.transcript.add(Role::User, TextBlock::new(&content), Status::Pending);
         self.message_queue.push((content, id));
-        // Scroll to show new message
         self.chat.enable_auto_scroll();
     }
 
@@ -387,27 +390,24 @@ impl App {
         }
         self.draw()?;
 
-        // Track the current assistant turn being built
+        // Track the current assistant turn and active block
         let mut current_turn_id: Option<TurnId> = None;
-        let mut streaming_block_idx: Option<usize> = None;
-        let mut thinking_block_idx: Option<usize> = None;
+        let mut active_block = ActiveBlock::None;
 
         // Create the stream - agent is borrowed mutably for its lifetime
         let mut stream = agent.process_message(&content);
 
         // Mark user turn as sent
         if let Some(turn) = self.transcript.get_mut(user_turn_id) {
-            turn.status = Status::Success;
+            turn.status = Status::Complete;
         }
         self.draw()?;
 
         loop {
             // Check for interrupt before each step
             if self.check_for_interrupt() {
-                // Mark turn as interrupted if it exists
                 if let Some(turn_id) = current_turn_id {
                     if let Some(turn) = self.transcript.get_mut(turn_id) {
-                        turn.append_text_to_last_block(" [interrupted]");
                         turn.status = Status::Cancelled;
                     }
                 }
@@ -424,52 +424,35 @@ impl App {
 
             match step {
                 AgentStep::TextDelta(text) => {
-                    // Create turn on first chunk, append on subsequent
-                    if current_turn_id.is_none() {
-                        current_turn_id = Some(self.transcript.add_empty(Role::Assistant));
-                    }
-                    // When text starts after thinking, reset thinking block
-                    if thinking_block_idx.is_some() {
-                        thinking_block_idx = None;
-                    }
-                    if let Some(turn) = self.transcript.get_mut(current_turn_id.unwrap()) {
-                        if streaming_block_idx.is_none() {
-                            streaming_block_idx = Some(turn.add_text_block(&text));
-                        } else {
-                            turn.append_to_block(streaming_block_idx.unwrap(), &text);
+                    let turn_id = *current_turn_id.get_or_insert_with(|| {
+                        self.transcript.add_empty(Role::Assistant, Status::Running)
+                    });
+                    if let Some(turn) = self.transcript.get_mut(turn_id) {
+                        match active_block {
+                            ActiveBlock::Text(idx) => turn.append_to_block(idx, &text),
+                            _ => active_block = ActiveBlock::Text(turn.add_block(Box::new(TextBlock::new(&text)))),
                         }
                     }
-                    // Use throttled draw for streaming - caps at 60fps
                     self.draw_throttled()?;
                 }
                 AgentStep::ThinkingDelta(text) => {
-                    // Create turn on first chunk, append on subsequent
-                    if current_turn_id.is_none() {
-                        current_turn_id = Some(self.transcript.add_empty(Role::Assistant));
-                    }
-                    // When thinking starts after text, reset text block (for interleaved thinking)
-                    if streaming_block_idx.is_some() {
-                        streaming_block_idx = None;
-                    }
-                    if let Some(turn) = self.transcript.get_mut(current_turn_id.unwrap()) {
-                        if thinking_block_idx.is_none() {
-                            thinking_block_idx = Some(turn.add_thinking_block(&text));
-                        } else {
-                            turn.append_to_block(thinking_block_idx.unwrap(), &text);
+                    let turn_id = *current_turn_id.get_or_insert_with(|| {
+                        self.transcript.add_empty(Role::Assistant, Status::Running)
+                    });
+                    if let Some(turn) = self.transcript.get_mut(turn_id) {
+                        match active_block {
+                            ActiveBlock::Thinking(idx) => turn.append_to_block(idx, &text),
+                            _ => active_block = ActiveBlock::Thinking(turn.add_block(Box::new(ThinkingBlock::new(&text)))),
                         }
                     }
                     self.draw()?;
                 }
-                AgentStep::ToolRequest { call_id, block, .. } => {
-                    // Reset streaming blocks - next text/thinking will be new blocks
-                    streaming_block_idx = None;
-                    thinking_block_idx = None;
-
-                    // Add tool block to turn
-                    if current_turn_id.is_none() {
-                        current_turn_id = Some(self.transcript.add_boxed(Role::Assistant, block));
-                    } else if let Some(turn) = self.transcript.get_mut(current_turn_id.unwrap()) {
-                        turn.add_block(block);
+                AgentStep::ToolRequest { block, .. } => {
+                    let turn_id = *current_turn_id.get_or_insert_with(|| {
+                        self.transcript.add_empty(Role::Assistant, Status::Running)
+                    });
+                    if let Some(turn) = self.transcript.get_mut(turn_id) {
+                        active_block = ActiveBlock::Tool(turn.add_block(block));
                     }
 
                     self.draw()?;
@@ -477,22 +460,14 @@ impl App {
                     // Wait for user approval
                     let decision = self.wait_for_tool_approval().await?;
 
-                    // If user quit during approval, break out
-                    if self.should_quit {
-                        if let Some(turn_id) = current_turn_id {
-                            if let Some(turn) = self.transcript.get_mut(turn_id) {
-                                turn.status = Status::Cancelled;
-                            }
-                        }
-                        break;
-                    }
-
                     // Update tool status based on decision
-                    if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id)) {
-                        if let Some(tool) = turn.get_block_mut(&call_id) {
-                            match decision {
-                                ToolDecision::Approve => tool.set_status(Status::Running),
-                                ToolDecision::Deny => tool.set_status(Status::Denied),
+                    if let ActiveBlock::Tool(idx) = active_block {
+                        if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id)) {
+                            if let Some(tool) = turn.get_block_mut(idx) {
+                                match decision {
+                                    ToolDecision::Approve => tool.set_status(Status::Running),
+                                    ToolDecision::Deny => tool.set_status(Status::Denied),
+                                }
                             }
                         }
                     }
@@ -500,17 +475,17 @@ impl App {
 
                     // Tell agent what to do and get the result
                     if let Some(AgentStep::ToolResult {
-                        call_id,
                         result,
                         is_error,
                         ..
                     }) = stream.decide_tool(decision).await
                     {
-                        if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id))
-                        {
-                            if let Some(tool) = turn.get_block_mut(&call_id) {
-                                tool.set_status(if is_error { Status::Error } else { Status::Success });
-                                tool.set_result(result);
+                        if let ActiveBlock::Tool(idx) = active_block {
+                            if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id)) {
+                                if let Some(tool) = turn.get_block_mut(idx) {
+                                    tool.set_status(if is_error { Status::Error } else { Status::Complete });
+                                    tool.set_result(result);
+                                }
                             }
                         }
                         self.draw()?;
@@ -568,10 +543,6 @@ impl App {
                         KeyCode::Char('a') => {
                             // TODO: implement allow for session
                             return Ok(ToolDecision::Approve);
-                        }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            self.should_quit = true;
-                            return Ok(ToolDecision::Deny);
                         }
                         _ => {}
                     }

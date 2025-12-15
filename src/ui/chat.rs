@@ -106,7 +106,7 @@ impl ChatViewWidget<'_> {
             }
             Status::Error => Some(Span::styled(" (error)", Style::default().fg(Color::Red))),
             Status::Cancelled => Some(Span::styled(" (cancelled)", Style::default().fg(Color::Yellow))),
-            Status::Success | Status::Denied => None,
+            Status::Complete | Status::Denied => None,
         };
 
         let mut header = vec![

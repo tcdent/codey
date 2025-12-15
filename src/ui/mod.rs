@@ -6,4 +6,4 @@ mod status;
 
 pub use chat::ChatView;
 pub use input::InputBox;
-pub use status::{ConnectionStatus, StatusBar};
+pub use status::ConnectionStatus;

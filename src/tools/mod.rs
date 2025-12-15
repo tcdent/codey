@@ -10,7 +10,7 @@ pub use read_file::ReadFileTool;
 pub use shell::ShellTool;
 pub use write_file::WriteFileTool;
 
-use crate::transcript::{Block, ToolBlock};
+use crate::transcript::Block;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -54,10 +54,7 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, params: serde_json::Value) -> Result<ToolResult>;
 
     /// Create a block for displaying this tool call
-    /// Default implementation returns a generic ToolBlock
-    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
-        Box::new(ToolBlock::new(call_id, self.name(), params))
-    }
+    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block>;
 }
 
 /// Registry of available tools
