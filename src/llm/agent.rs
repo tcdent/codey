@@ -1,5 +1,6 @@
 //! Agent loop for handling conversations with tool execution
 
+use crate::auth::OAuthCredentials;
 use crate::transcript::{Block, Role, Transcript};
 use crate::tools::ToolRegistry;
 use anyhow::Result;
@@ -66,6 +67,8 @@ pub struct Agent {
     tools: ToolRegistry,
     messages: Vec<ChatMessage>,
     total_usage: Usage,
+    /// OAuth credentials for Claude Max (if available)
+    oauth: Option<OAuthCredentials>,
 }
 
 impl Agent {
@@ -76,6 +79,7 @@ impl Agent {
         max_retries: u32,
         messages: Vec<(Role, String)>,
         tools: ToolRegistry,
+        oauth: Option<OAuthCredentials>,
     ) -> Self {
         let messages = messages
             .into_iter()
@@ -94,6 +98,7 @@ impl Agent {
             tools,
             messages,
             total_usage: Usage::default(),
+            oauth,
         }
     }
 
@@ -201,6 +206,20 @@ impl Agent {
         self.messages.push(ChatMessage::user(user_input));
         AgentStream::new(self)
     }
+
+    /// Refresh OAuth token if expired. Returns true if refresh was needed and succeeded.
+    pub async fn refresh_oauth_if_needed(&mut self) -> Result<bool> {
+        if let Some(ref oauth) = self.oauth {
+            if oauth.is_expired() {
+                info!("OAuth token expired, refreshing...");
+                let new_creds = crate::auth::refresh_token(oauth).await?;
+                new_creds.save()?;
+                self.oauth = Some(new_creds);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
 }
 
 /// Internal state for the agent stream
@@ -241,16 +260,31 @@ const DEFAULT_THINKING_BUDGET: u32 = 16000;
 impl<'a> AgentStream<'a> {
     fn new(agent: &'a mut Agent) -> Self {
         let tools = agent.get_tools();
+        
+        // Build headers based on OAuth availability
+        let headers = if let Some(ref oauth) = agent.oauth {
+            // OAuth mode: use Bearer auth with required beta headers (no x-api-key)
+            // Match OpenCode's exact header format
+            Headers::from([
+                ("authorization".to_string(), format!("Bearer {}", oauth.access_token)),
+                ("anthropic-beta".to_string(), 
+                    "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14".to_string()),
+                ("user-agent".to_string(), "ai-sdk/anthropic/2.0.50 ai-sdk/provider-utils/3.0.18 runtime/bun/1.3.4".to_string()),
+            ])
+        } else {
+            // API key mode: just the thinking beta header
+            Headers::from([(
+                "anthropic-beta".to_string(),
+                "interleaved-thinking-2025-05-14".to_string(),
+            )])
+        };
+        
         let chat_options = ChatOptions::default()
             .with_max_tokens(agent.max_tokens)
             .with_capture_tool_calls(true)
             .with_capture_reasoning_content(true)
             .with_reasoning_effort(ReasoningEffort::Budget(DEFAULT_THINKING_BUDGET))
-            // Enable interleaved thinking (thinking between tool calls)
-            .with_extra_headers(Headers::from([(
-                "anthropic-beta".to_string(),
-                "interleaved-thinking-2025-05-14".to_string(),
-            )]));
+            .with_extra_headers(headers);
 
         Self {
             agent,

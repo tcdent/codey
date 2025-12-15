@@ -1,27 +1,90 @@
 diff --git a/src/adapter/adapters/anthropic/adapter_impl.rs b/src/adapter/adapters/anthropic/adapter_impl.rs
-index 505a3f3..46a219f 100644
+index 505a3f3..90fe1f2 100644
 --- a/src/adapter/adapters/anthropic/adapter_impl.rs
 +++ b/src/adapter/adapters/anthropic/adapter_impl.rs
-@@ -88,12 +88,17 @@ impl Adapter for AnthropicAdapter {
+@@ -81,18 +81,36 @@ impl Adapter for AnthropicAdapter {
+ 	) -> Result<WebRequestData> {
+ 		let ServiceTarget { endpoint, auth, model } = target;
+ 
+-		// -- api_key
+-		let api_key = get_api_key(auth, &model)?;
+-
+ 		// -- url
  		let url = Self::get_service_url(&model, service_type, endpoint)?;
  
  		// -- headers
 -		let headers = Headers::from(vec![
-+		let mut headers = Headers::from(vec![
- 			// headers
- 			("x-api-key".to_string(), api_key),
- 			("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string()),
- 		]);
- 
+-			// headers
+-			("x-api-key".to_string(), api_key),
+-			("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string()),
+-		]);
++		// Check if OAuth is being used (Authorization header present in extra_headers)
++		let has_oauth = options_set.extra_headers()
++			.map(|h| h.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")))
++			.unwrap_or(false);
++
++		let mut headers = if has_oauth {
++			// OAuth mode: don't set x-api-key at all
++			Headers::from(vec![
++				("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string()),
++			])
++		} else {
++			// Standard API key mode
++			let api_key = get_api_key(auth, &model)?;
++			Headers::from(vec![
++				("x-api-key".to_string(), api_key),
++				("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string()),
++			])
++		};
++
 +		// Merge extra headers from chat options (allows adding anthropic-beta for interleaved thinking)
 +		if let Some(extra_headers) = options_set.extra_headers() {
 +			headers.merge_with(extra_headers);
 +		}
 +
++		// Debug: log all headers being sent
++		tracing::debug!("Anthropic request headers: {:?}", headers);
+ 
  		// -- Parts
  		let AnthropicRequestParts {
- 			system,
-@@ -451,6 +456,8 @@ impl AnthropicAdapter {
+@@ -147,6 +165,36 @@ impl Adapter for AnthropicAdapter {
+ 		});
+ 
+ 		if let Some(system) = system {
++			// For OAuth mode, prepend the Claude Code identifier block
++			let system = if has_oauth {
++				// Build system array with Claude Code identifier first
++				let claude_code_block = json!({
++					"type": "text",
++					"text": "You are Claude Code, Anthropic's official CLI for Claude.",
++					"cache_control": {"type": "ephemeral"}
++				});
++				
++				// Ensure the existing system is an array and prepend our block
++				match system {
++					Value::Array(mut arr) => {
++						arr.insert(0, claude_code_block);
++						Value::Array(arr)
++					}
++					Value::String(s) => {
++						// Convert string system to array format
++						json!([
++							claude_code_block,
++							{"type": "text", "text": s, "cache_control": {"type": "ephemeral"}}
++						])
++					}
++					other => {
++						// For any other format, wrap in array
++						json!([claude_code_block, other])
++					}
++				}
++			} else {
++				system
++			};
+ 			payload.x_insert("system", system)?;
+ 		}
+ 
+@@ -451,6 +499,8 @@ impl AnthropicAdapter {
  										"tool_use_id": tool_response.call_id,
  									}));
  								}
@@ -30,7 +93,7 @@ index 505a3f3..46a219f 100644
  							}
  						}
  						let values = apply_cache_control_to_parts(is_cache_control, values);
-@@ -458,14 +465,24 @@ impl AnthropicAdapter {
+@@ -458,14 +508,24 @@ impl AnthropicAdapter {
  					}
  				}
  
@@ -56,7 +119,7 @@ index 505a3f3..46a219f 100644
  							ContentPart::Text(text) => {
  								has_text = true;
  								values.push(json!({"type": "text", "text": text}));
-@@ -486,7 +503,7 @@ impl AnthropicAdapter {
+@@ -486,7 +546,7 @@ impl AnthropicAdapter {
  						}
  					}
  

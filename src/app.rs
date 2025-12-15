@@ -238,13 +238,23 @@ impl App {
     /// Run the main event loop - purely event-driven rendering
     pub async fn run(&mut self) -> Result<()> {
         let tools = ToolRegistry::new();
+        // Load OAuth credentials if available
+        let oauth = crate::auth::OAuthCredentials::load()
+            .ok()
+            .flatten();
+        if oauth.is_some() {
+            tracing::info!("Using OAuth authentication");
+        }
+        
         let messages = vec![(Role::System, SYSTEM_PROMPT.to_string())];
+        
         let mut agent = Agent::new(
             &self.config.general.model,
             self.config.general.max_tokens,
             self.config.general.max_retries,
             messages,
             tools,
+            oauth,
         );
 
         // Restore agent context if continuing session
@@ -459,6 +469,11 @@ impl App {
             turn.status = Status::Running;
         }
         self.draw()?;
+
+        // Refresh OAuth token if needed
+        if let Err(e) = agent.refresh_oauth_if_needed().await {
+            tracing::warn!("Failed to refresh OAuth token: {}", e);
+        }
 
         // Track the current assistant turn and active block
         let mut current_turn_id: Option<TurnId> = None;
