@@ -226,7 +226,7 @@ impl App {
         };
 
         // Compile tool filters from config
-        let tool_filters = ToolFilters::compile(&config.tools.filters)
+        let tool_filters = ToolFilters::compile(&config.tools.filters())
             .context("Failed to compile tool filters")?;
 
         Ok(Self {

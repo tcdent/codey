@@ -96,9 +96,16 @@ impl Default for UiConfig {
 pub struct ToolsConfig {
     pub enabled: Vec<String>,
     pub permissions: HashMap<String, PermissionLevel>,
-    pub shell: ShellConfig,
-    /// Per-tool parameter filters for auto-approve/auto-deny
-    pub filters: HashMap<String, ToolFilterConfig>,
+    /// Filter patterns for shell tool (matches against command)
+    pub shell: ToolFilterConfig,
+    /// Filter patterns for read_file tool (matches against path)
+    pub read_file: ToolFilterConfig,
+    /// Filter patterns for write_file tool (matches against path)
+    pub write_file: ToolFilterConfig,
+    /// Filter patterns for edit_file tool (matches against path)
+    pub edit_file: ToolFilterConfig,
+    /// Filter patterns for fetch_url tool (matches against url)
+    pub fetch_url: ToolFilterConfig,
 }
 
 impl Default for ToolsConfig {
@@ -119,9 +126,25 @@ impl Default for ToolsConfig {
                 "fetch_url".to_string(),
             ],
             permissions,
-            shell: ShellConfig::default(),
-            filters: HashMap::new(),
+            shell: ToolFilterConfig::default(),
+            read_file: ToolFilterConfig::default(),
+            write_file: ToolFilterConfig::default(),
+            edit_file: ToolFilterConfig::default(),
+            fetch_url: ToolFilterConfig::default(),
         }
+    }
+}
+
+impl ToolsConfig {
+    /// Build a HashMap of tool filters for compilation
+    pub fn filters(&self) -> HashMap<String, ToolFilterConfig> {
+        let mut map = HashMap::new();
+        map.insert("shell".to_string(), self.shell.clone());
+        map.insert("read_file".to_string(), self.read_file.clone());
+        map.insert("write_file".to_string(), self.write_file.clone());
+        map.insert("edit_file".to_string(), self.edit_file.clone());
+        map.insert("fetch_url".to_string(), self.fetch_url.clone());
+        map
     }
 }
 
@@ -131,22 +154,6 @@ pub enum PermissionLevel {
     Ask,
     Allow,
     Deny,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ShellConfig {
-    pub allowed_patterns: Vec<String>,
-    pub blocked_patterns: Vec<String>,
-}
-
-impl Default for ShellConfig {
-    fn default() -> Self {
-        Self {
-            allowed_patterns: vec![],
-            blocked_patterns: vec!["rm -rf /".to_string(), "sudo rm".to_string()],
-        }
-    }
 }
 
 impl Config {
@@ -202,5 +209,23 @@ auto_scroll = false
         assert_eq!(config.general.model, "claude-opus-4-20250514");
         assert_eq!(config.auth.method, AuthMethod::ApiKey);
         assert_eq!(config.ui.theme, "monokai");
+    }
+
+    #[test]
+    fn test_parse_tool_filters() {
+        let toml = r#"
+[tools.shell]
+allow = ["^ls\\b", "^cat\\b"]
+deny = ["rm -rf"]
+
+[tools.read_file]
+allow = ["\\.rs$"]
+deny = ["\\.env$"]
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.tools.shell.allow, vec!["^ls\\b", "^cat\\b"]);
+        assert_eq!(config.tools.shell.deny, vec!["rm -rf"]);
+        assert_eq!(config.tools.read_file.allow, vec!["\\.rs$"]);
+        assert_eq!(config.tools.read_file.deny, vec!["\\.env$"]);
     }
 }

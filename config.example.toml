@@ -44,23 +44,15 @@ edit_file = "ask"
 shell = "ask"
 fetch_url = "ask"
 
-[tools.shell]
-# Allowed shell command patterns (regex)
-# Leave empty to allow all (with permission prompt)
-allowed_patterns = []
-
-# Blocked commands (always denied regardless of permissions)
-blocked_patterns = ["rm -rf /", "sudo rm", ":(){ :|:& };:"]
-
 # Tool parameter filters for auto-approve/auto-deny
 # Evaluation order:
 #   1. If any deny pattern matches → auto-deny (blocked)
 #   2. If any allow pattern matches → auto-approve (no prompt)
 #   3. Otherwise → use permission level (ask/allow/deny)
 
-# Example: Auto-approve safe shell commands, block dangerous ones
-[tools.filters.shell]
-command.allow = [
+# Shell command filters (matches against 'command' parameter)
+[tools.shell]
+allow = [
     "^ls\\b",           # ls commands
     "^find\\b",         # find commands
     "^cat\\b",          # cat commands
@@ -72,7 +64,7 @@ command.allow = [
     "^pwd$",            # pwd command
     "^echo\\b",         # echo commands
 ]
-command.deny = [
+deny = [
     "rm\\s+-rf\\s+/",   # dangerous rm
     "sudo\\s+rm",       # sudo rm
     ":(){ :|:& };:",    # fork bomb
@@ -82,24 +74,41 @@ command.deny = [
     "wget.*\\|",        # wget piped to anything
 ]
 
-# Example: Auto-approve reading safe file types
-[tools.filters.read_file]
-path.allow = [
+# Read file filters (matches against 'path' parameter)
+[tools.read_file]
+allow = [
     "\\.(rs|toml|md|txt|json|yaml|yml|ts|js|py|go|c|h|cpp|hpp)$",  # Common code files
 ]
-path.deny = [
+deny = [
     "\\.env$",          # Environment files
     "secrets?",         # Secret files
     "\\.pem$",          # Private keys
     "\\.key$",          # Key files
 ]
 
-# Example: Restrict URL fetching
-[tools.filters.fetch_url]
-url.allow = [
+# Write file filters (matches against 'path' parameter)
+[tools.write_file]
+allow = []
+deny = [
+    "\\.env$",          # Environment files
+    "\\.pem$",          # Private keys
+    "\\.key$",          # Key files
+]
+
+# Edit file filters (matches against 'path' parameter)
+[tools.edit_file]
+allow = []
+deny = [
+    "\\.env$",          # Environment files
+    "\\.pem$",          # Private keys
+]
+
+# URL fetch filters (matches against 'url' parameter)
+[tools.fetch_url]
+allow = [
     "^https://",        # Only HTTPS
 ]
-url.deny = [
+deny = [
     "localhost",        # No local requests
     "127\\.0\\.0\\.1",  # No loopback
     "192\\.168\\.",     # No private networks
