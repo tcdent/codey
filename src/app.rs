@@ -597,11 +597,9 @@ impl App {
         agent: &mut Agent,
         prompt: &str,
         mode: RequestMode,
-    ) -> Result<String> {
+    ) -> Result<()> {
         let mut current_turn_id: Option<TurnId> = None;
         let mut active_block = ActiveBlock::None;
-        let mut accumulated_text = String::new();
-        let mut needs_compaction_reset = false;
 
         let mut stream = agent.process_message(prompt, mode);
 
@@ -625,7 +623,6 @@ impl App {
 
             match step {
                 AgentStep::TextDelta(text) => {
-                    accumulated_text.push_str(&text);
                     let turn_id = *current_turn_id.get_or_insert_with(|| {
                         self.transcript.add_empty(Role::Assistant, Status::Running)
                     });
@@ -638,7 +635,6 @@ impl App {
                     self.draw_throttled()?;
                 }
                 AgentStep::CompactionDelta(text) => {
-                    accumulated_text.push_str(&text);
                     let turn_id = *current_turn_id.get_or_insert_with(|| {
                         self.transcript.add_empty(Role::Assistant, Status::Running)
                     });
@@ -732,7 +728,7 @@ impl App {
                             }
                         }
 
-                        // Mark for compaction reset (done after loop to avoid borrow issues)
+                        // Save and rotate transcript for compaction (agent handles its own reset)
                         if matches!(active_block, ActiveBlock::Compaction(_)) {
                             if let Err(e) = self.transcript.save(&self.transcript_path) {
                                 tracing::error!("Failed to save transcript before compaction: {}", e);
@@ -740,7 +736,7 @@ impl App {
                             if let Err(e) = self.rotate_transcript() {
                                 tracing::error!("Failed to rotate transcript: {}", e);
                             }
-                            needs_compaction_reset = true;
+                            tracing::info!("Compaction complete, rotated to {:?}", self.transcript_path);
                         }
                     }
                     self.draw()?;
@@ -760,18 +756,6 @@ impl App {
             }
         }
 
-        // Drop stream to release borrow on agent before reset
-        drop(stream);
-
-        // Complete compaction reset after stream is dropped
-        if needs_compaction_reset {
-            agent.reset_with_summary(&accumulated_text);
-            if let Err(e) = self.transcript.save(&self.transcript_path) {
-                tracing::error!("Failed to save new transcript: {}", e);
-            }
-            tracing::info!("Compaction complete, rotated to {:?}", self.transcript_path);
-        }
-
         self.chat.enable_auto_scroll();
         self.draw()?;
 
@@ -779,7 +763,7 @@ impl App {
             tracing::error!("Failed to save transcript: {}", e);
         }
 
-        Ok(accumulated_text)
+        Ok(())
     }
 
     /// Check if compaction should be triggered

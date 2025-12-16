@@ -594,8 +594,13 @@ impl<'a> AgentStream<'a> {
                     }
 
                     if tool_calls.is_empty() {
-                        // No tool calls, just add text message
-                        self.agent.messages.push(ChatMessage::assistant(&full_text));
+                        if self.is_compaction {
+                            // Compaction mode: reset agent with summary instead of adding as message
+                            self.agent.reset_with_summary(&full_text);
+                        } else {
+                            // Normal mode: add text as assistant message
+                            self.agent.messages.push(ChatMessage::assistant(&full_text));
+                        }
                         let signatures = std::mem::take(&mut self.accumulated_signatures);
                         self.state = StreamState::Finished;
                         return Some(AgentStep::Finished {
