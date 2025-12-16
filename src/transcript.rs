@@ -345,20 +345,13 @@ impl CompactionBlock {
     }
 
     /// Create a pending compaction block (before summary is available)
-    pub fn pending(context_tokens: u32) -> Self {
+    pub fn pending(context_tokens: u32, previous_transcript: Option<String>) -> Self {
         Self {
             summary: String::new(),
-            previous_transcript: None,
+            previous_transcript,
             status: Status::Pending,
             context_tokens: Some(context_tokens),
         }
-    }
-
-    /// Update with the compaction result
-    pub fn complete(&mut self, summary: String, previous_transcript: Option<String>) {
-        self.summary = summary;
-        self.previous_transcript = previous_transcript;
-        self.status = Status::Complete;
     }
 }
 
@@ -444,6 +437,10 @@ impl Block for CompactionBlock {
 
     fn set_status(&mut self, status: Status) {
         self.status = status;
+    }
+
+    fn set_result(&mut self, result: String) {
+        self.summary = result;
     }
 
     fn text_content(&self) -> Option<&str> {
