@@ -509,10 +509,9 @@ impl<'a> AgentStream<'a> {
                                 ChatStreamEvent::Start => {}
                                 ChatStreamEvent::Chunk(chunk) => {
                                     full_text.push_str(&chunk.content);
-                                    return Some(if matches!(self.mode, RequestMode::Compaction) {
-                                        AgentStep::CompactionDelta(chunk.content)
-                                    } else {
-                                        AgentStep::TextDelta(chunk.content)
+                                    return Some(match self.mode {
+                                        RequestMode::Compaction => AgentStep::CompactionDelta(chunk.content),
+                                        RequestMode::Normal => AgentStep::TextDelta(chunk.content),
                                     });
                                 }
                                 ChatStreamEvent::ToolCallChunk(_) => {}
@@ -586,12 +585,9 @@ impl<'a> AgentStream<'a> {
                     }
 
                     if tool_calls.is_empty() {
-                        if matches!(self.mode, RequestMode::Compaction) {
-                            // Compaction mode: reset agent with summary instead of adding as message
-                            self.agent.reset_with_summary(&full_text);
-                        } else {
-                            // Normal mode: add text as assistant message
-                            self.agent.messages.push(ChatMessage::assistant(&full_text));
+                        match self.mode {
+                            RequestMode::Compaction => self.agent.reset_with_summary(&full_text),
+                            RequestMode::Normal => self.agent.messages.push(ChatMessage::assistant(&full_text)),
                         }
                         let signatures = std::mem::take(&mut self.accumulated_signatures);
                         self.state = StreamState::Finished;
