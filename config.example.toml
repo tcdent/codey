@@ -51,3 +51,58 @@ allowed_patterns = []
 
 # Blocked commands (always denied regardless of permissions)
 blocked_patterns = ["rm -rf /", "sudo rm", ":(){ :|:& };:"]
+
+# Tool parameter filters for auto-approve/auto-deny
+# Evaluation order:
+#   1. If any deny pattern matches → auto-deny (blocked)
+#   2. If any allow pattern matches → auto-approve (no prompt)
+#   3. Otherwise → use permission level (ask/allow/deny)
+
+# Example: Auto-approve safe shell commands, block dangerous ones
+[tools.filters.shell]
+command.allow = [
+    "^ls\\b",           # ls commands
+    "^find\\b",         # find commands
+    "^cat\\b",          # cat commands
+    "^head\\b",         # head commands
+    "^tail\\b",         # tail commands
+    "^grep\\b",         # grep commands
+    "^rg\\b",           # ripgrep commands
+    "^wc\\b",           # wc commands
+    "^pwd$",            # pwd command
+    "^echo\\b",         # echo commands
+]
+command.deny = [
+    "rm\\s+-rf\\s+/",   # dangerous rm
+    "sudo\\s+rm",       # sudo rm
+    ":(){ :|:& };:",    # fork bomb
+    "\\|\\s*sh\\b",     # piping to shell
+    "\\|\\s*bash\\b",   # piping to bash
+    "curl.*\\|",        # curl piped to anything
+    "wget.*\\|",        # wget piped to anything
+]
+
+# Example: Auto-approve reading safe file types
+[tools.filters.read_file]
+path.allow = [
+    "\\.(rs|toml|md|txt|json|yaml|yml|ts|js|py|go|c|h|cpp|hpp)$",  # Common code files
+]
+path.deny = [
+    "\\.env$",          # Environment files
+    "secrets?",         # Secret files
+    "\\.pem$",          # Private keys
+    "\\.key$",          # Key files
+]
+
+# Example: Restrict URL fetching
+[tools.filters.fetch_url]
+url.allow = [
+    "^https://",        # Only HTTPS
+]
+url.deny = [
+    "localhost",        # No local requests
+    "127\\.0\\.0\\.1",  # No loopback
+    "192\\.168\\.",     # No private networks
+    "10\\.",            # No private networks
+    "172\\.(1[6-9]|2[0-9]|3[01])\\.",  # No private networks
+]

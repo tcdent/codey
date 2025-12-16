@@ -301,6 +301,7 @@ dependencies = [
  "ratatui",
  "ratatui-core",
  "ratskin",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

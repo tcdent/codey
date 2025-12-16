@@ -41,6 +41,7 @@ anyhow = "1"
 thiserror = "2"
 
 # Utilities
+regex = "1.11"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"

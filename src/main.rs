@@ -5,6 +5,7 @@ mod compaction;
 mod config;
 mod llm;
 mod permission;
+mod tool_filter;
 mod tools;
 mod transcript;
 mod ui;

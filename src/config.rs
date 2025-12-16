@@ -1,5 +1,6 @@
 //! Configuration loading and validation
 
+use crate::tool_filter::ToolFilterConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -96,6 +97,8 @@ pub struct ToolsConfig {
     pub enabled: Vec<String>,
     pub permissions: HashMap<String, PermissionLevel>,
     pub shell: ShellConfig,
+    /// Per-tool parameter filters for auto-approve/auto-deny
+    pub filters: HashMap<String, ToolFilterConfig>,
 }
 
 impl Default for ToolsConfig {
@@ -117,6 +120,7 @@ impl Default for ToolsConfig {
             ],
             permissions,
             shell: ShellConfig::default(),
+            filters: HashMap::new(),
         }
     }
 }
