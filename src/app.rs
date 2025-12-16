@@ -570,7 +570,7 @@ impl App {
                 }
                 self.draw()?;
 
-                self.stream_response(agent, &content, RequestMode::normal()).await?;
+                self.stream_response(agent, &content, RequestMode::Normal).await?;
 
                 if let Some(turn) = self.transcript.get_mut(turn_id) {
                     turn.status = Status::Complete;
@@ -583,7 +583,7 @@ impl App {
             }
             MessageRequest::Compaction => {
                 // Compaction is handled entirely by stream_response
-                self.stream_response(agent, COMPACTION_PROMPT, RequestMode::compaction()).await?;
+                self.stream_response(agent, COMPACTION_PROMPT, RequestMode::Compaction).await?;
             }
         }
 

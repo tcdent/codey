@@ -79,47 +79,35 @@ pub enum AgentStep {
 pub use crate::permission::ToolDecision;
 
 /// Request mode controlling agent behavior for a single request
-/// Contains settings that can override agent defaults per-request
-#[derive(Debug, Clone, Copy)]
-pub struct RequestMode {
-    /// Whether tools are available for this request
-    pub tools_enabled: bool,
-    /// Override max tokens for this request (None = use agent default)
-    pub max_tokens: Option<u32>,
-    /// Override thinking budget for this request (None = use default)
-    pub thinking_budget: Option<u32>,
-    /// Whether to capture tool calls in response
-    pub capture_tool_calls: bool,
-    /// Whether this is a compaction request (resets agent after completion)
-    pub is_compaction: bool,
+#[derive(Debug, Clone, Copy, Default)]
+pub enum RequestMode {
+    /// Normal conversation mode with tool access
+    #[default]
+    Normal,
+    /// Compaction mode: no tools, focused on summarization
+    Compaction,
 }
 
-impl Default for RequestMode {
-    fn default() -> Self {
-        Self::normal()
-    }
+/// Options derived from a RequestMode
+pub struct ModeOptions {
+    pub tools_enabled: bool,
+    pub thinking_budget: Option<u32>,
+    pub capture_tool_calls: bool,
 }
 
 impl RequestMode {
-    /// Normal conversation mode with tool access
-    pub fn normal() -> Self {
-        Self {
-            tools_enabled: true,
-            max_tokens: None,
-            thinking_budget: None,
-            capture_tool_calls: true,
-            is_compaction: false,
-        }
-    }
-
-    /// Compaction mode: no tools, focused on summarization
-    pub fn compaction() -> Self {
-        Self {
-            tools_enabled: false,
-            max_tokens: None,
-            thinking_budget: Some(8000), // Less thinking needed for summarization
-            capture_tool_calls: false,
-            is_compaction: true,
+    pub fn options(&self) -> ModeOptions {
+        match self {
+            Self::Normal => ModeOptions {
+                tools_enabled: true,
+                thinking_budget: None,
+                capture_tool_calls: true,
+            },
+            Self::Compaction => ModeOptions {
+                tools_enabled: false,
+                thinking_budget: Some(8000),
+                capture_tool_calls: false,
+            },
         }
     }
 }
@@ -381,7 +369,8 @@ const DEFAULT_THINKING_BUDGET: u32 = 16000;
 
 impl<'a> AgentStream<'a> {
     fn new(agent: &'a mut Agent, mode: RequestMode) -> Self {
-        let tools = if mode.tools_enabled { agent.get_tools() } else { Vec::new() };
+        let opts = mode.options();
+        let tools = if opts.tools_enabled { agent.get_tools() } else { Vec::new() };
 
         // Build headers based on OAuth availability
         let headers = if let Some(ref oauth) = agent.oauth {
@@ -401,13 +390,12 @@ impl<'a> AgentStream<'a> {
         };
 
         // Apply mode settings with agent defaults as fallback
-        let max_tokens = mode.max_tokens.unwrap_or(agent.max_tokens);
-        let thinking_budget = mode.thinking_budget.unwrap_or(DEFAULT_THINKING_BUDGET);
+        let thinking_budget = opts.thinking_budget.unwrap_or(DEFAULT_THINKING_BUDGET);
 
         let chat_options = ChatOptions::default()
-            .with_max_tokens(max_tokens)
+            .with_max_tokens(agent.max_tokens)
             .with_capture_usage(true)
-            .with_capture_tool_calls(mode.capture_tool_calls)
+            .with_capture_tool_calls(opts.capture_tool_calls)
             .with_capture_reasoning_content(true)
             .with_reasoning_effort(ReasoningEffort::Budget(thinking_budget))
             .with_extra_headers(headers);
@@ -521,7 +509,7 @@ impl<'a> AgentStream<'a> {
                                 ChatStreamEvent::Start => {}
                                 ChatStreamEvent::Chunk(chunk) => {
                                     full_text.push_str(&chunk.content);
-                                    return Some(if self.mode.is_compaction {
+                                    return Some(if matches!(self.mode, RequestMode::Compaction) {
                                         AgentStep::CompactionDelta(chunk.content)
                                     } else {
                                         AgentStep::TextDelta(chunk.content)
@@ -598,7 +586,7 @@ impl<'a> AgentStream<'a> {
                     }
 
                     if tool_calls.is_empty() {
-                        if self.mode.is_compaction {
+                        if matches!(self.mode, RequestMode::Compaction) {
                             // Compaction mode: reset agent with summary instead of adding as message
                             self.agent.reset_with_summary(&full_text);
                         } else {
