@@ -638,10 +638,7 @@ impl App {
                             tracing::debug!("Tool {} auto-denied by filter", name);
                             ToolDecision::Deny
                         }
-                        FilterResult::NoMatch => {
-                            // No filter matched, wait for user approval
-                            self.wait_for_tool_approval().await?
-                        }
+                        _ => self.wait_for_tool_approval().await?,
                     };
 
                     if let Some(block) = self.transcript.get_or_create_current_turn().get_active_block_mut() {
