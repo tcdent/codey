@@ -122,10 +122,6 @@ impl Block for ReadFileBlock {
     fn result(&self) -> Option<&str> {
         self.result.as_deref()
     }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
 }
 
 /// Tool for reading file contents

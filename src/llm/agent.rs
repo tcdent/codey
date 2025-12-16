@@ -372,8 +372,8 @@ pub struct AgentStream<'a> {
     chat_options: ChatOptions,
     /// Accumulated thinking signatures across all rounds of the agent loop
     accumulated_signatures: Vec<String>,
-    /// Whether this stream is in compaction mode (emits CompactionDelta instead of TextDelta)
-    is_compaction: bool,
+    /// Request mode for this stream
+    mode: RequestMode,
 }
 
 /// Default thinking budget in tokens (16k allows substantial reasoning)
@@ -418,7 +418,7 @@ impl<'a> AgentStream<'a> {
             tools,
             chat_options,
             accumulated_signatures: Vec::new(),
-            is_compaction: mode.is_compaction,
+            mode,
         }
     }
 
@@ -521,7 +521,7 @@ impl<'a> AgentStream<'a> {
                                 ChatStreamEvent::Start => {}
                                 ChatStreamEvent::Chunk(chunk) => {
                                     full_text.push_str(&chunk.content);
-                                    return Some(if self.is_compaction {
+                                    return Some(if self.mode.is_compaction {
                                         AgentStep::CompactionDelta(chunk.content)
                                     } else {
                                         AgentStep::TextDelta(chunk.content)
@@ -598,7 +598,7 @@ impl<'a> AgentStream<'a> {
                     }
 
                     if tool_calls.is_empty() {
-                        if self.is_compaction {
+                        if self.mode.is_compaction {
                             // Compaction mode: reset agent with summary instead of adding as message
                             self.agent.reset_with_summary(&full_text);
                         } else {

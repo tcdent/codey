@@ -88,9 +88,6 @@ pub trait Block: Send + Sync {
 
     /// Set the thinking signature (called after streaming completes)
     fn set_signature(&mut self, _signature: &str) {}
-
-    /// Downcast to concrete type for type-specific operations
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 /// Simple text content
@@ -132,10 +129,6 @@ impl Block for TextBlock {
 
     fn text_content(&self) -> Option<&str> {
         Some(&self.text)
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }
 
@@ -202,10 +195,6 @@ impl Block for ThinkingBlock {
 
     fn set_signature(&mut self, signature: &str) {
         self.signature = signature.to_string();
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }
 
@@ -318,10 +307,6 @@ impl Block for ToolBlock {
 
     fn result(&self) -> Option<&str> {
         self.result.as_deref()
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
     }
 }
 
