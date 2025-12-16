@@ -26,26 +26,15 @@ Be thorough but concise - this summary will seed a fresh conversation context."#
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionBlock {
     pub summary: String,
-    pub previous_transcript: Option<String>,
     pub status: Status,
     pub context_tokens: Option<u32>,
 }
 
 impl CompactionBlock {
-    pub fn new(summary: impl Into<String>, previous_transcript: Option<String>) -> Self {
-        Self {
-            summary: summary.into(),
-            previous_transcript,
-            status: Status::Complete,
-            context_tokens: None,
-        }
-    }
-
     /// Create a pending compaction block (before summary is available)
-    pub fn pending(context_tokens: u32, previous_transcript: Option<String>) -> Self {
+    pub fn pending(context_tokens: u32) -> Self {
         Self {
             summary: String::new(),
-            previous_transcript,
             status: Status::Pending,
             context_tokens: Some(context_tokens),
         }
@@ -59,7 +48,6 @@ impl Block for CompactionBlock {
 
         match self.status {
             Status::Pending | Status::Running => {
-                // Show in-progress indicator
                 let tokens_info = self.context_tokens
                     .map(|t| format!(" ({} tokens)", t))
                     .unwrap_or_default();
@@ -82,7 +70,6 @@ impl Block for CompactionBlock {
                 }
             }
             Status::Complete => {
-                // Header with icon
                 lines.push(Line::from(vec![
                     Span::styled("📋 ", Style::default().fg(Color::Cyan)),
                     Span::styled(
@@ -93,27 +80,16 @@ impl Block for CompactionBlock {
                     ),
                 ]));
 
-                // Previous transcript reference if available
-                if let Some(ref prev) = self.previous_transcript {
-                    lines.push(Line::from(Span::styled(
-                        format!("  Previous transcript: {}", prev),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
-
                 lines.push(Line::from(""));
 
                 // Render the summary using markdown
                 let skin = ratskin::RatSkin::default();
                 let text = ratskin::RatSkin::parse_text(&self.summary);
-                let summary_lines = skin.parse(text, width);
-
-                for line in summary_lines {
+                for line in skin.parse(text, width) {
                     lines.push(line);
                 }
             }
             _ => {
-                // Cancelled, Error, Denied - show appropriate message
                 lines.push(Line::from(vec![
                     Span::styled("📋 ", Style::default().fg(Color::Red)),
                     Span::styled(

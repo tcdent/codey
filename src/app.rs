@@ -550,14 +550,9 @@ impl App {
 
     /// Queue a compaction request
     fn queue_compaction(&mut self, context_tokens: u32) {
-        let previous_transcript = self.transcript_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
-
         let turn_id = self.transcript.add(
-            Role::System,
-            CompactionBlock::pending(context_tokens, previous_transcript),
+            Role::Assistant,
+            CompactionBlock::pending(context_tokens),
             Status::Pending,
         );
         self.message_queue.push(MessageRequest::Compaction { turn_id });
@@ -627,11 +622,6 @@ impl App {
         let mut active_block = ActiveBlock::None;
         let mut accumulated_text = String::new();
 
-        // If we have an existing turn, track its first block
-        if existing_turn.is_some() {
-            active_block = ActiveBlock::Text(0);
-        }
-
         let mut stream = agent.process_message(prompt, mode);
 
         loop {
@@ -661,7 +651,15 @@ impl App {
                     if let Some(turn) = self.transcript.get_mut(turn_id) {
                         match active_block {
                             ActiveBlock::Text(idx) => turn.append_to_block(idx, &text),
-                            _ => active_block = ActiveBlock::Text(turn.add_block(Box::new(TextBlock::new(&text)))),
+                            _ => {
+                                // If turn already has content (existing turn), append to first block
+                                if !turn.content.is_empty() {
+                                    turn.append_to_block(0, &text);
+                                    active_block = ActiveBlock::Text(0);
+                                } else {
+                                    active_block = ActiveBlock::Text(turn.add_block(Box::new(TextBlock::new(&text))));
+                                }
+                            }
                         }
                     }
                     self.draw_throttled()?;
