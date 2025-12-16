@@ -549,8 +549,12 @@ impl App {
     }
 
     /// Queue a compaction request
-    fn queue_compaction(&mut self) {
-        let turn_id = self.transcript.add_empty(Role::Assistant, Status::Pending);
+    fn queue_compaction(&mut self, context_tokens: u32) {
+        let turn_id = self.transcript.add(
+            Role::System,
+            CompactionBlock::pending(context_tokens),
+            Status::Pending,
+        );
         self.message_queue.push(MessageRequest::Compaction { turn_id });
         self.chat.enable_auto_scroll();
     }
@@ -578,31 +582,26 @@ impl App {
 
                 // Check if compaction is needed after user message
                 if self.should_compact(agent) {
-                    self.queue_compaction();
+                    self.queue_compaction(agent.context_tokens());
                 }
 
                 drop(response_text); // Not used for user messages
             }
             MessageRequest::Compaction { turn_id } => {
-                self.alert = Some(format!(
-                    "Context compaction in progress ({} tokens)...",
-                    agent.context_tokens()
-                ));
-
+                // Mark the compaction block as running
                 if let Some(turn) = self.transcript.get_mut(turn_id) {
                     turn.status = Status::Running;
+                    if let Some(block) = turn.content.first_mut() {
+                        block.set_status(Status::Running);
+                    }
                 }
                 self.draw()?;
 
                 // Get compaction summary
                 let summary_text = self.stream_response(agent, COMPACTION_PROMPT, RequestMode::compaction()).await?;
 
-                if let Some(turn) = self.transcript.get_mut(turn_id) {
-                    turn.status = Status::Complete;
-                }
-
                 // Complete the compaction: rotate transcript and reset agent
-                self.complete_compaction(agent, &summary_text)?;
+                self.complete_compaction(agent, turn_id, &summary_text)?;
             }
         }
 
@@ -756,7 +755,7 @@ impl App {
     }
 
     /// Complete compaction: rotate transcript and reset agent
-    fn complete_compaction(&mut self, agent: &mut Agent, summary_text: &str) -> Result<()> {
+    fn complete_compaction(&mut self, agent: &mut Agent, turn_id: TurnId, summary_text: &str) -> Result<()> {
         let previous_transcript = self.transcript_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -779,15 +778,18 @@ impl App {
 
         let formatted = summary.format_for_context();
 
-        self.transcript.add(
-            Role::System,
-            CompactionBlock::new(summary_text, previous_transcript),
-            Status::Complete,
-        );
+        // Update the existing compaction block with the result
+        if let Some(turn) = self.transcript.get_mut(turn_id) {
+            turn.status = Status::Complete;
+            if let Some(block) = turn.content.first_mut() {
+                // Downcast to CompactionBlock and update
+                if let Some(compaction_block) = block.as_any_mut().downcast_mut::<CompactionBlock>() {
+                    compaction_block.complete(summary_text.to_string(), previous_transcript);
+                }
+            }
+        }
 
         agent.reset_with_summary(&formatted);
-
-        self.alert = Some("Context compacted successfully".to_string());
         self.draw()?;
 
         if let Err(e) = self.transcript.save(&self.transcript_path) {

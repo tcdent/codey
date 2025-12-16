@@ -88,6 +88,9 @@ pub trait Block: Send + Sync {
 
     /// Set the thinking signature (called after streaming completes)
     fn set_signature(&mut self, _signature: &str) {}
+
+    /// Downcast to concrete type for type-specific operations
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 
 /// Simple text content
@@ -129,6 +132,10 @@ impl Block for TextBlock {
 
     fn text_content(&self) -> Option<&str> {
         Some(&self.text)
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
@@ -195,6 +202,10 @@ impl Block for ThinkingBlock {
 
     fn set_signature(&mut self, signature: &str) {
         self.signature = signature.to_string();
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
@@ -308,6 +319,10 @@ impl Block for ToolBlock {
     fn result(&self) -> Option<&str> {
         self.result.as_deref()
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 /// Compaction summary block - shown when context was compacted
@@ -315,6 +330,8 @@ impl Block for ToolBlock {
 pub struct CompactionBlock {
     pub summary: String,
     pub previous_transcript: Option<String>,
+    pub status: Status,
+    pub context_tokens: Option<u32>,
 }
 
 impl CompactionBlock {
@@ -322,7 +339,26 @@ impl CompactionBlock {
         Self {
             summary: summary.into(),
             previous_transcript,
+            status: Status::Complete,
+            context_tokens: None,
         }
+    }
+
+    /// Create a pending compaction block (before summary is available)
+    pub fn pending(context_tokens: u32) -> Self {
+        Self {
+            summary: String::new(),
+            previous_transcript: None,
+            status: Status::Pending,
+            context_tokens: Some(context_tokens),
+        }
+    }
+
+    /// Update with the compaction result
+    pub fn complete(&mut self, summary: String, previous_transcript: Option<String>) {
+        self.summary = summary;
+        self.previous_transcript = previous_transcript;
+        self.status = Status::Complete;
     }
 }
 
@@ -331,50 +367,95 @@ impl Block for CompactionBlock {
     fn render(&self, width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
-        // Header with icon
-        lines.push(Line::from(vec![
-            Span::styled("📋 ", Style::default().fg(Color::Cyan)),
-            Span::styled(
-                "Context Compacted",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        match self.status {
+            Status::Pending | Status::Running => {
+                // Show in-progress indicator
+                let tokens_info = self.context_tokens
+                    .map(|t| format!(" ({} tokens)", t))
+                    .unwrap_or_default();
 
-        // Previous transcript reference if available
-        if let Some(ref prev) = self.previous_transcript {
-            lines.push(Line::from(Span::styled(
-                format!("  Previous transcript: {}", prev),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
+                lines.push(Line::from(vec![
+                    Span::styled("📋 ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("Compacting context{}", tokens_info),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
 
-        lines.push(Line::from(""));
+                if self.status == Status::Running {
+                    lines.push(Line::from(Span::styled(
+                        "  Generating summary...",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
+            Status::Complete => {
+                // Header with icon
+                lines.push(Line::from(vec![
+                    Span::styled("📋 ", Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        "Context Compacted",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
 
-        // Render the summary using markdown
-        let skin = ratskin::RatSkin::default();
-        let text = ratskin::RatSkin::parse_text(&self.summary);
-        let summary_lines = skin.parse(text, width);
+                // Previous transcript reference if available
+                if let Some(ref prev) = self.previous_transcript {
+                    lines.push(Line::from(Span::styled(
+                        format!("  Previous transcript: {}", prev),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
 
-        // Indent summary lines
-        for line in summary_lines {
-            lines.push(line);
+                lines.push(Line::from(""));
+
+                // Render the summary using markdown
+                let skin = ratskin::RatSkin::default();
+                let text = ratskin::RatSkin::parse_text(&self.summary);
+                let summary_lines = skin.parse(text, width);
+
+                // Indent summary lines
+                for line in summary_lines {
+                    lines.push(line);
+                }
+            }
+            _ => {
+                // Cancelled, Error, Denied - show appropriate message
+                lines.push(Line::from(vec![
+                    Span::styled("📋 ", Style::default().fg(Color::Red)),
+                    Span::styled(
+                        "Context compaction failed",
+                        Style::default().fg(Color::Red),
+                    ),
+                ]));
+            }
         }
 
         lines
     }
 
     fn status(&self) -> Status {
-        Status::Complete
+        self.status
     }
 
-    fn set_status(&mut self, _status: Status) {
-        // Compaction blocks are always complete
+    fn set_status(&mut self, status: Status) {
+        self.status = status;
     }
 
     fn text_content(&self) -> Option<&str> {
-        Some(&self.summary)
+        if self.summary.is_empty() {
+            None
+        } else {
+            Some(&self.summary)
+        }
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 
