@@ -90,6 +90,8 @@ pub struct RequestMode {
     pub thinking_budget: Option<u32>,
     /// Whether to capture tool calls in response
     pub capture_tool_calls: bool,
+    /// Whether this is a compaction request (resets agent after completion)
+    pub is_compaction: bool,
 }
 
 impl Default for RequestMode {
@@ -106,6 +108,7 @@ impl RequestMode {
             max_tokens: None,
             thinking_budget: None,
             capture_tool_calls: true,
+            is_compaction: false,
         }
     }
 
@@ -116,6 +119,7 @@ impl RequestMode {
             max_tokens: None,
             thinking_budget: Some(8000), // Less thinking needed for summarization
             capture_tool_calls: false,
+            is_compaction: true,
         }
     }
 }
@@ -414,7 +418,7 @@ impl<'a> AgentStream<'a> {
             tools,
             chat_options,
             accumulated_signatures: Vec::new(),
-            is_compaction: !mode.tools_enabled,
+            is_compaction: mode.is_compaction,
         }
     }
 
