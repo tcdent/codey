@@ -667,7 +667,7 @@ impl App {
                     }
                     self.draw()?;
                 }
-                AgentStep::ToolRequest { block, .. } if mode.tools_enabled => {
+                AgentStep::ToolRequest { block, .. } => {
                     let turn_id = *current_turn_id.get_or_insert_with(|| {
                         self.transcript.add_empty(Role::Assistant, Status::Running)
                     });
@@ -702,11 +702,6 @@ impl App {
                         }
                         self.draw()?;
                     }
-                }
-                AgentStep::ToolRequest { .. } => {
-                    // Should not occur when tools are disabled at API level
-                    // Kept as defensive handling
-                    tracing::warn!("Unexpected tool request when tools disabled");
                 }
                 AgentStep::ToolResult { .. } => {}
                 AgentStep::Retrying { attempt, error } => {
