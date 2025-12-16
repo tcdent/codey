@@ -25,16 +25,20 @@ const ANTHROPIC_USER_AGENT: &str = "ai-sdk/anthropic/2.0.50 ai-sdk/provider-util
 /// Token usage tracking
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Usage {
+    /// Cumulative input tokens across the session
     pub input_tokens: u32,
+    /// Cumulative output tokens across the session
     pub output_tokens: u32,
-    // TODO cached tokens?
-    // we need this to be an accurate reflection of actual context window usage
+    /// Current context window size (last request's input tokens)
+    /// This is used to determine when compaction is needed
+    pub context_tokens: u32,
 }
 
 impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, other: Self) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
+        // context_tokens is set directly, not accumulated
     }
 }
 
@@ -250,6 +254,42 @@ impl Agent {
         }
         Ok(false)
     }
+
+    /// Get current context size in tokens
+    pub fn context_tokens(&self) -> u32 {
+        self.total_usage.context_tokens
+    }
+
+    /// Get total usage statistics
+    pub fn total_usage(&self) -> Usage {
+        self.total_usage
+    }
+
+    /// Reset the agent with a new context after compaction
+    /// Preserves the system prompt and adds the compaction summary
+    pub fn reset_with_summary(&mut self, summary: &str) {
+        // Preserve system prompt if present
+        let system_prompt = match self.messages.first() {
+            Some(msg) if matches!(msg.role, ChatRole::System) => Some(self.messages[0].clone()),
+            _ => None,
+        };
+
+        // Clear all messages
+        self.messages.clear();
+
+        // Restore system prompt
+        if let Some(system) = system_prompt {
+            self.messages.push(system);
+        }
+
+        // Add the compaction summary as a user message providing context
+        self.messages.push(ChatMessage::user(summary));
+
+        // Reset usage tracking (but keep context_tokens as reference)
+        self.total_usage = Usage::default();
+
+        info!("Agent reset with compaction summary ({} chars)", summary.len());
+    }
 }
 
 /// Internal state for the agent stream
@@ -435,10 +475,12 @@ impl<'a> AgentStream<'a> {
                                     if let Some(ref usage) = end.captured_usage {
                                         let input = usage.prompt_tokens.unwrap_or(0) as u32;
                                         let output = usage.completion_tokens.unwrap_or(0) as u32;
-                                        
+
                                         self.agent.total_usage.input_tokens += input;
                                         self.agent.total_usage.output_tokens += output;
-                                        
+                                        // Track current context size for compaction decisions
+                                        self.agent.total_usage.context_tokens = input;
+
                                         // Log token usage details
                                         let mut details = format!("Turn tokens: input={} output={}", input, output);
                                         

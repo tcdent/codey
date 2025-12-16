@@ -310,6 +310,74 @@ impl Block for ToolBlock {
     }
 }
 
+/// Compaction summary block - shown when context was compacted
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionBlock {
+    pub summary: String,
+    pub previous_transcript: Option<String>,
+}
+
+impl CompactionBlock {
+    pub fn new(summary: impl Into<String>, previous_transcript: Option<String>) -> Self {
+        Self {
+            summary: summary.into(),
+            previous_transcript,
+        }
+    }
+}
+
+#[typetag::serde]
+impl Block for CompactionBlock {
+    fn render(&self, width: u16) -> Vec<Line<'_>> {
+        let mut lines = Vec::new();
+
+        // Header with icon
+        lines.push(Line::from(vec![
+            Span::styled("📋 ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "Context Compacted",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        // Previous transcript reference if available
+        if let Some(ref prev) = self.previous_transcript {
+            lines.push(Line::from(Span::styled(
+                format!("  Previous transcript: {}", prev),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        lines.push(Line::from(""));
+
+        // Render the summary using markdown
+        let skin = ratskin::RatSkin::default();
+        let text = ratskin::RatSkin::parse_text(&self.summary);
+        let summary_lines = skin.parse(text, width);
+
+        // Indent summary lines
+        for line in summary_lines {
+            lines.push(line);
+        }
+
+        lines
+    }
+
+    fn status(&self) -> Status {
+        Status::Complete
+    }
+
+    fn set_status(&mut self, _status: Status) {
+        // Compaction blocks are always complete
+    }
+
+    fn text_content(&self) -> Option<&str> {
+        Some(&self.summary)
+    }
+}
+
 /// Helper: render approval prompt
 pub fn render_approval_prompt() -> Line<'static> {
     Line::from(vec![

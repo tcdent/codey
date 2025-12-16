@@ -1,6 +1,7 @@
+use crate::compaction::{CompactionSummary, COMPACTION_PROMPT};
 use crate::config::Config;
 use crate::llm::{Agent, AgentStep, ToolDecision, Usage};
-use crate::transcript::{Role, Status, TextBlock, ThinkingBlock, Transcript, TurnId};
+use crate::transcript::{CompactionBlock, Role, Status, TextBlock, ThinkingBlock, Transcript, TurnId};
 use crate::tools::ToolRegistry;
 use crate::ui::{ChatView, ConnectionStatus, InputBox};
 
@@ -325,6 +326,13 @@ impl App {
             if let Some((content, msg_id)) = self.message_queue.first().cloned() {
                 self.message_queue.remove(0);
                 self.send_message(&mut agent, content, msg_id).await?;
+
+                // Check if compaction is needed after processing the message
+                if let Err(e) = self.check_and_perform_compaction(&mut agent).await {
+                    tracing::error!("Compaction failed: {}", e);
+                    self.alert = Some(format!("Compaction failed: {}", e));
+                }
+
                 // send_message handles its own draw calls for streaming
                 continue;
             }
@@ -720,7 +728,139 @@ impl App {
         Ok(())
     }
 
+    /// Check if compaction is needed and perform it if so
+    /// Returns true if compaction was performed
+    pub async fn check_and_perform_compaction(&mut self, agent: &mut Agent) -> Result<bool> {
+        let context_tokens = agent.context_tokens();
+        let threshold = self.config.general.compaction_threshold;
 
+        if context_tokens < threshold {
+            return Ok(false);
+        }
+
+        tracing::info!(
+            "Context tokens ({}) exceeded threshold ({}), triggering compaction",
+            context_tokens,
+            threshold
+        );
+
+        // Show status to user
+        self.alert = Some(format!(
+            "Context compaction in progress ({} tokens)...",
+            context_tokens
+        ));
+        self.draw()?;
+
+        // Send compaction prompt to get summary
+        let summary = self.request_compaction_summary(agent).await?;
+
+        // Save current transcript path for reference
+        let previous_transcript = self.transcript_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
+
+        // Save current transcript before rotating
+        if let Err(e) = self.transcript.save(&self.transcript_path) {
+            tracing::error!("Failed to save transcript before compaction: {}", e);
+        }
+
+        // Rotate to new transcript
+        self.rotate_transcript()?;
+
+        // Create compaction summary and add to new transcript
+        let compaction = CompactionSummary::from_raw(summary.clone());
+        let formatted_summary = compaction.format_for_context();
+
+        // Add compaction block to new transcript
+        self.transcript.add(
+            Role::System,
+            CompactionBlock::new(&summary, previous_transcript),
+            Status::Complete,
+        );
+
+        // Reset agent with the formatted summary
+        agent.reset_with_summary(&formatted_summary);
+
+        // Clear alert and show success
+        self.alert = Some("Context compacted successfully".to_string());
+        self.draw()?;
+
+        // Save the new transcript
+        if let Err(e) = self.transcript.save(&self.transcript_path) {
+            tracing::error!("Failed to save new transcript after compaction: {}", e);
+        }
+
+        tracing::info!("Compaction complete, rotated to {:?}", self.transcript_path);
+        Ok(true)
+    }
+
+    /// Request a compaction summary from the agent
+    async fn request_compaction_summary(&mut self, agent: &mut Agent) -> Result<String> {
+        // Add a system turn to transcript showing we're compacting
+        let turn_id = self.transcript.add_empty(Role::Assistant, Status::Running);
+        self.draw()?;
+
+        let mut stream = agent.process_message(COMPACTION_PROMPT);
+        let mut summary_text = String::new();
+
+        loop {
+            let step = match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
+                Ok(Some(s)) => s,
+                Ok(None) => break,
+                Err(_) => continue,
+            };
+
+            match step {
+                AgentStep::TextDelta(text) => {
+                    summary_text.push_str(&text);
+                    // Update the transcript with streaming text
+                    if let Some(turn) = self.transcript.get_mut(turn_id) {
+                        if turn.content.is_empty() {
+                            turn.add_block(Box::new(TextBlock::new(&text)));
+                        } else {
+                            turn.append_to_block(0, &text);
+                        }
+                    }
+                    self.draw_throttled()?;
+                }
+                AgentStep::ThinkingDelta(_) => {
+                    // Skip thinking blocks for compaction
+                }
+                AgentStep::Finished { usage, .. } => {
+                    self.usage = usage;
+                    if let Some(turn) = self.transcript.get_mut(turn_id) {
+                        turn.status = Status::Complete;
+                    }
+                    break;
+                }
+                AgentStep::Error(msg) => {
+                    tracing::error!("Compaction request failed: {}", msg);
+                    if let Some(turn) = self.transcript.get_mut(turn_id) {
+                        turn.status = Status::Error;
+                    }
+                    return Err(anyhow::anyhow!("Compaction failed: {}", msg));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(summary_text)
+    }
+
+    /// Rotate to a new transcript file
+    fn rotate_transcript(&mut self) -> Result<()> {
+        let transcripts_dir = get_transcripts_dir()?;
+        let next_number = find_latest_transcript_number(&transcripts_dir)
+            .map(|n| n + 1)
+            .unwrap_or(0);
+
+        self.transcript_path = transcript_path(&transcripts_dir, next_number);
+        self.transcript = Transcript::new();
+
+        tracing::info!("Rotated to new transcript: {:?}", self.transcript_path);
+        Ok(())
+    }
 
     /// Cleanup terminal
     fn cleanup(&mut self) -> Result<()> {

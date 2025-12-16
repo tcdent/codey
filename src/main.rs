@@ -1,5 +1,6 @@
 mod app;
 mod auth;
+mod compaction;
 mod config;
 mod llm;
 mod permission;
