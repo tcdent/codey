@@ -76,20 +76,45 @@ pub enum AgentStep {
 
 pub use crate::permission::ToolDecision;
 
-/// Request mode controlling agent behavior
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RequestMode {
-    /// Normal conversation with tool access
-    #[default]
-    Normal,
-    /// Compaction mode: no tools, focused on summarization
-    Compaction,
+/// Request mode controlling agent behavior for a single request
+/// Contains settings that can override agent defaults per-request
+#[derive(Debug, Clone, Copy)]
+pub struct RequestMode {
+    /// Whether tools are available for this request
+    pub tools_enabled: bool,
+    /// Override max tokens for this request (None = use agent default)
+    pub max_tokens: Option<u32>,
+    /// Override thinking budget for this request (None = use default)
+    pub thinking_budget: Option<u32>,
+    /// Whether to capture tool calls in response
+    pub capture_tool_calls: bool,
+}
+
+impl Default for RequestMode {
+    fn default() -> Self {
+        Self::normal()
+    }
 }
 
 impl RequestMode {
-    /// Whether tools are enabled in this mode
-    pub fn tools_enabled(&self) -> bool {
-        matches!(self, RequestMode::Normal)
+    /// Normal conversation mode with tool access
+    pub fn normal() -> Self {
+        Self {
+            tools_enabled: true,
+            max_tokens: None,
+            thinking_budget: None,
+            capture_tool_calls: true,
+        }
+    }
+
+    /// Compaction mode: no tools, focused on summarization
+    pub fn compaction() -> Self {
+        Self {
+            tools_enabled: false,
+            max_tokens: None,
+            thinking_budget: Some(8000), // Less thinking needed for summarization
+            capture_tool_calls: false,
+        }
     }
 }
 
@@ -348,8 +373,8 @@ const DEFAULT_THINKING_BUDGET: u32 = 16000;
 
 impl<'a> AgentStream<'a> {
     fn new(agent: &'a mut Agent, mode: RequestMode) -> Self {
-        let tools = if mode.tools_enabled() { agent.get_tools() } else { Vec::new() };
-        
+        let tools = if mode.tools_enabled { agent.get_tools() } else { Vec::new() };
+
         // Build headers based on OAuth availability
         let headers = if let Some(ref oauth) = agent.oauth {
             // OAuth mode: use Bearer auth with required beta headers (no x-api-key)
@@ -366,13 +391,17 @@ impl<'a> AgentStream<'a> {
                 "interleaved-thinking-2025-05-14".to_string(),
             )])
         };
-        
+
+        // Apply mode settings with agent defaults as fallback
+        let max_tokens = mode.max_tokens.unwrap_or(agent.max_tokens);
+        let thinking_budget = mode.thinking_budget.unwrap_or(DEFAULT_THINKING_BUDGET);
+
         let chat_options = ChatOptions::default()
-            .with_max_tokens(agent.max_tokens)
+            .with_max_tokens(max_tokens)
             .with_capture_usage(true)
-            .with_capture_tool_calls(true)
+            .with_capture_tool_calls(mode.capture_tool_calls)
             .with_capture_reasoning_content(true)
-            .with_reasoning_effort(ReasoningEffort::Budget(DEFAULT_THINKING_BUDGET))
+            .with_reasoning_effort(ReasoningEffort::Budget(thinking_budget))
             .with_extra_headers(headers);
 
         Self {

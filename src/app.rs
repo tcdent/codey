@@ -570,7 +570,7 @@ impl App {
                 }
                 self.draw()?;
 
-                let response_text = self.stream_response(agent, &content, RequestMode::Normal).await?;
+                let response_text = self.stream_response(agent, &content, RequestMode::normal()).await?;
 
                 if let Some(turn) = self.transcript.get_mut(turn_id) {
                     turn.status = Status::Complete;
@@ -595,7 +595,7 @@ impl App {
                 self.draw()?;
 
                 // Get compaction summary
-                let summary_text = self.stream_response(agent, COMPACTION_PROMPT, RequestMode::Compaction).await?;
+                let summary_text = self.stream_response(agent, COMPACTION_PROMPT, RequestMode::compaction()).await?;
 
                 if let Some(turn) = self.transcript.get_mut(turn_id) {
                     turn.status = Status::Complete;
@@ -667,7 +667,7 @@ impl App {
                     }
                     self.draw()?;
                 }
-                AgentStep::ToolRequest { block, .. } if mode.tools_enabled() => {
+                AgentStep::ToolRequest { block, .. } if mode.tools_enabled => {
                     let turn_id = *current_turn_id.get_or_insert_with(|| {
                         self.transcript.add_empty(Role::Assistant, Status::Running)
                     });
