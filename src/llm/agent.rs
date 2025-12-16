@@ -6,18 +6,29 @@ use crate::tools::ToolRegistry;
 use anyhow::Result;
 use futures::StreamExt;
 use genai::chat::{
-    ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent, ChatStreamResponse,
+    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent, ChatStreamResponse,
     ContentPart, MessageContent, ReasoningEffort, Thinking, Tool, ToolCall, ToolResponse,
 };
 use genai::{Client, Headers};
 use std::time::Duration;
 use tracing::{debug, error, info};
 
+
+const ANTHROPIC_BETA_HEADER: &str = concat!(
+    "oauth-2025-04-20,",
+    "claude-code-20250219,",
+    "interleaved-thinking-2025-05-14,",
+    "fine-grained-tool-streaming-2025-05-14",
+);
+const ANTHROPIC_USER_AGENT: &str = "ai-sdk/anthropic/2.0.50 ai-sdk/provider-utils/3.0.18 runtime/bun/1.3.4";
+
 /// Token usage tracking
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Usage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    // TODO cached tokens?
+    // we need this to be an accurate reflection of actual context window usage
 }
 
 impl std::ops::AddAssign for Usage {
@@ -45,7 +56,10 @@ pub enum AgentStep {
         is_error: bool,
     },
     /// Retrying after error
-    Retrying { attempt: u32, error: String },
+    Retrying {
+        attempt: u32, 
+        error: String,
+    },
     /// Agent finished processing this message
     Finished { 
         usage: Usage,
@@ -86,7 +100,8 @@ impl Agent {
             .map(|(role, text)| match role {
                 Role::User => ChatMessage::user(text),
                 Role::Assistant => ChatMessage::assistant(text),
-                Role::System => ChatMessage::system(text),
+                // Cache system messages for reuse across requests
+                Role::System => ChatMessage::system(text).with_options(CacheControl::Ephemeral),
             })
             .collect();
 
@@ -106,6 +121,7 @@ impl Agent {
     /// Preserves the existing system prompt (first message if it's a system message)
     pub fn restore_from_transcript(&mut self, transcript: &Transcript) {
         // Preserve system prompt if present (should be first message)
+        // TODO we're not going to serialize system prompts in transcripts
         let system_prompt = match self.messages.first() {
             Some(msg) if matches!(msg.role, ChatRole::System) => Some(self.messages.remove(0)),
             _ => None,
@@ -119,6 +135,12 @@ impl Agent {
         }
         
         for turn in transcript.turns() {
+            // Only restore completed turns - skip incomplete/running/cancelled turns
+            // This also filters out thinking blocks since they don't have `status`
+            if turn.status != crate::transcript::Status::Complete {
+                continue;
+            }
+            
             match turn.role {
                 // Skip system turns - we use our predefined system prompt
                 Role::System => continue,
@@ -131,20 +153,19 @@ impl Agent {
                         .join("\n");
                     
                     if !text.is_empty() {
+                        // Don't add cache_control here - we'll add it to the last message only
                         self.messages.push(ChatMessage::user(text));
                     }
                 }
                 Role::Assistant => {
                     // Build message content: thinking first, then text, then tool calls
                     let mut content = MessageContent::default();
-                    let mut has_content = false;
                     
                     // Process blocks in order, but thinking blocks must come first
                     // First pass: add thinking blocks
                     for block in &turn.content {
                         if let (Some(text), Some(sig)) = (block.text_content(), block.signature()) {
                             content = content.append(ContentPart::Thinking(Thinking::new(text, sig)));
-                            has_content = true;
                         }
                     }
                     
@@ -158,7 +179,6 @@ impl Agent {
                     
                     if !text.is_empty() {
                         content = content.append(ContentPart::Text(text));
-                        has_content = true;
                     }
                     
                     // Third pass: add tool calls
@@ -172,18 +192,18 @@ impl Agent {
                                 fn_arguments: params.clone(),
                             };
                             content = content.append(ContentPart::ToolCall(tc));
-                            has_content = true;
                         }
                     }
                     
-                    if has_content {
+                    if !content.is_empty() {
+                        // Don't add cache_control here - we'll add it to the last message only
                         self.messages.push(ChatMessage {
                             role: ChatRole::Assistant,
                             content,
                             options: None,
                         });
                         
-                        // Add tool responses for each tool call
+                        // Add tool responses without cache_control - we'll add it to the last message only
                         for block in &turn.content {
                             if let (Some(call_id), Some(result)) = (block.call_id(), block.result()) {
                                 let response = ToolResponse::new(call_id.to_string(), result.to_string());
@@ -212,6 +232,7 @@ impl Agent {
 
     /// Start processing a user message, returns a stream of steps
     pub fn process_message(&mut self, user_input: &str) -> AgentStream<'_> {
+        // Add user message (cache_control will be applied dynamically before API call)
         self.messages.push(ChatMessage::user(user_input));
         AgentStream::new(self)
     }
@@ -247,7 +268,7 @@ enum StreamState {
     AwaitingToolDecision {
         assistant_text: String,
         all_tool_calls: Vec<ToolCall>,
-        thinking_blocks: Vec<Thinking>,
+        thinking_blocks: Vec<Thinking>, // TODO we may not need to actually capture these. 
         current_tool_index: usize,
         tool_responses: Vec<ToolResponse>,
     },
@@ -261,6 +282,8 @@ pub struct AgentStream<'a> {
     state: StreamState,
     tools: Vec<Tool>,
     chat_options: ChatOptions,
+    /// Accumulated thinking signatures across all rounds of the agent loop
+    accumulated_signatures: Vec<String>,
 }
 
 /// Default thinking budget in tokens (16k allows substantial reasoning)
@@ -276,9 +299,8 @@ impl<'a> AgentStream<'a> {
             // Match OpenCode's exact header format
             Headers::from([
                 ("authorization".to_string(), format!("Bearer {}", oauth.access_token)),
-                ("anthropic-beta".to_string(), 
-                    "oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14".to_string()),
-                ("user-agent".to_string(), "ai-sdk/anthropic/2.0.50 ai-sdk/provider-utils/3.0.18 runtime/bun/1.3.4".to_string()),
+                ("anthropic-beta".to_string(), ANTHROPIC_BETA_HEADER.to_string()),
+                ("user-agent".to_string(), ANTHROPIC_USER_AGENT.to_string()),
             ])
         } else {
             // API key mode: just the thinking beta header
@@ -290,6 +312,7 @@ impl<'a> AgentStream<'a> {
         
         let chat_options = ChatOptions::default()
             .with_max_tokens(agent.max_tokens)
+            .with_capture_usage(true)
             .with_capture_tool_calls(true)
             .with_capture_reasoning_content(true)
             .with_reasoning_effort(ReasoningEffort::Budget(DEFAULT_THINKING_BUDGET))
@@ -300,22 +323,36 @@ impl<'a> AgentStream<'a> {
             state: StreamState::NeedsChatRequest,
             tools,
             chat_options,
+            accumulated_signatures: Vec::new(),
         }
     }
 
     /// Execute a chat request with retry and exponential backoff
     async fn exec_chat_with_retry(&self) -> Result<ChatStreamResponse, AgentStep> {
-        let request =
-            ChatRequest::new(self.agent.messages.clone())
-                .with_tools(self.tools.clone());
+        // Clone messages and add cache_control to the last message
+        // Per Anthropic docs: mark the final message to enable incremental caching
+        let mut messages = self.agent.messages.clone();
+        if let Some(last_msg) = messages.last_mut() {
+            last_msg.options = Some(CacheControl::Ephemeral.into());
+            debug!("Added cache_control to last message (role: {})", last_msg.role);
+        }
+        
+        // Count messages with cache_control
+        let cache_control_count = messages.iter().filter(|m| m.options.is_some()).count();
+        debug!("Messages with cache_control: {}/{}", cache_control_count, messages.len());
+        
+        // Debug: log the last message role to verify
+        if let Some(last) = messages.last() {
+            debug!("Last message role: {}, has_cache_control: {}", last.role, last.options.is_some());
+        }
+        
+        let request = ChatRequest::new(messages)
+            .with_tools(self.tools.clone());
 
         info!(
             "Making chat request with {} messages",
             self.agent.messages.len()
         );
-        for (i, msg) in self.agent.messages.iter().enumerate() {
-            debug!("Message {}: role={:?}, content={:?}", i, msg.role, msg.content);
-        }
 
         let mut attempt = 0u32;
         let _delay = Duration::from_millis(500); // TODO: implement exponential backoff
@@ -396,10 +433,37 @@ impl<'a> AgentStream<'a> {
                                 }
                                 ChatStreamEvent::End(mut end) => {
                                     if let Some(ref usage) = end.captured_usage {
-                                        self.agent.total_usage.input_tokens +=
-                                            usage.prompt_tokens.unwrap_or(0) as u32;
-                                        self.agent.total_usage.output_tokens +=
-                                            usage.completion_tokens.unwrap_or(0) as u32;
+                                        let input = usage.prompt_tokens.unwrap_or(0) as u32;
+                                        let output = usage.completion_tokens.unwrap_or(0) as u32;
+                                        
+                                        self.agent.total_usage.input_tokens += input;
+                                        self.agent.total_usage.output_tokens += output;
+                                        
+                                        // Log token usage details
+                                        let mut details = format!("Turn tokens: input={} output={}", input, output);
+                                        
+                                        if let Some(ref prompt_details) = usage.prompt_tokens_details {
+                                            if let Some(cache_creation) = prompt_details.cache_creation_tokens {
+                                                details.push_str(&format!(" cache_creation={}", cache_creation));
+                                            }
+                                            if let Some(cached) = prompt_details.cached_tokens {
+                                                details.push_str(&format!(" cached={}", cached));
+                                            }
+                                        }
+                                        
+                                        if let Some(ref completion_details) = usage.completion_tokens_details {
+                                            if let Some(reasoning) = completion_details.reasoning_tokens {
+                                                details.push_str(&format!(" reasoning={}", reasoning));
+                                            }
+                                        }
+                                        
+                                        info!("{}", details);
+                                        
+                                        // Debug: log full usage details
+                                        debug!("Full usage: prompt_tokens={:?}, completion_tokens={:?}, total_tokens={:?}",
+                                            usage.prompt_tokens, usage.completion_tokens, usage.total_tokens);
+                                        debug!("Prompt details: {:?}", usage.prompt_tokens_details);
+                                        debug!("Completion details: {:?}", usage.completion_tokens_details);
                                     }
                                     // Capture thinking blocks first (before consuming end)
                                     if let Some(captured) = end.captured_thinking_blocks.take() {
@@ -425,12 +489,15 @@ impl<'a> AgentStream<'a> {
                     let tool_calls = std::mem::take(tool_calls);
                     let thinking_blocks = std::mem::take(thinking_blocks);
 
+                    // Accumulate signatures from this round's thinking blocks
+                    for thinking in thinking_blocks.iter() {
+                        self.accumulated_signatures.push(thinking.signature.clone());
+                    }
+
                     if tool_calls.is_empty() {
                         // No tool calls, just add text message
                         self.agent.messages.push(ChatMessage::assistant(&full_text));
-                        let signatures: Vec<String> = thinking_blocks.iter()
-                            .map(|t| t.signature.clone())
-                            .collect();
+                        let signatures = std::mem::take(&mut self.accumulated_signatures);
                         self.state = StreamState::Finished;
                         return Some(AgentStep::Finished {
                             usage: self.agent.total_usage,
@@ -517,14 +584,8 @@ impl<'a> AgentStream<'a> {
                     // Per Anthropic docs: thinking blocks must come first, then text/tool_use
                     let mut content = MessageContent::default();
                     
-                    debug!("Building assistant message with {} thinking blocks, text={}, {} tool calls",
-                        thinking_blocks.len(),
-                        !assistant_text.is_empty(),
-                        all_tool_calls.len());
-                    
                     // Add thinking blocks first (required for extended thinking with tool use)
                     for thinking in &thinking_blocks {
-                        debug!("Adding thinking block: signature len={}", thinking.signature.len());
                         content = content.append(ContentPart::Thinking(thinking.clone()));
                     }
                     
@@ -538,13 +599,14 @@ impl<'a> AgentStream<'a> {
                         content = content.append(ContentPart::ToolCall(tc.clone()));
                     }
                     
+                    // Add assistant message without cache control
                     self.agent.messages.push(ChatMessage {
                         role: ChatRole::Assistant,
                         content,
                         options: None,
                     });
 
-                    // Add tool responses
+                    // Add tool responses without cache control
                     for response in tool_responses {
                         self.agent.messages.push(ChatMessage::from(response));
                     }

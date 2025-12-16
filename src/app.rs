@@ -374,8 +374,6 @@ impl App {
         let input_height = self.input.required_height(self.terminal.size()?.width);
         let max_input_height = self.terminal.size()?.height / 2;
         let input_height = input_height.min(max_input_height).max(5);
-        
-        let alert_height = if alert.is_some() { 1 } else { 0 };
 
         // Begin synchronized update - terminal buffers all changes
         queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
@@ -386,13 +384,14 @@ impl App {
                 .constraints([
                     Constraint::Min(5),               // Chat area (minimum)
                     Constraint::Length(input_height), // Input area (dynamic)
-                    Constraint::Length(alert_height), // Alert bar (0 or 1)
+                    Constraint::Length(if alert.is_some() { 1 } else { 0 }),
                 ])
                 .split(frame.area());
 
             frame.render_widget(chat_widget, chunks[0]);
             frame.render_widget(input_widget, chunks[1]);
-            
+           
+            // TODO build as an actual widget on self.alert
             if let Some(ref msg) = alert {
                 let alert_widget = Paragraph::new(msg.as_str())
                     .style(Style::default().fg(Color::Red));
@@ -477,6 +476,39 @@ impl App {
         }
     }
 
+    /// Wait for user to approve or deny a tool request
+    async fn wait_for_tool_approval(&mut self) -> Result<ToolDecision> {
+        // Drain any buffered key events first to prevent accidental approvals
+        while event::poll(std::time::Duration::from_millis(0))? {
+            let _ = event::read()?;
+        }
+
+        loop {
+            if !event::poll(std::time::Duration::from_millis(50))? {
+                continue;
+            }
+            let Event::Key(key) = event::read()? else {
+                continue;
+            };
+
+            if let Some(action) = map_key(InputMode::ToolApproval, key) {
+                match action {
+                    Action::ApproveTool => return Ok(ToolDecision::Approve),
+                    Action::DenyTool => return Ok(ToolDecision::Deny),
+                    Action::ApproveToolSession => {
+                        // TODO: implement allow for session
+                        return Ok(ToolDecision::Approve);
+                    }
+                    Action::Quit => {
+                        self.should_quit = true;
+                        return Ok(ToolDecision::Deny);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
     /// Check for interrupt keys without blocking
     /// Returns true if an interrupt was requested
     fn check_for_interrupt(&mut self) -> bool {
@@ -546,10 +578,7 @@ impl App {
 
             // Use timeout on stream.next() to allow periodic interrupt checks
             let step = match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
-                Ok(Some(s)) => {
-                    tracing::debug!("Stream step: {:?}", std::mem::discriminant(&s));
-                    s
-                }
+                Ok(Some(s)) => s,
                 Ok(None) => {
                     tracing::debug!("Stream ended (None)");
                     break;
@@ -640,6 +669,8 @@ impl App {
                     self.usage = usage;
                     self.status = ConnectionStatus::Connected;
                     
+                    tracing::debug!("Finished: received {} signatures", thinking_signatures.len());
+                    // TODO we probably don't need to track these.   
                     // Update thinking blocks with their signatures
                     if let Some(turn_id) = current_turn_id {
                         if let Some(turn) = self.transcript.get_mut(turn_id) {
@@ -689,35 +720,7 @@ impl App {
         Ok(())
     }
 
-    /// Wait for user to approve or deny a tool request
-    async fn wait_for_tool_approval(&mut self) -> Result<ToolDecision> {
-        // Drain any buffered key events first to prevent accidental approvals
-        while event::poll(std::time::Duration::from_millis(0))? {
-            let _ = event::read()?;
-        }
 
-        loop {
-            if event::poll(std::time::Duration::from_millis(50))? {
-                if let Event::Key(key) = event::read()? {
-                    if let Some(action) = map_key(InputMode::ToolApproval, key) {
-                        match action {
-                            Action::ApproveTool => return Ok(ToolDecision::Approve),
-                            Action::DenyTool => return Ok(ToolDecision::Deny),
-                            Action::ApproveToolSession => {
-                                // TODO: implement allow for session
-                                return Ok(ToolDecision::Approve);
-                            }
-                            Action::Quit => {
-                                self.should_quit = true;
-                                return Ok(ToolDecision::Deny);
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     /// Cleanup terminal
     fn cleanup(&mut self) -> Result<()> {
