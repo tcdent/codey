@@ -4,163 +4,150 @@
 //! asking the agent to summarize the conversation for continuation in a
 //! new transcript.
 
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+
+use crate::transcript::{Block, Status};
 
 /// The prompt sent to the agent to generate a compaction summary
 pub const COMPACTION_PROMPT: &str = r#"The conversation context is getting large and needs to be compacted.
 
-Please provide a comprehensive summary of our conversation so far. Your response must be valid JSON matching the required schema.
+Please provide a comprehensive summary of our conversation so far in markdown format. Include:
+
+1. **What was accomplished** - Main tasks and changes completed
+2. **What still needs to be done** - Remaining tasks or open questions
+3. **Key project information** - Important facts about the project (architecture, patterns, gotchas)
+4. **Relevant files** - Files most relevant to the current work with brief descriptions
 
 Be thorough but concise - this summary will seed a fresh conversation context."#;
 
-/// Represents a compaction summary from the agent
+/// Compaction summary block - shown when context was compacted
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactionSummary {
-    /// List of main tasks and changes completed during this conversation
-    pub accomplished: Vec<String>,
-    /// Remaining tasks, open questions, or next steps not yet completed
-    pub remaining: Vec<String>,
-    /// Important facts about the project (architecture, patterns, gotchas)
-    pub project_info: Vec<String>,
-    /// Files most relevant to the work being done
-    pub relevant_files: Vec<RelevantFile>,
+pub struct CompactionBlock {
+    pub summary: String,
+    pub previous_transcript: Option<String>,
+    pub status: Status,
+    pub context_tokens: Option<u32>,
 }
 
-/// A file that was relevant to the conversation
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RelevantFile {
-    /// File path relative to project root
-    pub path: String,
-    /// Brief description of why this file is relevant
-    pub description: String,
+impl CompactionBlock {
+    pub fn new(summary: impl Into<String>, previous_transcript: Option<String>) -> Self {
+        Self {
+            summary: summary.into(),
+            previous_transcript,
+            status: Status::Complete,
+            context_tokens: None,
+        }
+    }
+
+    /// Create a pending compaction block (before summary is available)
+    pub fn pending(context_tokens: u32, previous_transcript: Option<String>) -> Self {
+        Self {
+            summary: String::new(),
+            previous_transcript,
+            status: Status::Pending,
+            context_tokens: Some(context_tokens),
+        }
+    }
 }
 
-impl CompactionSummary {
-    /// Generate JSON schema for structured output
-    pub fn json_schema() -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "accomplished": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "List of main tasks and changes completed during this conversation"
-                },
-                "remaining": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Remaining tasks, open questions, or next steps not yet completed"
-                },
-                "project_info": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": "Important facts about the project (architecture decisions, coding patterns, gotchas)"
-                },
-                "relevant_files": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "File path relative to project root"
-                            },
-                            "description": {
-                                "type": "string",
-                                "description": "Brief description of why this file is relevant"
-                            }
-                        },
-                        "required": ["path", "description"]
-                    },
-                    "description": "Files most relevant to the work being done"
+#[typetag::serde]
+impl Block for CompactionBlock {
+    fn render(&self, width: u16) -> Vec<Line<'_>> {
+        let mut lines = Vec::new();
+
+        match self.status {
+            Status::Pending | Status::Running => {
+                // Show in-progress indicator
+                let tokens_info = self.context_tokens
+                    .map(|t| format!(" ({} tokens)", t))
+                    .unwrap_or_default();
+
+                lines.push(Line::from(vec![
+                    Span::styled("📋 ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("Compacting context{}", tokens_info),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+
+                if self.status == Status::Running {
+                    lines.push(Line::from(Span::styled(
+                        "  Generating summary...",
+                        Style::default().fg(Color::DarkGray),
+                    )));
                 }
-            },
-            "required": ["accomplished", "remaining", "project_info", "relevant_files"]
-        })
-    }
-
-    /// Format the summary for display and for seeding a new context
-    pub fn format_for_context(&self) -> String {
-        let mut output = String::from("# Previous Session Summary\n\n");
-        output.push_str("The following is a summary from a previous conversation that was compacted due to context length.\n\n");
-
-        if !self.accomplished.is_empty() {
-            output.push_str("## What Was Accomplished\n");
-            for item in &self.accomplished {
-                output.push_str(&format!("- {}\n", item));
             }
-            output.push('\n');
+            Status::Complete => {
+                // Header with icon
+                lines.push(Line::from(vec![
+                    Span::styled("📋 ", Style::default().fg(Color::Cyan)),
+                    Span::styled(
+                        "Context Compacted",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+
+                // Previous transcript reference if available
+                if let Some(ref prev) = self.previous_transcript {
+                    lines.push(Line::from(Span::styled(
+                        format!("  Previous transcript: {}", prev),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+
+                lines.push(Line::from(""));
+
+                // Render the summary using markdown
+                let skin = ratskin::RatSkin::default();
+                let text = ratskin::RatSkin::parse_text(&self.summary);
+                let summary_lines = skin.parse(text, width);
+
+                for line in summary_lines {
+                    lines.push(line);
+                }
+            }
+            _ => {
+                // Cancelled, Error, Denied - show appropriate message
+                lines.push(Line::from(vec![
+                    Span::styled("📋 ", Style::default().fg(Color::Red)),
+                    Span::styled(
+                        "Context compaction failed",
+                        Style::default().fg(Color::Red),
+                    ),
+                ]));
+            }
         }
 
-        if !self.remaining.is_empty() {
-            output.push_str("## What Still Needs To Be Done\n");
-            for item in &self.remaining {
-                output.push_str(&format!("- {}\n", item));
-            }
-            output.push('\n');
-        }
-
-        if !self.project_info.is_empty() {
-            output.push_str("## Key Project Information\n");
-            for item in &self.project_info {
-                output.push_str(&format!("- {}\n", item));
-            }
-            output.push('\n');
-        }
-
-        if !self.relevant_files.is_empty() {
-            output.push_str("## Relevant Files\n");
-            for file in &self.relevant_files {
-                output.push_str(&format!("- `{}` - {}\n", file.path, file.description));
-            }
-            output.push('\n');
-        }
-
-        output
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_json_schema_generation() {
-        let schema = CompactionSummary::json_schema();
-        assert_eq!(schema["type"], "object");
-        assert!(schema["properties"]["accomplished"].is_object());
-        assert!(schema["properties"]["relevant_files"].is_object());
+        lines
     }
 
-    #[test]
-    fn test_format_for_context() {
-        let summary = CompactionSummary {
-            accomplished: vec!["Fixed authentication bug".to_string()],
-            remaining: vec!["Add unit tests".to_string()],
-            project_info: vec!["Uses JWT for auth".to_string()],
-            relevant_files: vec![RelevantFile {
-                path: "src/auth.rs".to_string(),
-                description: "Authentication module".to_string(),
-            }],
-        };
-        let formatted = summary.format_for_context();
-        assert!(formatted.contains("Previous Session Summary"));
-        assert!(formatted.contains("Fixed authentication bug"));
-        assert!(formatted.contains("Add unit tests"));
-        assert!(formatted.contains("src/auth.rs"));
+    fn status(&self) -> Status {
+        self.status
     }
 
-    #[test]
-    fn test_deserialize_summary() {
-        let json = r#"{
-            "accomplished": ["Task 1", "Task 2"],
-            "remaining": ["Task 3"],
-            "project_info": ["Info 1"],
-            "relevant_files": [{"path": "src/main.rs", "description": "Entry point"}]
-        }"#;
-        let summary: CompactionSummary = serde_json::from_str(json).unwrap();
-        assert_eq!(summary.accomplished.len(), 2);
-        assert_eq!(summary.remaining.len(), 1);
+    fn set_status(&mut self, status: Status) {
+        self.status = status;
+    }
+
+    fn append_text(&mut self, text: &str) {
+        self.summary.push_str(text);
+    }
+
+    fn text_content(&self) -> Option<&str> {
+        if self.summary.is_empty() {
+            None
+        } else {
+            Some(&self.summary)
+        }
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }

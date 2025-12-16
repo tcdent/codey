@@ -1,7 +1,7 @@
-use crate::compaction::{CompactionSummary, COMPACTION_PROMPT};
+use crate::compaction::{CompactionBlock, COMPACTION_PROMPT};
 use crate::config::Config;
 use crate::llm::{Agent, AgentStep, RequestMode, ToolDecision, Usage};
-use crate::transcript::{CompactionBlock, Role, Status, TextBlock, ThinkingBlock, Transcript, TurnId};
+use crate::transcript::{Role, Status, TextBlock, ThinkingBlock, Transcript, TurnId};
 use crate::tools::ToolRegistry;
 use crate::ui::{ChatView, ConnectionStatus, InputBox};
 
@@ -579,7 +579,7 @@ impl App {
                 }
                 self.draw()?;
 
-                let response_text = self.stream_response(agent, &content, RequestMode::normal()).await?;
+                let response_text = self.stream_response(agent, &content, RequestMode::normal(), None).await?;
 
                 if let Some(turn) = self.transcript.get_mut(turn_id) {
                     turn.status = Status::Complete;
@@ -602,8 +602,8 @@ impl App {
                 }
                 self.draw()?;
 
-                // Get compaction summary
-                let summary_text = self.stream_response(agent, COMPACTION_PROMPT, RequestMode::compaction()).await?;
+                // Stream compaction summary into the existing block
+                let summary_text = self.stream_response(agent, COMPACTION_PROMPT, RequestMode::compaction(), Some(turn_id)).await?;
 
                 // Complete the compaction: rotate transcript and reset agent
                 self.complete_compaction(agent, turn_id, &summary_text)?;
@@ -615,15 +615,22 @@ impl App {
 
     /// Stream a response from the agent with a specific request mode
     /// Returns the accumulated text response
+    /// If existing_turn is provided, streams into that turn's first block instead of creating a new turn
     async fn stream_response(
         &mut self,
         agent: &mut Agent,
         prompt: &str,
         mode: RequestMode,
+        existing_turn: Option<TurnId>,
     ) -> Result<String> {
-        let mut current_turn_id: Option<TurnId> = None;
+        let mut current_turn_id: Option<TurnId> = existing_turn;
         let mut active_block = ActiveBlock::None;
         let mut accumulated_text = String::new();
+
+        // If we have an existing turn, track its first block
+        if existing_turn.is_some() {
+            active_block = ActiveBlock::Text(0);
+        }
 
         let mut stream = agent.process_message(prompt, mode);
 
@@ -767,27 +774,17 @@ impl App {
 
         self.rotate_transcript()?;
 
-        // Parse JSON response or use raw text as fallback
-        let summary = serde_json::from_str::<CompactionSummary>(summary_text)
-            .unwrap_or_else(|_| CompactionSummary {
-                accomplished: vec![],
-                remaining: vec![],
-                project_info: vec![],
-                relevant_files: vec![],
-            });
-
-        let formatted = summary.format_for_context();
-
-        // Update the existing compaction block with the result
+        // Mark the compaction block as complete (text was already streamed in)
         if let Some(turn) = self.transcript.get_mut(turn_id) {
             turn.status = Status::Complete;
             if let Some(block) = turn.content.first_mut() {
-                block.append_text(summary_text);
                 block.set_status(Status::Complete);
             }
         }
 
-        agent.reset_with_summary(&formatted);
+        // Reset agent with the summary text
+        let context_header = "# Previous Session Summary\n\nThe following is a summary from a previous conversation that was compacted due to context length.\n\n";
+        agent.reset_with_summary(&format!("{}{}", context_header, summary_text));
         self.draw()?;
 
         if let Err(e) = self.transcript.save(&self.transcript_path) {
