@@ -782,7 +782,7 @@ impl App {
         if let Some(turn) = self.transcript.get_mut(turn_id) {
             turn.status = Status::Complete;
             if let Some(block) = turn.content.first_mut() {
-                block.set_result(summary_text.to_string());
+                block.append_text(summary_text);
                 block.set_status(Status::Complete);
             }
         }

@@ -439,8 +439,8 @@ impl Block for CompactionBlock {
         self.status = status;
     }
 
-    fn set_result(&mut self, result: String) {
-        self.summary = result;
+    fn append_text(&mut self, text: &str) {
+        self.summary.push_str(text);
     }
 
     fn text_content(&self) -> Option<&str> {
