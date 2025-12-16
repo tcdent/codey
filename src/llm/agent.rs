@@ -76,6 +76,23 @@ pub enum AgentStep {
 
 pub use crate::permission::ToolDecision;
 
+/// Request mode controlling agent behavior
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RequestMode {
+    /// Normal conversation with tool access
+    #[default]
+    Normal,
+    /// Compaction mode: no tools, focused on summarization
+    Compaction,
+}
+
+impl RequestMode {
+    /// Whether tools are enabled in this mode
+    pub fn tools_enabled(&self) -> bool {
+        matches!(self, RequestMode::Normal)
+    }
+}
+
 /// Agent for handling conversations
 pub struct Agent {
     client: Client,
@@ -234,11 +251,11 @@ impl Agent {
             .collect()
     }
 
-    /// Start processing a user message, returns a stream of steps
-    pub fn process_message(&mut self, user_input: &str) -> AgentStream<'_> {
+    /// Start processing a user message with a specific mode
+    pub fn process_message(&mut self, user_input: &str, mode: RequestMode) -> AgentStream<'_> {
         // Add user message (cache_control will be applied dynamically before API call)
         self.messages.push(ChatMessage::user(user_input));
-        AgentStream::new(self)
+        AgentStream::new(self, mode)
     }
 
     /// Refresh OAuth token if expired. Returns true if refresh was needed and succeeded.
@@ -330,8 +347,8 @@ pub struct AgentStream<'a> {
 const DEFAULT_THINKING_BUDGET: u32 = 16000;
 
 impl<'a> AgentStream<'a> {
-    fn new(agent: &'a mut Agent) -> Self {
-        let tools = agent.get_tools();
+    fn new(agent: &'a mut Agent, mode: RequestMode) -> Self {
+        let tools = if mode.tools_enabled() { agent.get_tools() } else { Vec::new() };
         
         // Build headers based on OAuth availability
         let headers = if let Some(ref oauth) = agent.oauth {
@@ -386,8 +403,10 @@ impl<'a> AgentStream<'a> {
             debug!("Last message role: {}, has_cache_control: {}", last.role, last.options.is_some());
         }
         
-        let request = ChatRequest::new(messages)
-            .with_tools(self.tools.clone());
+        let mut request = ChatRequest::new(messages);
+        if !self.tools.is_empty() {
+            request = request.with_tools(self.tools.clone());
+        }
 
         info!(
             "Making chat request with {} messages",

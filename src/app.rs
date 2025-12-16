@@ -1,6 +1,6 @@
 use crate::compaction::{CompactionSummary, COMPACTION_PROMPT};
 use crate::config::Config;
-use crate::llm::{Agent, AgentStep, ToolDecision, Usage};
+use crate::llm::{Agent, AgentStep, RequestMode, ToolDecision, Usage};
 use crate::transcript::{CompactionBlock, Role, Status, TextBlock, ThinkingBlock, Transcript, TurnId};
 use crate::tools::ToolRegistry;
 use crate::ui::{ChatView, ConnectionStatus, InputBox};
@@ -570,7 +570,7 @@ impl App {
                 }
                 self.draw()?;
 
-                let response_text = self.stream_response(agent, &content, true).await?;
+                let response_text = self.stream_response(agent, &content, RequestMode::Normal).await?;
 
                 if let Some(turn) = self.transcript.get_mut(turn_id) {
                     turn.status = Status::Complete;
@@ -594,8 +594,8 @@ impl App {
                 }
                 self.draw()?;
 
-                // Get compaction summary (no tool use allowed)
-                let summary_text = self.stream_response(agent, COMPACTION_PROMPT, false).await?;
+                // Get compaction summary
+                let summary_text = self.stream_response(agent, COMPACTION_PROMPT, RequestMode::Compaction).await?;
 
                 if let Some(turn) = self.transcript.get_mut(turn_id) {
                     turn.status = Status::Complete;
@@ -609,19 +609,19 @@ impl App {
         Ok(())
     }
 
-    /// Stream a response from the agent, optionally allowing tool use
+    /// Stream a response from the agent with a specific request mode
     /// Returns the accumulated text response
     async fn stream_response(
         &mut self,
         agent: &mut Agent,
         prompt: &str,
-        allow_tools: bool,
+        mode: RequestMode,
     ) -> Result<String> {
         let mut current_turn_id: Option<TurnId> = None;
         let mut active_block = ActiveBlock::None;
         let mut accumulated_text = String::new();
 
-        let mut stream = agent.process_message(prompt);
+        let mut stream = agent.process_message(prompt, mode);
 
         loop {
             // Check for interrupt before each step
@@ -667,7 +667,7 @@ impl App {
                     }
                     self.draw()?;
                 }
-                AgentStep::ToolRequest { block, .. } if allow_tools => {
+                AgentStep::ToolRequest { block, .. } if mode.tools_enabled() => {
                     let turn_id = *current_turn_id.get_or_insert_with(|| {
                         self.transcript.add_empty(Role::Assistant, Status::Running)
                     });
@@ -704,7 +704,9 @@ impl App {
                     }
                 }
                 AgentStep::ToolRequest { .. } => {
-                    // Tools not allowed (compaction mode) - skip
+                    // Should not occur when tools are disabled at API level
+                    // Kept as defensive handling
+                    tracing::warn!("Unexpected tool request when tools disabled");
                 }
                 AgentStep::ToolResult { .. } => {}
                 AgentStep::Retrying { attempt, error } => {
