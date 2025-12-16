@@ -11,7 +11,7 @@ enum MessageRequest {
     /// Regular user message
     User { content: String, turn_id: TurnId },
     /// Compaction request (triggered when context exceeds threshold)
-    Compaction { turn_id: TurnId },
+    Compaction,
 }
 
 use anyhow::{Context, Result};
@@ -72,6 +72,7 @@ enum ActiveBlock {
     Text(usize),
     Thinking(usize),
     Tool(usize),
+    Compaction(usize),
 }
 
 /// Input modes determine which keybindings are active
@@ -549,13 +550,8 @@ impl App {
     }
 
     /// Queue a compaction request
-    fn queue_compaction(&mut self, context_tokens: u32) {
-        let turn_id = self.transcript.add(
-            Role::Assistant,
-            CompactionBlock::pending(context_tokens),
-            Status::Pending,
-        );
-        self.message_queue.push(MessageRequest::Compaction { turn_id });
+    fn queue_compaction(&mut self) {
+        self.message_queue.push(MessageRequest::Compaction);
         self.chat.enable_auto_scroll();
     }
 
@@ -568,13 +564,13 @@ impl App {
 
         match request {
             MessageRequest::User { content, turn_id } => {
-                // Mark user turn as running, then complete
+                // Mark user turn as running
                 if let Some(turn) = self.transcript.get_mut(turn_id) {
                     turn.status = Status::Running;
                 }
                 self.draw()?;
 
-                let response_text = self.stream_response(agent, &content, RequestMode::normal(), None).await?;
+                self.stream_response(agent, &content, RequestMode::normal()).await?;
 
                 if let Some(turn) = self.transcript.get_mut(turn_id) {
                     turn.status = Status::Complete;
@@ -582,26 +578,12 @@ impl App {
 
                 // Check if compaction is needed after user message
                 if self.should_compact(agent) {
-                    self.queue_compaction(agent.context_tokens());
+                    self.queue_compaction();
                 }
-
-                drop(response_text); // Not used for user messages
             }
-            MessageRequest::Compaction { turn_id } => {
-                // Mark the compaction block as running
-                if let Some(turn) = self.transcript.get_mut(turn_id) {
-                    turn.status = Status::Running;
-                    if let Some(block) = turn.content.first_mut() {
-                        block.set_status(Status::Running);
-                    }
-                }
-                self.draw()?;
-
-                // Stream compaction summary into the existing block
-                let summary_text = self.stream_response(agent, COMPACTION_PROMPT, RequestMode::compaction(), Some(turn_id)).await?;
-
-                // Complete the compaction: rotate transcript and reset agent
-                self.complete_compaction(agent, turn_id, &summary_text)?;
+            MessageRequest::Compaction => {
+                // Compaction is handled entirely by stream_response
+                self.stream_response(agent, COMPACTION_PROMPT, RequestMode::compaction()).await?;
             }
         }
 
@@ -610,17 +592,16 @@ impl App {
 
     /// Stream a response from the agent with a specific request mode
     /// Returns the accumulated text response
-    /// If existing_turn is provided, streams into that turn's first block instead of creating a new turn
     async fn stream_response(
         &mut self,
         agent: &mut Agent,
         prompt: &str,
         mode: RequestMode,
-        existing_turn: Option<TurnId>,
     ) -> Result<String> {
-        let mut current_turn_id: Option<TurnId> = existing_turn;
+        let mut current_turn_id: Option<TurnId> = None;
         let mut active_block = ActiveBlock::None;
         let mut accumulated_text = String::new();
+        let mut needs_compaction_reset = false;
 
         let mut stream = agent.process_message(prompt, mode);
 
@@ -651,14 +632,23 @@ impl App {
                     if let Some(turn) = self.transcript.get_mut(turn_id) {
                         match active_block {
                             ActiveBlock::Text(idx) => turn.append_to_block(idx, &text),
+                            _ => active_block = ActiveBlock::Text(turn.add_block(Box::new(TextBlock::new(&text)))),
+                        }
+                    }
+                    self.draw_throttled()?;
+                }
+                AgentStep::CompactionDelta(text) => {
+                    accumulated_text.push_str(&text);
+                    let turn_id = *current_turn_id.get_or_insert_with(|| {
+                        self.transcript.add_empty(Role::Assistant, Status::Running)
+                    });
+                    if let Some(turn) = self.transcript.get_mut(turn_id) {
+                        match active_block {
+                            ActiveBlock::Compaction(idx) => turn.append_to_block(idx, &text),
                             _ => {
-                                // If turn already has content (existing turn), append to first block
-                                if !turn.content.is_empty() {
-                                    turn.append_to_block(0, &text);
-                                    active_block = ActiveBlock::Text(0);
-                                } else {
-                                    active_block = ActiveBlock::Text(turn.add_block(Box::new(TextBlock::new(&text))));
-                                }
+                                let idx = turn.add_block(Box::new(CompactionBlock::pending(0)));
+                                turn.append_to_block(idx, &text);
+                                active_block = ActiveBlock::Compaction(idx);
                             }
                         }
                     }
@@ -723,6 +713,7 @@ impl App {
 
                     if let Some(turn_id) = current_turn_id {
                         if let Some(turn) = self.transcript.get_mut(turn_id) {
+                            // Apply thinking signatures
                             let mut sig_iter = thinking_signatures.into_iter();
                             for block in &mut turn.content {
                                 if block.signature().is_some() {
@@ -731,8 +722,28 @@ impl App {
                                     }
                                 }
                             }
+                            // Mark turn complete
+                            turn.status = Status::Complete;
+                            // Mark compaction block complete if present
+                            if let ActiveBlock::Compaction(idx) = active_block {
+                                if let Some(block) = turn.get_block_mut(idx) {
+                                    block.set_status(Status::Complete);
+                                }
+                            }
+                        }
+
+                        // Mark for compaction reset (done after loop to avoid borrow issues)
+                        if matches!(active_block, ActiveBlock::Compaction(_)) {
+                            if let Err(e) = self.transcript.save(&self.transcript_path) {
+                                tracing::error!("Failed to save transcript before compaction: {}", e);
+                            }
+                            if let Err(e) = self.rotate_transcript() {
+                                tracing::error!("Failed to rotate transcript: {}", e);
+                            }
+                            needs_compaction_reset = true;
                         }
                     }
+                    self.draw()?;
                 }
                 AgentStep::Error(msg) => {
                     let alert_msg = if let Some(start) = msg.find('{') {
@@ -749,6 +760,18 @@ impl App {
             }
         }
 
+        // Drop stream to release borrow on agent before reset
+        drop(stream);
+
+        // Complete compaction reset after stream is dropped
+        if needs_compaction_reset {
+            agent.reset_with_summary(&accumulated_text);
+            if let Err(e) = self.transcript.save(&self.transcript_path) {
+                tracing::error!("Failed to save new transcript: {}", e);
+            }
+            tracing::info!("Compaction complete, rotated to {:?}", self.transcript_path);
+        }
+
         self.chat.enable_auto_scroll();
         self.draw()?;
 
@@ -762,35 +785,6 @@ impl App {
     /// Check if compaction should be triggered
     fn should_compact(&self, agent: &Agent) -> bool {
         agent.context_tokens() >= self.config.general.compaction_threshold
-    }
-
-    /// Complete compaction: rotate transcript and reset agent
-    fn complete_compaction(&mut self, agent: &mut Agent, turn_id: TurnId, summary_text: &str) -> Result<()> {
-        if let Err(e) = self.transcript.save(&self.transcript_path) {
-            tracing::error!("Failed to save transcript before compaction: {}", e);
-        }
-
-        self.rotate_transcript()?;
-
-        // Mark the compaction block as complete (text was already streamed in)
-        if let Some(turn) = self.transcript.get_mut(turn_id) {
-            turn.status = Status::Complete;
-            if let Some(block) = turn.content.first_mut() {
-                block.set_status(Status::Complete);
-            }
-        }
-
-        // Reset agent with the summary text
-        let context_header = "# Previous Session Summary\n\nThe following is a summary from a previous conversation that was compacted due to context length.\n\n";
-        agent.reset_with_summary(&format!("{}{}", context_header, summary_text));
-        self.draw()?;
-
-        if let Err(e) = self.transcript.save(&self.transcript_path) {
-            tracing::error!("Failed to save new transcript after compaction: {}", e);
-        }
-
-        tracing::info!("Compaction complete, rotated to {:?}", self.transcript_path);
-        Ok(())
     }
 
     /// Rotate to a new transcript file

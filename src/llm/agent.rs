@@ -48,6 +48,8 @@ pub enum AgentStep {
     TextDelta(String),
     /// Streaming thinking/reasoning chunk (extended thinking)
     ThinkingDelta(String),
+    /// Streaming compaction summary chunk
+    CompactionDelta(String),
     /// Agent wants to execute a tool, needs approval
     ToolRequest {
         call_id: String,
@@ -61,11 +63,11 @@ pub enum AgentStep {
     },
     /// Retrying after error
     Retrying {
-        attempt: u32, 
+        attempt: u32,
         error: String,
     },
     /// Agent finished processing this message
-    Finished { 
+    Finished {
         usage: Usage,
         /// Signatures for thinking blocks (in order they appeared)
         thinking_signatures: Vec<String>,
@@ -366,6 +368,8 @@ pub struct AgentStream<'a> {
     chat_options: ChatOptions,
     /// Accumulated thinking signatures across all rounds of the agent loop
     accumulated_signatures: Vec<String>,
+    /// Whether this stream is in compaction mode (emits CompactionDelta instead of TextDelta)
+    is_compaction: bool,
 }
 
 /// Default thinking budget in tokens (16k allows substantial reasoning)
@@ -410,6 +414,7 @@ impl<'a> AgentStream<'a> {
             tools,
             chat_options,
             accumulated_signatures: Vec::new(),
+            is_compaction: !mode.tools_enabled,
         }
     }
 
@@ -512,7 +517,11 @@ impl<'a> AgentStream<'a> {
                                 ChatStreamEvent::Start => {}
                                 ChatStreamEvent::Chunk(chunk) => {
                                     full_text.push_str(&chunk.content);
-                                    return Some(AgentStep::TextDelta(chunk.content));
+                                    return Some(if self.is_compaction {
+                                        AgentStep::CompactionDelta(chunk.content)
+                                    } else {
+                                        AgentStep::TextDelta(chunk.content)
+                                    });
                                 }
                                 ChatStreamEvent::ToolCallChunk(_) => {}
                                 ChatStreamEvent::ReasoningChunk(chunk) => {
