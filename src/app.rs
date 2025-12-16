@@ -5,6 +5,15 @@ use crate::transcript::{CompactionBlock, Role, Status, TextBlock, ThinkingBlock,
 use crate::tools::ToolRegistry;
 use crate::ui::{ChatView, ConnectionStatus, InputBox};
 
+/// Types of messages that can be processed through the event loop
+#[derive(Debug, Clone)]
+enum MessageRequest {
+    /// Regular user message
+    User { content: String, turn_id: TurnId },
+    /// Compaction request (triggered when context exceeds threshold)
+    Compaction { turn_id: TurnId },
+}
+
 use anyhow::{Context, Result};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind},
@@ -211,8 +220,8 @@ pub struct App {
     usage: Usage,
     should_quit: bool,
     continue_session: bool,
-    /// Queue of messages waiting to be sent (content, message_id)
-    message_queue: Vec<(String, TurnId)>,
+    /// Queue of messages waiting to be processed
+    message_queue: Vec<MessageRequest>,
     /// Last render time for frame rate limiting
     last_render: Instant,
     /// Alert message to display (cleared on next user input)
@@ -323,17 +332,10 @@ impl App {
         // Main event loop - only renders on actual events
         loop {
             // Process queued messages first (agent events trigger their own draws)
-            if let Some((content, msg_id)) = self.message_queue.first().cloned() {
+            if let Some(request) = self.message_queue.first().cloned() {
                 self.message_queue.remove(0);
-                self.send_message(&mut agent, content, msg_id).await?;
-
-                // Check if compaction is needed after processing the message
-                if let Err(e) = self.check_and_perform_compaction(&mut agent).await {
-                    tracing::error!("Compaction failed: {}", e);
-                    self.alert = Some(format!("Compaction failed: {}", e));
-                }
-
-                // send_message handles its own draw calls for streaming
+                self.process_message(&mut agent, request).await?;
+                // process_message handles its own draw calls for streaming
                 continue;
             }
 
@@ -539,38 +541,87 @@ impl App {
         }
     }
 
-    /// Queue a message for sending
+    /// Queue a user message for sending
     fn queue_message(&mut self, content: String) {
-        let id = self.transcript.add(Role::User, TextBlock::new(&content), Status::Pending);
-        self.message_queue.push((content, id));
+        let turn_id = self.transcript.add(Role::User, TextBlock::new(&content), Status::Pending);
+        self.message_queue.push(MessageRequest::User { content, turn_id });
         self.chat.enable_auto_scroll();
     }
 
-    /// Send a message to the agent
-    async fn send_message(&mut self, agent: &mut Agent, content: String, user_turn_id: TurnId) -> Result<()> {
-        // Mark user turn as running
-        if let Some(turn) = self.transcript.get_mut(user_turn_id) {
-            turn.status = Status::Running;
-        }
-        self.draw()?;
+    /// Queue a compaction request
+    fn queue_compaction(&mut self) {
+        let turn_id = self.transcript.add_empty(Role::Assistant, Status::Pending);
+        self.message_queue.push(MessageRequest::Compaction { turn_id });
+        self.chat.enable_auto_scroll();
+    }
 
+    /// Process a message request (user message or compaction)
+    async fn process_message(&mut self, agent: &mut Agent, request: MessageRequest) -> Result<()> {
         // Refresh OAuth token if needed
         if let Err(e) = agent.refresh_oauth_if_needed().await {
             tracing::warn!("Failed to refresh OAuth token: {}", e);
         }
 
-        // Track the current assistant turn and active block
+        match request {
+            MessageRequest::User { content, turn_id } => {
+                // Mark user turn as running, then complete
+                if let Some(turn) = self.transcript.get_mut(turn_id) {
+                    turn.status = Status::Running;
+                }
+                self.draw()?;
+
+                let response_text = self.stream_response(agent, &content, true).await?;
+
+                if let Some(turn) = self.transcript.get_mut(turn_id) {
+                    turn.status = Status::Complete;
+                }
+
+                // Check if compaction is needed after user message
+                if self.should_compact(agent) {
+                    self.queue_compaction();
+                }
+
+                drop(response_text); // Not used for user messages
+            }
+            MessageRequest::Compaction { turn_id } => {
+                self.alert = Some(format!(
+                    "Context compaction in progress ({} tokens)...",
+                    agent.context_tokens()
+                ));
+
+                if let Some(turn) = self.transcript.get_mut(turn_id) {
+                    turn.status = Status::Running;
+                }
+                self.draw()?;
+
+                // Get compaction summary (no tool use allowed)
+                let summary_text = self.stream_response(agent, COMPACTION_PROMPT, false).await?;
+
+                if let Some(turn) = self.transcript.get_mut(turn_id) {
+                    turn.status = Status::Complete;
+                }
+
+                // Complete the compaction: rotate transcript and reset agent
+                self.complete_compaction(agent, &summary_text)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Stream a response from the agent, optionally allowing tool use
+    /// Returns the accumulated text response
+    async fn stream_response(
+        &mut self,
+        agent: &mut Agent,
+        prompt: &str,
+        allow_tools: bool,
+    ) -> Result<String> {
         let mut current_turn_id: Option<TurnId> = None;
         let mut active_block = ActiveBlock::None;
+        let mut accumulated_text = String::new();
 
-        // Create the stream - agent is borrowed mutably for its lifetime
-        let mut stream = agent.process_message(&content);
-
-        // Mark user turn as sent
-        if let Some(turn) = self.transcript.get_mut(user_turn_id) {
-            turn.status = Status::Complete;
-        }
-        self.draw()?;
+        let mut stream = agent.process_message(prompt);
 
         loop {
             // Check for interrupt before each step
@@ -584,18 +635,15 @@ impl App {
                 break;
             }
 
-            // Use timeout on stream.next() to allow periodic interrupt checks
             let step = match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
                 Ok(Some(s)) => s,
-                Ok(None) => {
-                    tracing::debug!("Stream ended (None)");
-                    break;
-                }
-                Err(_) => continue, // Timeout, go back to interrupt check
+                Ok(None) => break,
+                Err(_) => continue,
             };
 
             match step {
                 AgentStep::TextDelta(text) => {
+                    accumulated_text.push_str(&text);
                     let turn_id = *current_turn_id.get_or_insert_with(|| {
                         self.transcript.add_empty(Role::Assistant, Status::Running)
                     });
@@ -619,20 +667,17 @@ impl App {
                     }
                     self.draw()?;
                 }
-                AgentStep::ToolRequest { block, .. } => {
+                AgentStep::ToolRequest { block, .. } if allow_tools => {
                     let turn_id = *current_turn_id.get_or_insert_with(|| {
                         self.transcript.add_empty(Role::Assistant, Status::Running)
                     });
                     if let Some(turn) = self.transcript.get_mut(turn_id) {
                         active_block = ActiveBlock::Tool(turn.add_block(block));
                     }
-
                     self.draw()?;
 
-                    // Wait for user approval
                     let decision = self.wait_for_tool_approval().await?;
 
-                    // Update tool status based on decision
                     if let ActiveBlock::Tool(idx) = active_block {
                         if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id)) {
                             if let Some(tool) = turn.get_block_mut(idx) {
@@ -645,15 +690,8 @@ impl App {
                     }
                     self.draw()?;
 
-                    // Tell agent what to do and get the result
                     let tool_result = stream.decide_tool(decision).await;
-                    tracing::debug!("decide_tool returned: {:?}", tool_result.as_ref().map(|s| std::mem::discriminant(s)));
-                    if let Some(AgentStep::ToolResult {
-                        result,
-                        is_error,
-                        ..
-                    }) = tool_result
-                    {
+                    if let Some(AgentStep::ToolResult { result, is_error, .. }) = tool_result {
                         if let ActiveBlock::Tool(idx) = active_block {
                             if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id)) {
                                 if let Some(tool) = turn.get_block_mut(idx) {
@@ -665,26 +703,22 @@ impl App {
                         self.draw()?;
                     }
                 }
-                AgentStep::ToolResult { .. } => {
-                    // Handled inline after decide_tool
+                AgentStep::ToolRequest { .. } => {
+                    // Tools not allowed (compaction mode) - skip
                 }
+                AgentStep::ToolResult { .. } => {}
                 AgentStep::Retrying { attempt, error } => {
-                    self.status =
-                        ConnectionStatus::Error(format!("Retry {} - {}", attempt, error));
+                    self.status = ConnectionStatus::Error(format!("Retry {} - {}", attempt, error));
                     self.draw()?;
                 }
                 AgentStep::Finished { usage, thinking_signatures } => {
                     self.usage = usage;
                     self.status = ConnectionStatus::Connected;
-                    
-                    tracing::debug!("Finished: received {} signatures", thinking_signatures.len());
-                    // TODO we probably don't need to track these.   
-                    // Update thinking blocks with their signatures
+
                     if let Some(turn_id) = current_turn_id {
                         if let Some(turn) = self.transcript.get_mut(turn_id) {
                             let mut sig_iter = thinking_signatures.into_iter();
                             for block in &mut turn.content {
-                                // If this block has a signature field (is a ThinkingBlock)
                                 if block.signature().is_some() {
                                     if let Some(sig) = sig_iter.next() {
                                         block.set_signature(&sig);
@@ -695,16 +729,11 @@ impl App {
                     }
                 }
                 AgentStep::Error(msg) => {
-                    // Try to parse API error JSON to extract message
                     let alert_msg = if let Some(start) = msg.find('{') {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&msg[start..]) {
-                            json["error"]["message"]
-                                .as_str()
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| msg.clone())
-                        } else {
-                            msg.clone()
-                        }
+                        serde_json::from_str::<serde_json::Value>(&msg[start..])
+                            .ok()
+                            .and_then(|json| json["error"]["message"].as_str().map(String::from))
+                            .unwrap_or_else(|| msg.clone())
                     } else {
                         msg.clone()
                     };
@@ -715,137 +744,61 @@ impl App {
         }
 
         self.chat.enable_auto_scroll();
-
-        // Final draw to ensure complete state is rendered
-        // (throttled draws during streaming may have skipped the last few deltas)
         self.draw()?;
 
-        // Auto-save transcript after turn completes
         if let Err(e) = self.transcript.save(&self.transcript_path) {
             tracing::error!("Failed to save transcript: {}", e);
         }
 
-        Ok(())
+        Ok(accumulated_text)
     }
 
-    /// Check if compaction is needed and perform it if so
-    /// Returns true if compaction was performed
-    pub async fn check_and_perform_compaction(&mut self, agent: &mut Agent) -> Result<bool> {
-        let context_tokens = agent.context_tokens();
-        let threshold = self.config.general.compaction_threshold;
+    /// Check if compaction should be triggered
+    fn should_compact(&self, agent: &Agent) -> bool {
+        agent.context_tokens() >= self.config.general.compaction_threshold
+    }
 
-        if context_tokens < threshold {
-            return Ok(false);
-        }
-
-        tracing::info!(
-            "Context tokens ({}) exceeded threshold ({}), triggering compaction",
-            context_tokens,
-            threshold
-        );
-
-        // Show status to user
-        self.alert = Some(format!(
-            "Context compaction in progress ({} tokens)...",
-            context_tokens
-        ));
-        self.draw()?;
-
-        // Send compaction prompt to get summary
-        let summary = self.request_compaction_summary(agent).await?;
-
-        // Save current transcript path for reference
+    /// Complete compaction: rotate transcript and reset agent
+    fn complete_compaction(&mut self, agent: &mut Agent, summary_text: &str) -> Result<()> {
         let previous_transcript = self.transcript_path
             .file_name()
             .and_then(|n| n.to_str())
             .map(|s| s.to_string());
 
-        // Save current transcript before rotating
         if let Err(e) = self.transcript.save(&self.transcript_path) {
             tracing::error!("Failed to save transcript before compaction: {}", e);
         }
 
-        // Rotate to new transcript
         self.rotate_transcript()?;
 
-        // Create compaction summary and add to new transcript
-        let compaction = CompactionSummary::from_raw(summary.clone());
-        let formatted_summary = compaction.format_for_context();
+        // Parse JSON response or use raw text as fallback
+        let summary = serde_json::from_str::<CompactionSummary>(summary_text)
+            .unwrap_or_else(|_| CompactionSummary {
+                accomplished: vec![],
+                remaining: vec![],
+                project_info: vec![],
+                relevant_files: vec![],
+            });
 
-        // Add compaction block to new transcript
+        let formatted = summary.format_for_context();
+
         self.transcript.add(
             Role::System,
-            CompactionBlock::new(&summary, previous_transcript),
+            CompactionBlock::new(summary_text, previous_transcript),
             Status::Complete,
         );
 
-        // Reset agent with the formatted summary
-        agent.reset_with_summary(&formatted_summary);
+        agent.reset_with_summary(&formatted);
 
-        // Clear alert and show success
         self.alert = Some("Context compacted successfully".to_string());
         self.draw()?;
 
-        // Save the new transcript
         if let Err(e) = self.transcript.save(&self.transcript_path) {
             tracing::error!("Failed to save new transcript after compaction: {}", e);
         }
 
         tracing::info!("Compaction complete, rotated to {:?}", self.transcript_path);
-        Ok(true)
-    }
-
-    /// Request a compaction summary from the agent
-    async fn request_compaction_summary(&mut self, agent: &mut Agent) -> Result<String> {
-        // Add a system turn to transcript showing we're compacting
-        let turn_id = self.transcript.add_empty(Role::Assistant, Status::Running);
-        self.draw()?;
-
-        let mut stream = agent.process_message(COMPACTION_PROMPT);
-        let mut summary_text = String::new();
-
-        loop {
-            let step = match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
-                Ok(Some(s)) => s,
-                Ok(None) => break,
-                Err(_) => continue,
-            };
-
-            match step {
-                AgentStep::TextDelta(text) => {
-                    summary_text.push_str(&text);
-                    // Update the transcript with streaming text
-                    if let Some(turn) = self.transcript.get_mut(turn_id) {
-                        if turn.content.is_empty() {
-                            turn.add_block(Box::new(TextBlock::new(&text)));
-                        } else {
-                            turn.append_to_block(0, &text);
-                        }
-                    }
-                    self.draw_throttled()?;
-                }
-                AgentStep::ThinkingDelta(_) => {
-                    // Skip thinking blocks for compaction
-                }
-                AgentStep::Finished { usage, .. } => {
-                    self.usage = usage;
-                    if let Some(turn) = self.transcript.get_mut(turn_id) {
-                        turn.status = Status::Complete;
-                    }
-                    break;
-                }
-                AgentStep::Error(msg) => {
-                    tracing::error!("Compaction request failed: {}", msg);
-                    if let Some(turn) = self.transcript.get_mut(turn_id) {
-                        turn.status = Status::Error;
-                    }
-                    return Err(anyhow::anyhow!("Compaction failed: {}", msg));
-                }
-                _ => {}
-            }
-        }
-
-        Ok(summary_text)
+        Ok(())
     }
 
     /// Rotate to a new transcript file
