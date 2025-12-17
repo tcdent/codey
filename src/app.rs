@@ -247,13 +247,11 @@ impl App {
             tracing::info!("Using OAuth authentication");
         }
         
-        let messages = vec![(Role::System, SYSTEM_PROMPT.to_string())];
-        
         let mut agent = Agent::new(
             &self.config.general.model,
             self.config.general.max_tokens,
             self.config.general.max_retries,
-            messages,
+            SYSTEM_PROMPT,
             tools,
             oauth,
         );

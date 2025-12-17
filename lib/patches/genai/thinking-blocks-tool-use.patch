@@ -1,7 +1,8 @@
-diff -ruN a/src/adapter/adapters/anthropic/adapter_impl.rs b/src/adapter/adapters/anthropic/adapter_impl.rs
---- a/src/adapter/adapters/anthropic/adapter_impl.rs	2025-12-16 02:09:31.446099903 +0000
-+++ b/src/adapter/adapters/anthropic/adapter_impl.rs	2025-12-16 02:07:15.837533180 +0000
-@@ -81,18 +81,36 @@
+diff --git a/src/adapter/adapters/anthropic/adapter_impl.rs b/src/adapter/adapters/anthropic/adapter_impl.rs
+index 505a3f3..90fe1f2 100644
+--- a/src/adapter/adapters/anthropic/adapter_impl.rs
++++ b/src/adapter/adapters/anthropic/adapter_impl.rs
+@@ -81,18 +81,36 @@ impl Adapter for AnthropicAdapter {
  	) -> Result<WebRequestData> {
  		let ServiceTarget { endpoint, auth, model } = target;
  
@@ -46,7 +47,7 @@ diff -ruN a/src/adapter/adapters/anthropic/adapter_impl.rs b/src/adapter/adapter
  
  		// -- Parts
  		let AnthropicRequestParts {
-@@ -147,6 +165,36 @@
+@@ -147,6 +165,36 @@ impl Adapter for AnthropicAdapter {
  		});
  
  		if let Some(system) = system {
@@ -83,7 +84,7 @@ diff -ruN a/src/adapter/adapters/anthropic/adapter_impl.rs b/src/adapter/adapter
  			payload.x_insert("system", system)?;
  		}
  
-@@ -451,6 +499,8 @@
+@@ -451,6 +499,8 @@ impl AnthropicAdapter {
  										"tool_use_id": tool_response.call_id,
  									}));
  								}
@@ -92,7 +93,7 @@ diff -ruN a/src/adapter/adapters/anthropic/adapter_impl.rs b/src/adapter/adapter
  							}
  						}
  						let values = apply_cache_control_to_parts(is_cache_control, values);
-@@ -458,14 +508,24 @@
+@@ -458,14 +508,24 @@ impl AnthropicAdapter {
  					}
  				}
  
@@ -118,7 +119,7 @@ diff -ruN a/src/adapter/adapters/anthropic/adapter_impl.rs b/src/adapter/adapter
  							ContentPart::Text(text) => {
  								has_text = true;
  								values.push(json!({"type": "text", "text": text}));
-@@ -486,7 +546,7 @@
+@@ -486,7 +546,7 @@ impl AnthropicAdapter {
  						}
  					}
  
@@ -127,9 +128,10 @@ diff -ruN a/src/adapter/adapters/anthropic/adapter_impl.rs b/src/adapter/adapter
  						// Optimize to simple string when it's only one text part and no cache control.
  						let text = values
  							.first()
-diff -ruN a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/anthropic/streamer.rs
---- a/src/adapter/adapters/anthropic/streamer.rs	2025-12-16 02:09:31.446099903 +0000
-+++ b/src/adapter/adapters/anthropic/streamer.rs	2025-12-16 02:08:26.045344310 +0000
+diff --git a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/anthropic/streamer.rs
+index 843f484..9155f06 100644
+--- a/src/adapter/adapters/anthropic/streamer.rs
++++ b/src/adapter/adapters/anthropic/streamer.rs
 @@ -1,6 +1,6 @@
  use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions};
  use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
@@ -138,7 +140,7 @@ diff -ruN a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/an
  use crate::{Error, ModelIden, Result};
  use reqwest_eventsource::{Event, EventSource};
  use serde_json::Value;
-@@ -23,7 +23,7 @@
+@@ -23,7 +23,7 @@ pub struct AnthropicStreamer {
  enum InProgressBlock {
  	Text,
  	ToolUse { id: String, name: String, input: String },
@@ -147,7 +149,7 @@ diff -ruN a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/an
  }
  
  impl AnthropicStreamer {
-@@ -71,7 +71,10 @@
+@@ -71,7 +71,10 @@ impl futures::Stream for AnthropicStreamer {
  
  							match data.x_get_str("/content_block/type") {
  								Ok("text") => self.in_progress_block = InProgressBlock::Text,
@@ -159,7 +161,7 @@ diff -ruN a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/an
  								Ok("tool_use") => {
  									self.in_progress_block = InProgressBlock::ToolUse {
  										id: data.x_take("/content_block/id")?,
-@@ -114,18 +117,46 @@
+@@ -114,18 +117,46 @@ impl futures::Stream for AnthropicStreamer {
  									input.push_str(data.x_get_str("/delta/partial_json")?);
  									continue;
  								}
@@ -216,7 +218,7 @@ diff -ruN a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/an
  								}
  							}
  						}
-@@ -148,6 +179,15 @@
+@@ -148,6 +179,15 @@ impl futures::Stream for AnthropicStreamer {
  
  									return Poll::Ready(Some(Ok(InterStreamEvent::ToolCallChunk(tc))));
  								}
@@ -232,7 +234,7 @@ diff -ruN a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/an
  								_ => {
  									// no-op for remaining block types
  								}
-@@ -182,6 +222,7 @@
+@@ -182,6 +222,7 @@ impl futures::Stream for AnthropicStreamer {
  								captured_text_content: self.captured_data.content.take(),
  								captured_reasoning_content: self.captured_data.reasoning_content.take(),
  								captured_tool_calls: self.captured_data.tool_calls.take(),
@@ -240,7 +242,7 @@ diff -ruN a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/an
  							};
  
  							// TODO: Need to capture the data as needed
-@@ -193,7 +234,14 @@
+@@ -193,7 +234,14 @@ impl futures::Stream for AnthropicStreamer {
  					}
  				}
  				Some(Err(err)) => {
@@ -256,9 +258,13 @@ diff -ruN a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/an
  					return Poll::Ready(Some(Err(Error::ReqwestEventSource(err.into()))));
  				}
  				None => return Poll::Ready(None),
-@@ -210,10 +258,20 @@
+@@ -209,11 +257,24 @@ impl AnthropicStreamer {
+ 		if self.options.capture_usage {
  			let data = self.parse_message_data(message_data)?;
  			// TODO: Might want to exit early if usage is not found
++			
++			// Debug: log raw usage data
++			tracing::debug!("Anthropic {} usage data: {}", message_type, message_data);
  
 -			let (input_path, output_path) = if message_type == "message_start" {
 -				("/message/usage/input_tokens", "/message/usage/output_tokens")
@@ -280,7 +286,7 @@ diff -ruN a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/an
  			} else {
  				// TODO: Use tracing
  				tracing::debug!(
-@@ -243,6 +301,25 @@
+@@ -243,6 +304,25 @@ impl AnthropicStreamer {
  					.get_or_insert(0);
  				*val += output_tokens;
  			}
@@ -306,10 +312,11 @@ diff -ruN a/src/adapter/adapters/anthropic/streamer.rs b/src/adapter/adapters/an
  		}
  
  		Ok(())
-diff -ruN a/src/adapter/adapters/cohere/streamer.rs b/src/adapter/adapters/cohere/streamer.rs
---- a/src/adapter/adapters/cohere/streamer.rs	2025-12-16 02:09:31.448099927 +0000
-+++ b/src/adapter/adapters/cohere/streamer.rs	2025-12-16 02:07:15.838533192 +0000
-@@ -108,6 +108,7 @@
+diff --git a/src/adapter/adapters/cohere/streamer.rs b/src/adapter/adapters/cohere/streamer.rs
+index c92bcb0..dc57b50 100644
+--- a/src/adapter/adapters/cohere/streamer.rs
++++ b/src/adapter/adapters/cohere/streamer.rs
+@@ -108,6 +108,7 @@ impl futures::Stream for CohereStreamer {
  										captured_text_content: self.captured_data.content.take(),
  										captured_reasoning_content: self.captured_data.reasoning_content.take(),
  										captured_tool_calls: self.captured_data.tool_calls.take(),
@@ -317,10 +324,11 @@ diff -ruN a/src/adapter/adapters/cohere/streamer.rs b/src/adapter/adapters/coher
  									};
  
  									InterStreamEvent::End(inter_stream_end)
-diff -ruN a/src/adapter/adapters/gemini/adapter_impl.rs b/src/adapter/adapters/gemini/adapter_impl.rs
---- a/src/adapter/adapters/gemini/adapter_impl.rs	2025-12-16 02:09:31.451099961 +0000
-+++ b/src/adapter/adapters/gemini/adapter_impl.rs	2025-12-16 02:07:15.838533192 +0000
-@@ -458,6 +458,8 @@
+diff --git a/src/adapter/adapters/gemini/adapter_impl.rs b/src/adapter/adapters/gemini/adapter_impl.rs
+index e232e82..3f1f8d3 100644
+--- a/src/adapter/adapters/gemini/adapter_impl.rs
++++ b/src/adapter/adapters/gemini/adapter_impl.rs
+@@ -458,6 +458,8 @@ impl GeminiAdapter {
  									}
  								}));
  							}
@@ -329,7 +337,7 @@ diff -ruN a/src/adapter/adapters/gemini/adapter_impl.rs b/src/adapter/adapters/g
  						}
  					}
  
-@@ -479,6 +481,7 @@
+@@ -479,6 +481,7 @@ impl GeminiAdapter {
  							// Ignore unsupported parts for Assistant role
  							ContentPart::Binary(_) => {}
  							ContentPart::ToolResponse(_) => {}
@@ -337,10 +345,11 @@ diff -ruN a/src/adapter/adapters/gemini/adapter_impl.rs b/src/adapter/adapters/g
  						}
  					}
  					if !parts_values.is_empty() {
-diff -ruN a/src/adapter/adapters/gemini/streamer.rs b/src/adapter/adapters/gemini/streamer.rs
---- a/src/adapter/adapters/gemini/streamer.rs	2025-12-16 02:09:31.452099973 +0000
-+++ b/src/adapter/adapters/gemini/streamer.rs	2025-12-16 02:07:15.839533203 +0000
-@@ -55,6 +55,7 @@
+diff --git a/src/adapter/adapters/gemini/streamer.rs b/src/adapter/adapters/gemini/streamer.rs
+index c076ab0..715c720 100644
+--- a/src/adapter/adapters/gemini/streamer.rs
++++ b/src/adapter/adapters/gemini/streamer.rs
+@@ -55,6 +55,7 @@ impl futures::Stream for GeminiStreamer {
  								captured_text_content: self.captured_data.content.take(),
  								captured_reasoning_content: self.captured_data.reasoning_content.take(),
  								captured_tool_calls: self.captured_data.tool_calls.take(),
@@ -348,10 +357,11 @@ diff -ruN a/src/adapter/adapters/gemini/streamer.rs b/src/adapter/adapters/gemin
  							};
  
  							InterStreamEvent::End(inter_stream_end)
-diff -ruN a/src/adapter/adapters/openai/adapter_impl.rs b/src/adapter/adapters/openai/adapter_impl.rs
---- a/src/adapter/adapters/openai/adapter_impl.rs	2025-12-16 02:09:31.456100019 +0000
-+++ b/src/adapter/adapters/openai/adapter_impl.rs	2025-12-16 02:07:15.839533203 +0000
-@@ -479,6 +479,8 @@
+diff --git a/src/adapter/adapters/openai/adapter_impl.rs b/src/adapter/adapters/openai/adapter_impl.rs
+index 3ea3116..7bb85c9 100644
+--- a/src/adapter/adapters/openai/adapter_impl.rs
++++ b/src/adapter/adapters/openai/adapter_impl.rs
+@@ -479,6 +479,8 @@ impl OpenAIAdapter {
  								// TODO: Probably need to warn if it is a ToolCalls type of content
  								ContentPart::ToolCall(_) => (),
  								ContentPart::ToolResponse(_) => (),
@@ -360,7 +370,7 @@ diff -ruN a/src/adapter/adapters/openai/adapter_impl.rs b/src/adapter/adapters/o
  							}
  						}
  						messages.push(json! ({"role": "user", "content": values}));
-@@ -508,6 +510,8 @@
+@@ -508,6 +510,8 @@ impl OpenAIAdapter {
  							// TODO: Probably need towarn on this one (probably need to add binary here)
  							ContentPart::Binary(_) => (),
  							ContentPart::ToolResponse(_) => (),
@@ -369,10 +379,11 @@ diff -ruN a/src/adapter/adapters/openai/adapter_impl.rs b/src/adapter/adapters/o
  						}
  					}
  					let content = texts.join("\n\n");
-diff -ruN a/src/adapter/adapters/openai/streamer.rs b/src/adapter/adapters/openai/streamer.rs
---- a/src/adapter/adapters/openai/streamer.rs	2025-12-16 02:09:31.457100031 +0000
-+++ b/src/adapter/adapters/openai/streamer.rs	2025-12-16 02:07:15.840533215 +0000
-@@ -100,6 +100,7 @@
+diff --git a/src/adapter/adapters/openai/streamer.rs b/src/adapter/adapters/openai/streamer.rs
+index 65d4d44..15b3a9d 100644
+--- a/src/adapter/adapters/openai/streamer.rs
++++ b/src/adapter/adapters/openai/streamer.rs
+@@ -100,6 +100,7 @@ impl futures::Stream for OpenAIStreamer {
  							captured_text_content: self.captured_data.content.take(),
  							captured_reasoning_content: self.captured_data.reasoning_content.take(),
  							captured_tool_calls,
@@ -380,10 +391,11 @@ diff -ruN a/src/adapter/adapters/openai/streamer.rs b/src/adapter/adapters/opena
  						};
  
  						return Poll::Ready(Some(Ok(InterStreamEvent::End(inter_stream_end))));
-diff -ruN a/src/adapter/adapters/openai_resp/adapter_impl.rs b/src/adapter/adapters/openai_resp/adapter_impl.rs
---- a/src/adapter/adapters/openai_resp/adapter_impl.rs	2025-12-16 02:09:31.458100042 +0000
-+++ b/src/adapter/adapters/openai_resp/adapter_impl.rs	2025-12-16 02:07:15.840533215 +0000
-@@ -394,6 +394,8 @@
+diff --git a/src/adapter/adapters/openai_resp/adapter_impl.rs b/src/adapter/adapters/openai_resp/adapter_impl.rs
+index 51fa543..a7f11d2 100644
+--- a/src/adapter/adapters/openai_resp/adapter_impl.rs
++++ b/src/adapter/adapters/openai_resp/adapter_impl.rs
+@@ -394,6 +394,8 @@ impl OpenAIRespAdapter {
  								// TODO: Probably need to warn if it is a ToolCalls type of content
  								ContentPart::ToolCall(_) => (),
  								ContentPart::ToolResponse(_) => (),
@@ -392,7 +404,7 @@ diff -ruN a/src/adapter/adapters/openai_resp/adapter_impl.rs b/src/adapter/adapt
  							}
  						}
  						input_items.push(json! ({"role": "user", "content": values}));
-@@ -436,6 +438,8 @@
+@@ -436,6 +438,8 @@ impl OpenAIRespAdapter {
  							// TODO: Probably need towarn on this one (probably need to add binary here)
  							ContentPart::Binary(_) => (),
  							ContentPart::ToolResponse(_) => (),
@@ -401,9 +413,10 @@ diff -ruN a/src/adapter/adapters/openai_resp/adapter_impl.rs b/src/adapter/adapt
  						}
  					}
  
-diff -ruN a/src/adapter/adapters/support.rs b/src/adapter/adapters/support.rs
---- a/src/adapter/adapters/support.rs	2025-12-16 02:09:31.460100065 +0000
-+++ b/src/adapter/adapters/support.rs	2025-12-16 02:07:15.841533226 +0000
+diff --git a/src/adapter/adapters/support.rs b/src/adapter/adapters/support.rs
+index 98712f7..5f4e8b4 100644
+--- a/src/adapter/adapters/support.rs
++++ b/src/adapter/adapters/support.rs
 @@ -2,7 +2,7 @@
  //! It should be private to the `crate::adapter::adapters` module.
  
@@ -413,7 +426,7 @@ diff -ruN a/src/adapter/adapters/support.rs b/src/adapter/adapters/support.rs
  use crate::resolver::AuthData;
  use crate::{Error, Result};
  
-@@ -46,6 +46,7 @@
+@@ -46,6 +46,7 @@ pub struct StreamerCapturedData {
  	pub content: Option<String>,
  	pub reasoning_content: Option<String>,
  	pub tool_calls: Option<Vec<crate::chat::ToolCall>>,
@@ -421,9 +434,10 @@ diff -ruN a/src/adapter/adapters/support.rs b/src/adapter/adapters/support.rs
  }
  
  // endregion: --- Streamer Captured Data
-diff -ruN a/src/adapter/inter_stream.rs b/src/adapter/inter_stream.rs
---- a/src/adapter/inter_stream.rs	2025-12-16 02:09:31.464100111 +0000
-+++ b/src/adapter/inter_stream.rs	2025-12-16 02:07:15.841533226 +0000
+diff --git a/src/adapter/inter_stream.rs b/src/adapter/inter_stream.rs
+index 8b58ed5..3313131 100644
+--- a/src/adapter/inter_stream.rs
++++ b/src/adapter/inter_stream.rs
 @@ -5,7 +5,7 @@
  //!
  //! NOTE: This might be removed at some point as it may not be needed, and we could go directly to the GenAI stream.
@@ -433,7 +447,7 @@ diff -ruN a/src/adapter/inter_stream.rs b/src/adapter/inter_stream.rs
  
  #[derive(Debug, Default)]
  pub struct InterStreamEnd {
-@@ -20,6 +20,9 @@
+@@ -20,6 +20,9 @@ pub struct InterStreamEnd {
  
  	// When `ChatOptions..capture_tool_calls == true`
  	pub captured_tool_calls: Option<Vec<crate::chat::ToolCall>>,
@@ -443,9 +457,10 @@ diff -ruN a/src/adapter/inter_stream.rs b/src/adapter/inter_stream.rs
  }
  
  /// Intermediary StreamEvent
-diff -ruN a/src/chat/chat_stream.rs b/src/chat/chat_stream.rs
---- a/src/chat/chat_stream.rs	2025-12-16 02:09:31.465100123 +0000
-+++ b/src/chat/chat_stream.rs	2025-12-16 02:07:15.841533226 +0000
+diff --git a/src/chat/chat_stream.rs b/src/chat/chat_stream.rs
+index 15bf9d4..867b21b 100644
+--- a/src/chat/chat_stream.rs
++++ b/src/chat/chat_stream.rs
 @@ -1,5 +1,5 @@
  use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
 -use crate::chat::{MessageContent, ToolCall, Usage};
@@ -453,7 +468,7 @@ diff -ruN a/src/chat/chat_stream.rs b/src/chat/chat_stream.rs
  use futures::Stream;
  use serde::{Deserialize, Serialize};
  use std::pin::Pin;
-@@ -109,6 +109,10 @@
+@@ -109,6 +109,10 @@ pub struct StreamEnd {
  
  	/// Captured reasoning content if `ChatOptions.capture_reasoning` is enabled.
  	pub captured_reasoning_content: Option<String>,
@@ -464,7 +479,7 @@ diff -ruN a/src/chat/chat_stream.rs b/src/chat/chat_stream.rs
  }
  
  impl From<InterStreamEnd> for StreamEnd {
-@@ -136,6 +140,7 @@
+@@ -136,6 +140,7 @@ impl From<InterStreamEnd> for StreamEnd {
  			captured_usage: inter_end.captured_usage,
  			captured_content,
  			captured_reasoning_content: inter_end.captured_reasoning_content,
@@ -472,10 +487,11 @@ diff -ruN a/src/chat/chat_stream.rs b/src/chat/chat_stream.rs
  		}
  	}
  }
-diff -ruN a/src/chat/content_part.rs b/src/chat/content_part.rs
---- a/src/chat/content_part.rs	2025-12-16 02:09:31.466100135 +0000
-+++ b/src/chat/content_part.rs	2025-12-16 02:07:15.842533238 +0000
-@@ -21,6 +21,11 @@
+diff --git a/src/chat/content_part.rs b/src/chat/content_part.rs
+index 9b71d62..34cb5cc 100644
+--- a/src/chat/content_part.rs
++++ b/src/chat/content_part.rs
+@@ -21,6 +21,11 @@ pub enum ContentPart {
  
  	#[from]
  	ToolResponse(ToolResponse),
@@ -487,7 +503,7 @@ diff -ruN a/src/chat/content_part.rs b/src/chat/content_part.rs
  }
  
  /// Constructors
-@@ -136,6 +141,24 @@
+@@ -136,6 +141,24 @@ impl ContentPart {
  			None
  		}
  	}
@@ -512,7 +528,7 @@ diff -ruN a/src/chat/content_part.rs b/src/chat/content_part.rs
  }
  
  /// is_.. Accessors
-@@ -179,6 +202,11 @@
+@@ -179,6 +202,11 @@ impl ContentPart {
  	pub fn is_tool_response(&self) -> bool {
  		matches!(self, ContentPart::ToolResponse(_))
  	}
@@ -524,7 +540,7 @@ diff -ruN a/src/chat/content_part.rs b/src/chat/content_part.rs
  }
  
  // endregion: --- Content Part
-@@ -255,6 +283,30 @@
+@@ -255,6 +283,30 @@ pub enum BinarySource {
  
  // endregion: --- BinarySource
  
@@ -555,10 +571,11 @@ diff -ruN a/src/chat/content_part.rs b/src/chat/content_part.rs
  // No `Local` location; this would require handling errors like "file not found" etc.
  // Such a file can be easily provided by the user as Base64, and we can implement a convenient
  // TryFrom<File> to Base64 version. All LLMs accept local images only as Base64.
-diff -ruN a/src/error.rs b/src/error.rs
---- a/src/error.rs	2025-12-16 02:09:31.473100215 +0000
-+++ b/src/error.rs	2025-12-16 02:07:15.842533238 +0000
-@@ -118,6 +118,9 @@
+diff --git a/src/error.rs b/src/error.rs
+index 745e1b0..44b1469 100644
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -118,6 +118,9 @@ pub enum Error {
  	#[display("Reqwest EventSource error: {_0}")]
  	ReqwestEventSource(Box<reqwest_eventsource::Error>),
  

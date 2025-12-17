@@ -372,12 +372,6 @@ impl Turn {
         }
     }
 
-    /// Check if all blocks in this turn are complete
-    pub fn is_complete(&self) -> bool {
-        !self.content.is_empty() && self.content.iter().all(|block| block.status() == Status::Complete)
-    }
-
-
     /// Add a block and return its index
     pub fn add_block(&mut self, block: Box<dyn Block>) -> usize {
         let idx = self.content.len();

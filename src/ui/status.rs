@@ -113,8 +113,27 @@ impl Widget for StatusBar<'_> {
         if self.show_tokens {
             if let Some(usage) = self.usage {
                 spans.push(Span::raw(" │ "));
+                
+                // Build token display with cache info if available
+                let mut token_text = format!("Tokens: {} in / {} out", usage.input_tokens, usage.output_tokens);
+                
+                // Add cache stats if non-zero
+                if usage.cache_creation_tokens > 0 || usage.cache_read_tokens > 0 {
+                    token_text.push_str(" (cache: ");
+                    if usage.cache_read_tokens > 0 {
+                        token_text.push_str(&format!("{}r", usage.cache_read_tokens));
+                    }
+                    if usage.cache_creation_tokens > 0 {
+                        if usage.cache_read_tokens > 0 {
+                            token_text.push_str("/");
+                        }
+                        token_text.push_str(&format!("{}w", usage.cache_creation_tokens));
+                    }
+                    token_text.push(')');
+                }
+                
                 spans.push(Span::styled(
-                    format!("Tokens: {} in / {} out", usage.input_tokens, usage.output_tokens),
+                    token_text,
                     Style::default().fg(Color::Gray),
                 ));
             }

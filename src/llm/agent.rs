@@ -32,12 +32,40 @@ pub struct Usage {
     /// Current context window size (last request's input tokens)
     /// This is used to determine when compaction is needed
     pub context_tokens: u32,
+    /// Cumulative cache creation tokens (tokens written to cache)
+    pub cache_creation_tokens: u32,
+    /// Cumulative cache read tokens (tokens read from cache)
+    pub cache_read_tokens: u32,
+}
+
+impl Usage {
+    /// Format usage information for logging
+    pub fn format_log(&self, genai_usage: &genai::chat::Usage) -> String {
+        let mut details = format!("Turn tokens: input={} output={}", self.input_tokens, self.output_tokens);
+        
+        if self.cache_creation_tokens > 0 {
+            details.push_str(&format!(" cache_creation={}", self.cache_creation_tokens));
+        }
+        if self.cache_read_tokens > 0 {
+            details.push_str(&format!(" cached={}", self.cache_read_tokens));
+        }
+        
+        if let Some(ref completion_details) = genai_usage.completion_tokens_details {
+            if let Some(reasoning) = completion_details.reasoning_tokens {
+                details.push_str(&format!(" reasoning={}", reasoning));
+            }
+        }
+        
+        details
+    }
 }
 
 impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, other: Self) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
+        self.cache_creation_tokens += other.cache_creation_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
         // context_tokens is set directly, not accumulated
     }
 }
@@ -90,21 +118,21 @@ pub enum RequestMode {
 }
 
 /// Options derived from a RequestMode
-pub struct ModeOptions {
+pub struct RequestOptions {
     pub tools_enabled: bool,
     pub thinking_budget: Option<u32>,
     pub capture_tool_calls: bool,
 }
 
 impl RequestMode {
-    pub fn options(&self) -> ModeOptions {
+    pub fn options(&self) -> RequestOptions {
         match self {
-            Self::Normal => ModeOptions {
+            Self::Normal => RequestOptions {
                 tools_enabled: true,
                 thinking_budget: None,
                 capture_tool_calls: true,
             },
-            Self::Compaction => ModeOptions {
+            Self::Compaction => RequestOptions {
                 tools_enabled: false,
                 thinking_budget: Some(8000),
                 capture_tool_calls: false,
@@ -121,6 +149,7 @@ pub struct Agent {
     max_retries: u32,
     tools: ToolRegistry,
     messages: Vec<ChatMessage>,
+    system_prompt: String,
     total_usage: Usage,
     /// OAuth credentials for Claude Max (if available)
     oauth: Option<OAuthCredentials>,
@@ -132,27 +161,18 @@ impl Agent {
         model: impl Into<String>,
         max_tokens: u32,
         max_retries: u32,
-        messages: Vec<(Role, String)>,
+        system_prompt: &str,
         tools: ToolRegistry,
         oauth: Option<OAuthCredentials>,
     ) -> Self {
-        let messages = messages
-            .into_iter()
-            .map(|(role, text)| match role {
-                Role::User => ChatMessage::user(text),
-                Role::Assistant => ChatMessage::assistant(text),
-                // Cache system messages for reuse across requests
-                Role::System => ChatMessage::system(text).with_options(CacheControl::Ephemeral),
-            })
-            .collect();
-
         Self {
             client: Client::default(),
             model: model.into(),
             max_tokens,
             max_retries,
             tools,
-            messages,
+            messages: vec![ChatMessage::system(system_prompt)],
+            system_prompt: system_prompt.to_string(),
             total_usage: Usage::default(),
             oauth,
         }
@@ -161,26 +181,12 @@ impl Agent {
     /// Restore agent message history from a transcript
     /// Preserves the existing system prompt (first message if it's a system message)
     pub fn restore_from_transcript(&mut self, transcript: &Transcript) {
-        // Preserve system prompt if present (should be first message)
-        // TODO we're not going to serialize system prompts in transcripts
-        let system_prompt = match self.messages.first() {
-            Some(msg) if matches!(msg.role, ChatRole::System) => Some(self.messages.remove(0)),
-            _ => None,
-        };
-        
         self.messages.clear();
         
         // Restore system prompt first
-        if let Some(system) = system_prompt {
-            self.messages.push(system);
-        }
+        self.messages.push(ChatMessage::system(self.system_prompt.clone()));
         
         for turn in transcript.turns() {
-            // Only restore completed turns - skip incomplete turns
-            if !turn.is_complete() {
-                continue;
-            }
-            
             match turn.role {
                 // Skip system turns - we use our predefined system prompt
                 Role::System => continue,
@@ -413,6 +419,31 @@ impl<'a> AgentStream<'a> {
         }
     }
 
+    /// Convert genai Usage to our Usage struct (for a single turn, not cumulative)
+    fn extract_turn_usage(genai_usage: &genai::chat::Usage) -> Usage {
+        let input_tokens = genai_usage.prompt_tokens.unwrap_or(0) as u32;
+        let output_tokens = genai_usage.completion_tokens.unwrap_or(0) as u32;
+        let mut cache_creation_tokens = 0u32;
+        let mut cache_read_tokens = 0u32;
+
+        if let Some(ref prompt_details) = genai_usage.prompt_tokens_details {
+            if let Some(cc) = prompt_details.cache_creation_tokens {
+                cache_creation_tokens = cc as u32;
+            }
+            if let Some(cr) = prompt_details.cached_tokens {
+                cache_read_tokens = cr as u32;
+            }
+        }
+
+        Usage {
+            input_tokens,
+            output_tokens,
+            context_tokens: input_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+        }
+    }
+
     /// Execute a chat request with retry and exponential backoff
     async fn exec_chat_with_retry(&self) -> Result<ChatStreamResponse, AgentStep> {
         // Clone messages and add cache_control to the last message
@@ -520,43 +551,13 @@ impl<'a> AgentStream<'a> {
                                 ChatStreamEvent::ToolCallChunk(_) => {}
                                 ChatStreamEvent::ReasoningChunk(chunk) => {
                                     full_thinking.push_str(&chunk.content);
-                                    return Some(AgentStep::ThinkingDelta(chunk.content));
+
                                 }
                                 ChatStreamEvent::End(mut end) => {
-                                    if let Some(ref usage) = end.captured_usage {
-                                        let input = usage.prompt_tokens.unwrap_or(0) as u32;
-                                        let output = usage.completion_tokens.unwrap_or(0) as u32;
-
-                                        self.agent.total_usage.input_tokens += input;
-                                        self.agent.total_usage.output_tokens += output;
-                                        // Track current context size for compaction decisions
-                                        self.agent.total_usage.context_tokens = input;
-
-                                        // Log token usage details
-                                        let mut details = format!("Turn tokens: input={} output={}", input, output);
-                                        
-                                        if let Some(ref prompt_details) = usage.prompt_tokens_details {
-                                            if let Some(cache_creation) = prompt_details.cache_creation_tokens {
-                                                details.push_str(&format!(" cache_creation={}", cache_creation));
-                                            }
-                                            if let Some(cached) = prompt_details.cached_tokens {
-                                                details.push_str(&format!(" cached={}", cached));
-                                            }
-                                        }
-                                        
-                                        if let Some(ref completion_details) = usage.completion_tokens_details {
-                                            if let Some(reasoning) = completion_details.reasoning_tokens {
-                                                details.push_str(&format!(" reasoning={}", reasoning));
-                                            }
-                                        }
-                                        
-                                        info!("{}", details);
-                                        
-                                        // Debug: log full usage details
-                                        debug!("Full usage: prompt_tokens={:?}, completion_tokens={:?}, total_tokens={:?}",
-                                            usage.prompt_tokens, usage.completion_tokens, usage.total_tokens);
-                                        debug!("Prompt details: {:?}", usage.prompt_tokens_details);
-                                        debug!("Completion details: {:?}", usage.completion_tokens_details);
+                                    if let Some(ref genai_usage) = end.captured_usage {
+                                        let turn_usage = Self::extract_turn_usage(genai_usage);
+                                        self.agent.total_usage += turn_usage;
+                                        info!("{}", turn_usage.format_log(genai_usage));
                                     }
                                     // Capture thinking blocks first (before consuming end)
                                     if let Some(captured) = end.captured_thinking_blocks.take() {
