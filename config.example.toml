@@ -1,5 +1,5 @@
 # Codey Configuration Example
-# Copy this file to ~/.config/codey/config.toml
+# Copy this file to: ~/.config/codey/config.toml
 
 [general]
 # Default model to use
@@ -35,20 +35,11 @@ show_tokens = true
 # Tools to enable (leave empty for all)
 enabled = ["read_file", "write_file", "edit_file", "shell", "fetch_url"]
 
-# Default permission settings per tool
-# Options: "ask" = always ask, "allow" = auto-allow, "deny" = auto-deny
-[tools.permissions]
-read_file = "ask"
-write_file = "ask"
-edit_file = "ask"
-shell = "ask"
-fetch_url = "ask"
-
 # Tool parameter filters for auto-approve/auto-deny
 # Evaluation order:
 #   1. If any deny pattern matches → auto-deny (blocked)
 #   2. If any allow pattern matches → auto-approve (no prompt)
-#   3. Otherwise → use permission level (ask/allow/deny)
+#   3. Otherwise → prompt user for approval
 
 # Shell command filters (matches against 'command' parameter)
 [tools.shell]

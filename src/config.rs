@@ -95,7 +95,6 @@ impl Default for UiConfig {
 #[serde(default)]
 pub struct ToolsConfig {
     pub enabled: Vec<String>,
-    pub permissions: HashMap<String, PermissionLevel>,
     /// Filter patterns for shell tool (matches against command)
     pub shell: ToolFilterConfig,
     /// Filter patterns for read_file tool (matches against path)
@@ -110,13 +109,6 @@ pub struct ToolsConfig {
 
 impl Default for ToolsConfig {
     fn default() -> Self {
-        let mut permissions = HashMap::new();
-        permissions.insert("read_file".to_string(), PermissionLevel::Ask);
-        permissions.insert("write_file".to_string(), PermissionLevel::Ask);
-        permissions.insert("edit_file".to_string(), PermissionLevel::Ask);
-        permissions.insert("shell".to_string(), PermissionLevel::Ask);
-        permissions.insert("fetch_url".to_string(), PermissionLevel::Ask);
-
         Self {
             enabled: vec![
                 "read_file".to_string(),
@@ -125,7 +117,6 @@ impl Default for ToolsConfig {
                 "shell".to_string(),
                 "fetch_url".to_string(),
             ],
-            permissions,
             shell: ToolFilterConfig::default(),
             read_file: ToolFilterConfig::default(),
             write_file: ToolFilterConfig::default(),
@@ -148,13 +139,7 @@ impl ToolsConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PermissionLevel {
-    Ask,
-    Allow,
-    Deny,
-}
+
 
 impl Config {
     /// Load configuration from file, falling back to defaults
@@ -175,7 +160,7 @@ impl Config {
 
     /// Get the default config file path
     pub fn default_config_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|p| p.join("codey").join("config.toml"))
+        dirs::home_dir().map(|p| p.join(".config").join("codey").join("config.toml"))
     }
 }
 
