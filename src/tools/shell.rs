@@ -1,7 +1,7 @@
 //! Shell command execution tool
 
 use super::{Tool, ToolResult};
-use crate::transcript::{render_approval_prompt, render_result, Block, ToolBlock, Status};
+use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use anyhow::Result;
 use async_trait::async_trait;
 use ratatui::{
@@ -43,6 +43,10 @@ impl ShellBlock {
 
 #[typetag::serde]
 impl Block for ShellBlock {
+    fn kind(&self) -> BlockType {
+        BlockType::Tool
+    }
+
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
@@ -102,9 +106,6 @@ impl Block for ShellBlock {
         self.status = status;
     }
 
-    fn set_result(&mut self, result: String) {
-        self.output = Some(result);
-    }
 
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
@@ -118,9 +119,6 @@ impl Block for ShellBlock {
         Some(&self.params)
     }
 
-    fn result(&self) -> Option<&str> {
-        self.output.as_deref()
-    }
 }
 
 /// Tool for executing shell commands

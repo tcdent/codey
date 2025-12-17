@@ -33,6 +33,8 @@ pub struct GeneralConfig {
     pub working_dir: Option<PathBuf>,
     pub max_tokens: u32,
     pub max_retries: u32,
+    /// Token threshold at which to trigger context compaction (default: 100,000)
+    pub compaction_threshold: u32,
 }
 
 impl Default for GeneralConfig {
@@ -42,6 +44,7 @@ impl Default for GeneralConfig {
             working_dir: None,
             max_tokens: 8192,
             max_retries: 5,
+            compaction_threshold: 100_000,
         }
     }
 }
