@@ -3,6 +3,7 @@ mod auth;
 mod commands;
 mod compaction;
 mod config;
+mod ide;
 mod llm;
 mod permission;
 mod tool_filter;

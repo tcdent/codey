@@ -1,6 +1,7 @@
 //! Shell command execution tool
 
 use super::{Tool, ToolResult};
+use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ pub struct ShellBlock {
     pub tool_name: String,
     pub params: serde_json::Value,
     pub status: Status,
-    pub output: Option<String>,
+    pub text: String,
 }
 
 impl ShellBlock {
@@ -30,7 +31,7 @@ impl ShellBlock {
             tool_name: tool_name.into(),
             params,
             status: Status::Pending,
-            output: None,
+            text: String::new(),
         }
     }
 
@@ -43,39 +44,26 @@ impl ShellBlock {
 
 #[typetag::serde]
 impl Block for ShellBlock {
-    fn kind(&self) -> BlockType {
-        BlockType::Tool
-    }
+    impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
-        let (icon, color) = match self.status {
-            Status::Pending => ("?", Color::Yellow),
-            Status::Running => ("⚙", Color::Blue),
-            Status::Complete => ("✓", Color::Green),
-            Status::Error => ("✗", Color::Red),
-            Status::Denied => ("⊘", Color::DarkGray),
-            Status::Cancelled => ("⊘", Color::Yellow),
-        };
-
         let command = self.params["command"].as_str().unwrap_or("");
         let working_dir = self.params.get("working_dir").and_then(|v| v.as_str());
 
-        // Shell icon and command
-        lines.push(Line::from(vec![
-            Span::styled(format!("{} ", icon), Style::default().fg(color)),
-            Span::styled("$ ", Style::default().fg(Color::DarkGray)),
+        // Format: shell(command) or shell(command, in dir)
+        let mut spans = vec![
+            self.render_status(),
+            Span::styled("shell", Style::default().fg(Color::Magenta)),
+            Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(command, Style::default().fg(Color::White)),
-        ]));
-
-        // Working directory if set
+        ];
         if let Some(dir) = working_dir {
-            lines.push(Line::from(Span::styled(
-                format!("  in {}", dir),
-                Style::default().fg(Color::DarkGray),
-            )));
+            spans.push(Span::styled(format!(", in {}", dir), Style::default().fg(Color::DarkGray)));
         }
+        spans.push(Span::styled(")", Style::default().fg(Color::DarkGray)));
+        lines.push(Line::from(spans));
 
         // Approval prompt if pending
         if self.status == Status::Pending {
@@ -83,8 +71,8 @@ impl Block for ShellBlock {
         }
 
         // Output if completed
-        if let Some(ref output) = self.output {
-            lines.extend(render_result(output, 10));
+        if !self.text.is_empty() {
+            lines.extend(render_result(&self.text, 10));
         }
 
         // Denied message
@@ -98,15 +86,6 @@ impl Block for ShellBlock {
         lines
     }
 
-    fn status(&self) -> Status {
-        self.status
-    }
-
-    fn set_status(&mut self, status: Status) {
-        self.status = status;
-    }
-
-
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
     }
@@ -118,7 +97,6 @@ impl Block for ShellBlock {
     fn params(&self) -> Option<&serde_json::Value> {
         Some(&self.params)
     }
-
 }
 
 /// Tool for executing shell commands

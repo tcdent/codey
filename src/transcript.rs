@@ -115,6 +115,19 @@ pub trait Block: Send + Sync {
     /// Set the status of this block
     fn set_status(&mut self, status: Status);
 
+    /// Render status icon with appropriate color
+    fn render_status(&self) -> Span<'static> {
+        let (icon, color) = match self.status() {
+            Status::Pending => ("? ", Color::Yellow),
+            Status::Running => ("⚙ ", Color::Blue),
+            Status::Complete => ("✓ ", Color::Green),
+            Status::Error => ("✗ ", Color::Red),
+            Status::Denied => ("⊘ ", Color::DarkGray),
+            Status::Cancelled => ("⊘ ", Color::Yellow),
+        };
+        Span::styled(icon, Style::default().fg(color))
+    }
+
     /// Append text content to this block (for streaming)
     fn append_text(&mut self, _text: &str) {}
 
@@ -233,18 +246,9 @@ impl Block for ToolBlock {
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
-        let (icon, color) = match self.status {
-            Status::Pending => ("?", Color::Yellow),
-            Status::Running => ("⚙", Color::Blue),
-            Status::Complete => ("✓", Color::Green),
-            Status::Error => ("✗", Color::Red),
-            Status::Denied => ("⊘", Color::DarkGray),
-            Status::Cancelled => ("⊘", Color::Yellow),
-        };
-
         // Tool name with status icon
         lines.push(Line::from(vec![
-            Span::styled(format!("{} ", icon), Style::default().fg(color)),
+            self.render_status(),
             Span::styled(
                 &self.name,
                 Style::default()

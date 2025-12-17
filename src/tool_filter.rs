@@ -29,7 +29,7 @@
 //! 3. Otherwise → `FilterResult::NoMatch` (use permission level)
 
 use anyhow::{Context, Result};
-use regex::Regex;
+use fancy_regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -83,14 +83,14 @@ impl CompiledToolFilter {
     pub fn evaluate(&self, value: &str) -> FilterResult {
         // Check deny patterns first
         for pattern in &self.deny {
-            if pattern.is_match(value) {
+            if pattern.is_match(value).unwrap_or(false) {
                 return FilterResult::Deny;
             }
         }
 
         // Check allow patterns
         for pattern in &self.allow {
-            if pattern.is_match(value) {
+            if pattern.is_match(value).unwrap_or(false) {
                 return FilterResult::Allow;
             }
         }

@@ -41,7 +41,7 @@ anyhow = "1"
 thiserror = "2"
 
 # Utilities
-regex = "1.11"
+fancy-regex = "0.14"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
@@ -60,6 +60,9 @@ async-trait = "0.1"
 dotenvy = "0.15.7"
 ratskin = "0.3"
 typetag = "0.2.21"
+
+# Neovim RPC
+nvim-rs = { version = "0.9", features = ["use_tokio"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

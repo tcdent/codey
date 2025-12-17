@@ -14,6 +14,7 @@ pub struct Config {
     pub auth: AuthConfig,
     pub ui: UiConfig,
     pub tools: ToolsConfig,
+    pub ide: IdeConfig,
 }
 
 impl Default for Config {
@@ -23,6 +24,7 @@ impl Default for Config {
             auth: AuthConfig::default(),
             ui: UiConfig::default(),
             tools: ToolsConfig::default(),
+            ide: IdeConfig::default(),
         }
     }
 }
@@ -136,6 +138,46 @@ impl ToolsConfig {
         map.insert("edit_file".to_string(), self.edit_file.clone());
         map.insert("fetch_url".to_string(), self.fetch_url.clone());
         map
+    }
+}
+
+/// IDE integration configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IdeConfig {
+    pub nvim: NvimConfig,
+}
+
+impl Default for IdeConfig {
+    fn default() -> Self {
+        Self {
+            nvim: NvimConfig::default(),
+        }
+    }
+}
+
+/// Neovim integration configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NvimConfig {
+    /// Enable neovim integration
+    pub enabled: bool,
+    /// Explicit socket path (if not set, auto-discovers from tmux or $NVIM_LISTEN_ADDRESS)
+    pub socket: Option<PathBuf>,
+    /// Show diffs in nvim after file edits
+    pub show_diffs: bool,
+    /// Auto-reload buffers after file edits
+    pub auto_reload: bool,
+}
+
+impl Default for NvimConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            socket: None,
+            show_diffs: true,
+            auto_reload: true,
+        }
     }
 }
 

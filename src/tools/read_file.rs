@@ -1,6 +1,7 @@
 //! Read file tool
 
 use super::{Tool, ToolResult};
+use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ pub struct ReadFileBlock {
     pub tool_name: String,
     pub params: serde_json::Value,
     pub status: Status,
-    pub result: Option<String>,
+    pub text: String,
 }
 
 impl ReadFileBlock {
@@ -30,7 +31,7 @@ impl ReadFileBlock {
             tool_name: tool_name.into(),
             params,
             status: Status::Pending,
-            result: None,
+            text: String::new(),
         }
     }
 
@@ -42,51 +43,38 @@ impl ReadFileBlock {
 
 #[typetag::serde]
 impl Block for ReadFileBlock {
-    fn kind(&self) -> BlockType {
-        BlockType::Tool
-    }
+    impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
-
-        let (icon, color) = match self.status {
-            Status::Pending => ("?", Color::Yellow),
-            Status::Running => ("⚙", Color::Blue),
-            Status::Complete => ("✓", Color::Green),
-            Status::Error => ("✗", Color::Red),
-            Status::Denied => ("⊘", Color::DarkGray),
-            Status::Cancelled => ("⊘", Color::Yellow),
-        };
 
         let path = self.params["path"].as_str().unwrap_or("");
         let start_line = self.params.get("start_line").and_then(|v| v.as_i64());
         let end_line = self.params.get("end_line").and_then(|v| v.as_i64());
 
-        // Icon and path
-        let mut header = vec![
-            Span::styled(format!("{} ", icon), Style::default().fg(color)),
-            Span::styled("read ", Style::default().fg(Color::DarkGray)),
+        // Format: read_file(path:start-end) or read_file(path)
+        let range_str = match (start_line, end_line) {
+            (Some(s), Some(e)) => format!(":{}:{}", s, e),
+            (Some(s), None) => format!(":{}:", s),
+            (None, Some(e)) => format!(":{}", e),
+            (None, None) => String::new(),
+        };
+
+        lines.push(Line::from(vec![
+            self.render_status(),
+            Span::styled("read_file", Style::default().fg(Color::Magenta)),
+            Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(path, Style::default().fg(Color::Cyan)),
-        ];
-
-        // Line range if specified
-        if start_line.is_some() || end_line.is_some() {
-            let start = start_line.map(|n| n.to_string()).unwrap_or_default();
-            let end = end_line.map(|n| n.to_string()).unwrap_or_default();
-            header.push(Span::styled(
-                format!(" [{}:{}]", start, end),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-
-        lines.push(Line::from(header));
+            Span::styled(range_str, Style::default().fg(Color::DarkGray)),
+            Span::styled(")", Style::default().fg(Color::DarkGray)),
+        ]));
 
         if self.status == Status::Pending {
             lines.push(render_approval_prompt());
         }
 
-        if let Some(ref result) = self.result {
-            lines.extend(render_result(result, 10));
+        if !self.text.is_empty() {
+            lines.extend(render_result(&self.text, 10));
         }
 
         if self.status == Status::Denied {
@@ -99,15 +87,6 @@ impl Block for ReadFileBlock {
         lines
     }
 
-    fn status(&self) -> Status {
-        self.status
-    }
-
-    fn set_status(&mut self, status: Status) {
-        self.status = status;
-    }
-
-
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
     }
@@ -119,7 +98,6 @@ impl Block for ReadFileBlock {
     fn params(&self) -> Option<&serde_json::Value> {
         Some(&self.params)
     }
-
 }
 
 /// Tool for reading file contents

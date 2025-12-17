@@ -10,9 +10,7 @@ use genai::chat::{
     ContentPart, MessageContent, ReasoningEffort, Thinking, Tool, ToolCall, ToolResponse,
 };
 use genai::{Client, Headers};
-use std::time::Duration;
 use tracing::{debug, error, info};
-
 
 const ANTHROPIC_BETA_HEADER: &str = concat!(
     "oauth-2025-04-20,",
@@ -305,6 +303,11 @@ impl Agent {
         self.total_usage.context_tokens
     }
 
+    /// Get a tool by name
+    pub fn get_tool(&self, name: &str) -> &dyn crate::tools::Tool {
+        self.tools.get(name)
+    }
+
     /// Get total usage statistics
     pub fn total_usage(&self) -> Usage {
         self.total_usage
@@ -345,7 +348,6 @@ enum StreamState {
     Streaming {
         stream: futures::stream::BoxStream<'static, Result<ChatStreamEvent, genai::Error>>,
         full_text: String,
-        full_thinking: String,
         tool_calls: Vec<ToolCall>,
         thinking_blocks: Vec<Thinking>,
     },
@@ -353,7 +355,7 @@ enum StreamState {
     AwaitingToolDecision {
         assistant_text: String,
         all_tool_calls: Vec<ToolCall>,
-        thinking_blocks: Vec<Thinking>, // TODO we may not need to actually capture these. 
+        thinking_blocks: Vec<Thinking>, 
         current_tool_index: usize,
         tool_responses: Vec<ToolResponse>,
     },
@@ -474,7 +476,6 @@ impl<'a> AgentStream<'a> {
         );
 
         let mut attempt = 0u32;
-        let _delay = Duration::from_millis(500); // TODO: implement exponential backoff
 
         loop {
             attempt += 1;
@@ -514,7 +515,6 @@ impl<'a> AgentStream<'a> {
                             self.state = StreamState::Streaming {
                                 stream: Box::pin(response.stream),
                                 full_text: String::new(),
-                                full_thinking: String::new(),
                                 tool_calls: Vec::new(),
                                 thinking_blocks: Vec::new(),
                             };
@@ -533,7 +533,6 @@ impl<'a> AgentStream<'a> {
                 StreamState::Streaming {
                     stream,
                     full_text,
-                    full_thinking,
                     tool_calls,
                     thinking_blocks,
                 } => {
@@ -550,8 +549,7 @@ impl<'a> AgentStream<'a> {
                                 }
                                 ChatStreamEvent::ToolCallChunk(_) => {}
                                 ChatStreamEvent::ReasoningChunk(chunk) => {
-                                    full_thinking.push_str(&chunk.content);
-
+                                    return Some(AgentStep::ThinkingDelta(chunk.content));
                                 }
                                 ChatStreamEvent::End(mut end) => {
                                     if let Some(ref genai_usage) = end.captured_usage {
@@ -579,7 +577,6 @@ impl<'a> AgentStream<'a> {
 
                     // Stream ended, process results
                     let full_text = std::mem::take(full_text);
-                    let _full_thinking = std::mem::take(full_thinking);
                     let tool_calls = std::mem::take(tool_calls);
                     let thinking_blocks = std::mem::take(thinking_blocks);
 
@@ -716,5 +713,20 @@ impl<'a> AgentStream<'a> {
                 None
             }
         }
+    }
+
+    /// Get the preview for a tool (for IDE integration)
+    pub fn get_tool_preview(&self, name: &str, params: &serde_json::Value) -> Option<crate::ide::ToolPreview> {
+        self.agent.tools.get(name).preview(params)
+    }
+
+    /// Get post-execution actions for a tool (for IDE integration)
+    pub fn get_tool_post_actions(&self, name: &str, params: &serde_json::Value) -> Vec<crate::ide::IdeAction> {
+        self.agent.tools.get(name).post_actions(params)
+    }
+
+    /// Create the display block for a tool
+    pub fn create_tool_block(&self, call_id: &str, name: &str, params: serde_json::Value) -> Box<dyn crate::transcript::Block> {
+        self.agent.tools.get(name).create_block(call_id, params)
     }
 }

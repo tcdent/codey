@@ -1,8 +1,9 @@
 use crate::compaction::{CompactionBlock, COMPACTION_PROMPT};
 use crate::config::Config;
+use crate::ide::{Ide, Nvim, ToolPreview};
 use crate::llm::{Agent, AgentStep, RequestMode, ToolDecision, Usage};
 use crate::tool_filter::{FilterResult, ToolFilters};
-use crate::transcript::{BlockType, Role, Status, TextBlock, ThinkingBlock, ToolBlock, Transcript};
+use crate::transcript::{BlockType, Role, Status, TextBlock, ThinkingBlock, Transcript};
 use crate::tools::ToolRegistry;
 use crate::ui::{ChatView, ConnectionStatus, InputBox};
 
@@ -193,6 +194,8 @@ pub struct App {
     alert: Option<String>,
     /// Compiled tool parameter filters for auto-approve/deny
     tool_filters: ToolFilters,
+    /// IDE connection for editor integration (e.g., Neovim)
+    ide: Option<Box<dyn Ide>>,
 }
 
 impl App {
@@ -229,6 +232,26 @@ impl App {
         let tool_filters = ToolFilters::compile(&config.tools.filters())
             .context("Failed to compile tool filters")?;
 
+        // Try to connect to neovim if enabled
+        let ide: Option<Box<dyn Ide>> = if config.ide.nvim.enabled {
+            match Nvim::discover(config.ide.nvim.socket.clone()).await {
+                Ok(Some(nvim)) => {
+                    tracing::info!("Connected to {} at {:?}", nvim.name(), nvim.socket_path());
+                    Some(Box::new(nvim))
+                }
+                Ok(None) => {
+                    tracing::debug!("No nvim instance found");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to connect to nvim: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Ok(Self {
             config,
             terminal,
@@ -243,6 +266,7 @@ impl App {
             last_render: Instant::now(),
             alert: None,
             tool_filters,
+            ide,
         })
     }
 
@@ -625,8 +649,20 @@ impl App {
                     // Evaluate tool filters before prompting
                     let filter_result = self.tool_filters.evaluate(&name, &params);
                     
-                    turn.start_block(Box::new(ToolBlock::new(call_id.clone(), name.clone(), params.clone())));
+                    // Create the tool-specific block for display
+                    let block = stream.create_tool_block(&call_id, &name, params.clone());
+                    turn.start_block(block);
                     self.draw()?;
+
+                    // Get preview and post-actions from the tool before using stream
+                    // (stream holds a mutable borrow of agent)
+                    let preview = stream.get_tool_preview(&name, &params);
+                    let post_actions = stream.get_tool_post_actions(&name, &params);
+
+                    // Show preview in IDE if the tool provides one
+                    if let Some(preview) = preview {
+                        self.show_ide_preview(&preview).await;
+                    }
 
                     // Determine decision based on filter result or user approval
                     let decision = match filter_result {
@@ -641,6 +677,9 @@ impl App {
                         _ => self.wait_for_tool_approval().await?,
                     };
 
+                    // Close preview after decision is made
+                    self.close_ide_preview().await;
+
                     if let Some(block) = self.transcript.get_or_create_current_turn().get_active_block_mut() {
                         match decision {
                             ToolDecision::Approve => block.set_status(Status::Running),
@@ -654,6 +693,13 @@ impl App {
                         if let Some(block) = self.transcript.get_or_create_current_turn().get_active_block_mut() {
                             block.set_status(if is_error { Status::Error } else { Status::Complete });
                             block.append_text(&result);
+                        }
+
+                        // Execute post-actions from the tool (e.g., reload buffer)
+                        if !is_error {
+                            for action in post_actions {
+                                self.execute_ide_action(&action).await;
+                            }
                         }
                     }
                 }
@@ -723,6 +769,58 @@ impl App {
         }
 
         Ok(())
+    }
+
+    // ========================================================================
+    // IDE Integration
+    // ========================================================================
+
+    /// Show a preview in the IDE before tool approval
+    async fn show_ide_preview(&self, preview: &ToolPreview) {
+        // Check config
+        if !self.config.ide.nvim.show_diffs {
+            return;
+        }
+
+        let ide = match &self.ide {
+            Some(ide) => ide,
+            None => return,
+        };
+
+        if let Err(e) = ide.show_preview(preview).await {
+            tracing::warn!("Failed to show IDE preview: {}", e);
+        }
+    }
+
+    /// Close any open preview windows in the IDE
+    async fn close_ide_preview(&self) {
+        let ide = match &self.ide {
+            Some(ide) => ide,
+            None => return,
+        };
+
+        if let Err(e) = ide.close_preview().await {
+            tracing::warn!("Failed to close IDE preview: {}", e);
+        }
+    }
+
+    /// Execute an IDE action (e.g., reload buffer after file change)
+    async fn execute_ide_action(&self, action: &crate::ide::IdeAction) {
+        // Check config for auto-reload
+        if let crate::ide::IdeAction::ReloadBuffer(_) = action {
+            if !self.config.ide.nvim.auto_reload {
+                return;
+            }
+        }
+
+        let ide = match &self.ide {
+            Some(ide) => ide,
+            None => return,
+        };
+
+        if let Err(e) = ide.execute(action).await {
+            tracing::warn!("Failed to execute IDE action: {}", e);
+        }
     }
 
     /// Cleanup terminal

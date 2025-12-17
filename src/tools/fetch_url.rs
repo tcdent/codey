@@ -1,6 +1,7 @@
 //! URL fetching tool
 
 use super::{Tool, ToolResult};
+use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -18,7 +19,7 @@ pub struct FetchUrlBlock {
     pub tool_name: String,
     pub params: serde_json::Value,
     pub status: Status,
-    pub result: Option<String>,
+    pub text: String,
 }
 
 impl FetchUrlBlock {
@@ -28,7 +29,7 @@ impl FetchUrlBlock {
             tool_name: tool_name.into(),
             params,
             status: Status::Pending,
-            result: None,
+            text: String::new(),
         }
     }
 
@@ -40,36 +41,28 @@ impl FetchUrlBlock {
 
 #[typetag::serde]
 impl Block for FetchUrlBlock {
-    fn kind(&self) -> BlockType {
-        BlockType::Tool
-    }
+    impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
-        let (icon, color) = match self.status {
-            Status::Pending => ("?", Color::Yellow),
-            Status::Running => ("⚙", Color::Blue),
-            Status::Complete => ("✓", Color::Green),
-            Status::Error => ("✗", Color::Red),
-            Status::Denied => ("⊘", Color::DarkGray),
-            Status::Cancelled => ("⊘", Color::Yellow),
-        };
-
         let url = self.params["url"].as_str().unwrap_or("");
 
+        // Format: fetch_url(url)
         lines.push(Line::from(vec![
-            Span::styled(format!("{} ", icon), Style::default().fg(color)),
-            Span::styled("fetch ", Style::default().fg(Color::DarkGray)),
+            self.render_status(),
+            Span::styled("fetch_url", Style::default().fg(Color::Magenta)),
+            Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(url, Style::default().fg(Color::Blue)),
+            Span::styled(")", Style::default().fg(Color::DarkGray)),
         ]));
 
         if self.status == Status::Pending {
             lines.push(render_approval_prompt());
         }
 
-        if let Some(ref result) = self.result {
-            lines.extend(render_result(result, 5));
+        if !self.text.is_empty() {
+            lines.extend(render_result(&self.text, 5));
         }
 
         if self.status == Status::Denied {
@@ -82,15 +75,6 @@ impl Block for FetchUrlBlock {
         lines
     }
 
-    fn status(&self) -> Status {
-        self.status
-    }
-
-    fn set_status(&mut self, status: Status) {
-        self.status = status;
-    }
-
-
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
     }
@@ -102,7 +86,6 @@ impl Block for FetchUrlBlock {
     fn params(&self) -> Option<&serde_json::Value> {
         Some(&self.params)
     }
-
 }
 
 /// Tool for fetching web content

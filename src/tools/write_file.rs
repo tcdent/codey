@@ -1,6 +1,8 @@
 //! Write file tool
 
 use super::{Tool, ToolResult};
+use crate::ide::{IdeAction, ToolPreview};
+use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -20,7 +22,7 @@ pub struct WriteFileBlock {
     pub tool_name: String,
     pub params: serde_json::Value,
     pub status: Status,
-    pub result: Option<String>,
+    pub text: String,
 }
 
 impl WriteFileBlock {
@@ -30,7 +32,7 @@ impl WriteFileBlock {
             tool_name: tool_name.into(),
             params,
             status: Status::Pending,
-            result: None,
+            text: String::new(),
         }
     }
 
@@ -42,41 +44,30 @@ impl WriteFileBlock {
 
 #[typetag::serde]
 impl Block for WriteFileBlock {
-    fn kind(&self) -> BlockType {
-        BlockType::Tool
-    }
+    impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
-        let (icon, color) = match self.status {
-            Status::Pending => ("?", Color::Yellow),
-            Status::Running => ("⚙", Color::Blue),
-            Status::Complete => ("✓", Color::Green),
-            Status::Error => ("✗", Color::Red),
-            Status::Denied => ("⊘", Color::DarkGray),
-            Status::Cancelled => ("⊘", Color::Yellow),
-        };
-
         let path = self.params["path"].as_str().unwrap_or("");
         let content_len = self.params.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
 
+        // Format: write_file(path, N bytes)
         lines.push(Line::from(vec![
-            Span::styled(format!("{} ", icon), Style::default().fg(color)),
-            Span::styled("write ", Style::default().fg(Color::DarkGray)),
+            self.render_status(),
+            Span::styled("write_file", Style::default().fg(Color::Magenta)),
+            Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(path, Style::default().fg(Color::Green)),
-            Span::styled(
-                format!(" ({} bytes)", content_len),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!(", {} bytes", content_len), Style::default().fg(Color::DarkGray)),
+            Span::styled(")", Style::default().fg(Color::DarkGray)),
         ]));
 
         if self.status == Status::Pending {
             lines.push(render_approval_prompt());
         }
 
-        if let Some(ref result) = self.result {
-            lines.extend(render_result(result, 5));
+        if !self.text.is_empty() {
+            lines.extend(render_result(&self.text, 5));
         }
 
         if self.status == Status::Denied {
@@ -89,15 +80,6 @@ impl Block for WriteFileBlock {
         lines
     }
 
-    fn status(&self) -> Status {
-        self.status
-    }
-
-    fn set_status(&mut self, status: Status) {
-        self.status = status;
-    }
-
-
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
     }
@@ -109,7 +91,6 @@ impl Block for WriteFileBlock {
     fn params(&self) -> Option<&serde_json::Value> {
         Some(&self.params)
     }
-
 }
 
 /// Tool for creating new files
@@ -193,6 +174,24 @@ impl Tool for WriteFileTool {
             }
             Err(e) => Ok(ToolResult::error(format!("Failed to write file: {}", e))),
         }
+    }
+
+    fn preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
+        let file_path = params.get("path").and_then(|p| p.as_str())?;
+        let content = params.get("content").and_then(|c| c.as_str())?;
+
+        Some(ToolPreview::FileContent {
+            path: file_path.to_string(),
+            content: content.to_string(),
+        })
+    }
+
+    fn post_actions(&self, params: &serde_json::Value) -> Vec<IdeAction> {
+        params
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(|path| vec![IdeAction::ReloadBuffer(path.to_string())])
+            .unwrap_or_default()
     }
 }
 
