@@ -581,7 +581,8 @@ impl Transcript {
     }
 
     /// Rotate to a new transcript file
-    /// Saves the current transcript and returns a new empty one with the next numbered path
+    /// Saves the current transcript and returns a new one with the next numbered path
+    /// If the last turn contains a CompactionBlock, it will be added to the new transcript
     pub fn rotate(&self) -> std::io::Result<Self> {
         // Save current transcript
         self.save()?;
@@ -596,7 +597,24 @@ impl Transcript {
         
         // Create new transcript with next path
         let new_path = transcript_path(&dir, next_number);
-        Ok(Self::with_path(new_path))
+        let mut new_transcript = Self::with_path(new_path);
+        
+        // Check if last turn has a CompactionBlock and carry it over
+        if let Some(last_turn) = self.turns.last() {
+            for block in &last_turn.content {
+                if block.kind() == BlockType::Compaction {
+                    if let Some(summary_text) = block.text() {
+                        use crate::compaction::CompactionBlock;
+                        let mut compaction_block = CompactionBlock::new(summary_text.to_string());
+                        compaction_block.status = Status::Complete;
+                        new_transcript.add_turn(Role::Assistant, compaction_block);
+                        break; // Only add the first compaction block found
+                    }
+                }
+            }
+        }
+        
+        Ok(new_transcript)
     }
 }
 

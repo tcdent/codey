@@ -12,6 +12,8 @@ enum MessageRequest {
     User(String, usize),
     /// Compaction request (triggered when context exceeds threshold)
     Compaction,
+    /// Command execution (command, turn_id)
+    Command(crate::commands::Command, usize),
 }
 
 use anyhow::{Context, Result};
@@ -487,14 +489,32 @@ impl App {
 
     /// Queue a user message for sending
     fn queue_message(&mut self, content: String) {
-        // Create user turn with Pending status and get its ID
-        let turn_id = self.transcript.add_turn(Role::User, TextBlock::pending(&content));
-        self.message_queue.push(MessageRequest::User(content, turn_id));
-        self.chat.enable_auto_scroll();
+        // Check if this is a command
+        if content.trim().starts_with('/') {
+            match crate::commands::parse_command(&content) {
+                Ok(command) => {
+                    let display = command.display_text().to_string();
+                    let turn_id = self.transcript.add_turn(
+                        Role::User, 
+                        TextBlock::pending(&display)
+                    );
+                    self.message_queue.push(MessageRequest::Command(command, turn_id));
+                    self.chat.enable_auto_scroll();
+                }
+                Err(e) => {
+                    self.alert = Some(format!("{}", e));
+                }
+            }
+        } else {
+            // Create user turn with Pending status and get its ID
+            let turn_id = self.transcript.add_turn(Role::User, TextBlock::pending(&content));
+            self.message_queue.push(MessageRequest::User(content, turn_id));
+            self.chat.enable_auto_scroll();
+        }
     }
 
     /// Queue a compaction request
-    fn queue_compaction(&mut self) {
+    pub fn queue_compaction(&mut self) {
         self.message_queue.push(MessageRequest::Compaction);
         self.chat.enable_auto_scroll();
     }
@@ -526,6 +546,19 @@ impl App {
             MessageRequest::Compaction => {
                 // Stream assistant's compaction summary
                 self.stream_response(agent, COMPACTION_PROMPT, RequestMode::Compaction).await?;
+            }
+            MessageRequest::Command(command, turn_id) => {
+                // Mark the command turn as complete (it was created as Pending in queue_message)
+                if let Some(turn) = self.transcript.get_mut(turn_id) {
+                    if let Some(block) = turn.content.first_mut() {
+                        block.set_status(Status::Complete);
+                    }
+                }
+
+                // Execute the command
+                if let Err(e) = command.execute(self, agent) {
+                    self.alert = Some(format!("Command error: {}", e));
+                }
             }
         }
 
