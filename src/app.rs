@@ -1,6 +1,7 @@
 use crate::compaction::{CompactionBlock, COMPACTION_PROMPT};
 use crate::config::Config;
 use crate::llm::{Agent, AgentStep, RequestMode, ToolDecision, Usage};
+use crate::tool_filter::{FilterResult, ToolFilters};
 use crate::transcript::{BlockType, Role, Status, TextBlock, ThinkingBlock, ToolBlock, Transcript};
 use crate::tools::ToolRegistry;
 use crate::ui::{ChatView, ConnectionStatus, InputBox};
@@ -190,6 +191,8 @@ pub struct App {
     last_render: Instant,
     /// Alert message to display (cleared on next user input)
     alert: Option<String>,
+    /// Compiled tool parameter filters for auto-approve/deny
+    tool_filters: ToolFilters,
 }
 
 impl App {
@@ -222,6 +225,10 @@ impl App {
                 .context("Failed to create new transcript")?
         };
 
+        // Compile tool filters from config
+        let tool_filters = ToolFilters::compile(&config.tools.filters())
+            .context("Failed to compile tool filters")?;
+
         Ok(Self {
             config,
             terminal,
@@ -235,6 +242,7 @@ impl App {
             message_queue: Vec::new(),
             last_render: Instant::now(),
             alert: None,
+            tool_filters,
         })
     }
 
@@ -613,10 +621,25 @@ impl App {
                 }
                 AgentStep::ToolRequest { call_id, name, params } => {
                     let turn = self.transcript.get_or_create_current_turn();
-                    turn.start_block(Box::new(ToolBlock::new(call_id, name, params)));
+                    
+                    // Evaluate tool filters before prompting
+                    let filter_result = self.tool_filters.evaluate(&name, &params);
+                    
+                    turn.start_block(Box::new(ToolBlock::new(call_id.clone(), name.clone(), params.clone())));
                     self.draw()?;
 
-                    let decision = self.wait_for_tool_approval().await?;
+                    // Determine decision based on filter result or user approval
+                    let decision = match filter_result {
+                        FilterResult::Allow => {
+                            tracing::debug!("Tool {} auto-approved by filter", name);
+                            ToolDecision::Approve
+                        }
+                        FilterResult::Deny => {
+                            tracing::debug!("Tool {} auto-denied by filter", name);
+                            ToolDecision::Deny
+                        }
+                        _ => self.wait_for_tool_approval().await?,
+                    };
 
                     if let Some(block) = self.transcript.get_or_create_current_turn().get_active_block_mut() {
                         match decision {
