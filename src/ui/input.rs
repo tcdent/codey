@@ -4,9 +4,10 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Widget, Wrap},
 };
+use unicode_width::UnicodeWidthChar;
 
 /// Input box widget state
 #[derive(Debug, Clone)]
@@ -53,7 +54,7 @@ impl InputBox {
                 lines += 1;
                 current_line_len = 0;
             } else {
-                current_line_len += 1;
+                current_line_len += ch.width().unwrap_or(1);
                 if current_line_len >= inner_width {
                     lines += 1;
                     current_line_len = 0;
@@ -230,16 +231,15 @@ impl Widget for InputBoxWidget<'_> {
         block.render(area, buf);
 
         // Render content
-        let content = if self.state.content.is_empty() {
-            Span::styled(
+        let paragraph = if self.state.content.is_empty() {
+            Paragraph::new(Line::from(Span::styled(
                 "Type your message here...",
                 Style::default().fg(Color::DarkGray),
-            )
+            )))
         } else {
-            Span::raw(&self.state.content)
+            // Use Text::raw to properly handle newlines
+            Paragraph::new(Text::raw(&self.state.content)).wrap(Wrap { trim: false })
         };
-
-        let paragraph = Paragraph::new(Line::from(content)).wrap(Wrap { trim: false });
 
         paragraph.render(inner, buf);
 
@@ -255,11 +255,12 @@ impl Widget for InputBoxWidget<'_> {
                     cursor_y += 1;
                     cursor_x = 0;
                 } else {
-                    cursor_x += 1;
+                    let char_width = ch.width().unwrap_or(1);
+                    cursor_x += char_width;
                     // Handle line wrapping
                     if cursor_x >= inner.width as usize {
                         cursor_y += 1;
-                        cursor_x = 0;
+                        cursor_x = cursor_x.saturating_sub(inner.width as usize);
                     }
                 }
             }

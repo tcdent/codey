@@ -365,7 +365,7 @@ enum StreamState {
 
 /// Stream that yields AgentSteps and accepts ToolDecisions
 pub struct AgentStream<'a> {
-    agent: &'a mut Agent,
+    pub agent: &'a mut Agent,
     state: StreamState,
     tools: Vec<Tool>,
     chat_options: ChatOptions,
@@ -713,20 +713,5 @@ impl<'a> AgentStream<'a> {
                 None
             }
         }
-    }
-
-    /// Get the preview for a tool (for IDE integration)
-    pub fn get_tool_preview(&self, name: &str, params: &serde_json::Value) -> Option<crate::ide::ToolPreview> {
-        self.agent.tools.get(name).preview(params)
-    }
-
-    /// Get post-execution actions for a tool (for IDE integration)
-    pub fn get_tool_post_actions(&self, name: &str, params: &serde_json::Value) -> Vec<crate::ide::IdeAction> {
-        self.agent.tools.get(name).post_actions(params)
-    }
-
-    /// Create the display block for a tool
-    pub fn create_tool_block(&self, call_id: &str, name: &str, params: serde_json::Value) -> Box<dyn crate::transcript::Block> {
-        self.agent.tools.get(name).create_block(call_id, params)
     }
 }

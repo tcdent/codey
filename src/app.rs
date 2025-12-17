@@ -166,7 +166,7 @@ You have access to the following tools:
 - Prefer `read_file` over `cat`, `head`, `tail`
 - Use `ls` for directory exploration
 - Use `grep` or `rg` for searching code
-- Always use absolute paths or paths relative to working directory
+- `pwd` is an easy way to remind yourself of your current directory
 
 ### General
 - Be concise but thorough
@@ -649,15 +649,14 @@ impl App {
                     // Evaluate tool filters before prompting
                     let filter_result = self.tool_filters.evaluate(&name, &params);
                     
-                    // Create the tool-specific block for display
-                    let block = stream.create_tool_block(&call_id, &name, params.clone());
+                    // Get tool info via stream.agent (stream holds mutable borrow)
+                    let tool = stream.agent.get_tool(&name);
+                    let block = tool.create_block(&call_id, params.clone());
+                    let preview = tool.preview(&params);
+                    let post_actions = tool.post_actions(&params);
+
                     turn.start_block(block);
                     self.draw()?;
-
-                    // Get preview and post-actions from the tool before using stream
-                    // (stream holds a mutable borrow of agent)
-                    let preview = stream.get_tool_preview(&name, &params);
-                    let post_actions = stream.get_tool_post_actions(&name, &params);
 
                     // Show preview in IDE if the tool provides one
                     if let Some(preview) = preview {
