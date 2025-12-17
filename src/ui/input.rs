@@ -1,13 +1,32 @@
-//! Input box component
+//! Input box component with word-wrap and cursor positioning
+//!
+//! We evaluated several existing crates for text input:
+//!
+//! - **tui-textarea**: Mature crate but doesn't support word-wrap - it scrolls
+//!   horizontally like a code editor. Not suitable for chat input.
+//!
+//! - **rat-text**: Has word-wrap support, but requires ratatui 0.29 (we use 0.30)
+//!   and pulls in many dependencies (rat-cursor, rat-event, rat-focus, etc.).
+//!
+//! The core challenge is cursor positioning with word-wrap. Ratatui's `Paragraph`
+//! widget does word-boundary wrapping, but doesn't expose where text ends up after
+//! wrapping. We use `textwrap` crate to pre-wrap text, then:
+//!
+//! 1. Render the pre-wrapped lines directly (no `Paragraph::wrap()`)
+//! 2. Calculate cursor position using the same wrapped output
+//!
+//! This guarantees cursor and display stay in sync. One quirk: `textwrap` trims
+//! trailing spaces, so we count them separately and add to cursor position.
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Widget, Wrap},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
-use unicode_width::UnicodeWidthChar;
+use textwrap::wrap;
+use unicode_width::UnicodeWidthStr;
 
 /// Input box widget state
 #[derive(Debug, Clone)]
@@ -41,29 +60,14 @@ impl InputBox {
     /// Calculate required height for the input box given a width
     /// Returns height including border (2 lines for top/bottom border)
     pub fn required_height(&self, width: u16) -> u16 {
-        let inner_width = width.saturating_sub(2) as usize; // account for borders
+        let inner_width = width.saturating_sub(2) as usize;
         if inner_width == 0 {
-            return 3; // minimum height
+            return 5; // minimum height
         }
 
-        let mut lines = 1usize;
-        let mut current_line_len = 0usize;
-
-        for ch in self.content.chars() {
-            if ch == '\n' {
-                lines += 1;
-                current_line_len = 0;
-            } else {
-                current_line_len += ch.width().unwrap_or(1);
-                if current_line_len >= inner_width {
-                    lines += 1;
-                    current_line_len = 0;
-                }
-            }
-        }
-
-        // Add 2 for borders, minimum 5 lines total (3 content lines)
-        (lines as u16 + 2).max(5)
+        let wrapped = wrap_text(&self.content, inner_width);
+        // Add 2 for borders, minimum 5 lines total
+        (wrapped.len() as u16 + 2).max(5)
     }
 
     /// Insert a character at the cursor position
@@ -230,6 +234,15 @@ impl Widget for InputBoxWidget<'_> {
         let inner = block.inner(area);
         block.render(area, buf);
 
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+
+        // Wrap text using textwrap - this gives us consistent line breaks
+        // for both rendering and cursor calculation
+        let width = inner.width as usize;
+        let wrapped_lines = wrap_text(&self.state.content, width);
+
         // Render content
         let paragraph = if self.state.content.is_empty() {
             Paragraph::new(Line::from(Span::styled(
@@ -237,44 +250,81 @@ impl Widget for InputBoxWidget<'_> {
                 Style::default().fg(Color::DarkGray),
             )))
         } else {
-            // Use Text::raw to properly handle newlines
-            Paragraph::new(Text::raw(&self.state.content)).wrap(Wrap { trim: false })
+            let lines: Vec<Line> = wrapped_lines.iter().map(|s| Line::from(s.as_str())).collect();
+            Paragraph::new(lines)
         };
 
         paragraph.render(inner, buf);
 
-        // Render cursor
-        if inner.width > 0 && inner.height > 0 {
-            // Calculate cursor position accounting for unicode and newlines
-            let text_before_cursor = &self.state.content[..self.state.cursor_position];
-            let mut cursor_x: usize = 0;
-            let mut cursor_y: usize = 0;
+        // Calculate cursor position using the same wrapped lines
+        let (cursor_x, cursor_y) = cursor_position_in_wrapped(
+            &self.state.content,
+            self.state.cursor_position,
+            &wrapped_lines,
+        );
 
-            for ch in text_before_cursor.chars() {
-                if ch == '\n' {
-                    cursor_y += 1;
-                    cursor_x = 0;
-                } else {
-                    let char_width = ch.width().unwrap_or(1);
-                    cursor_x += char_width;
-                    // Handle line wrapping
-                    if cursor_x >= inner.width as usize {
-                        cursor_y += 1;
-                        cursor_x = cursor_x.saturating_sub(inner.width as usize);
-                    }
-                }
-            }
+        if cursor_y < inner.height as usize {
+            let x = inner.x + cursor_x as u16;
+            let y = inner.y + cursor_y as u16;
 
-            if cursor_y < inner.height as usize {
-                let x = inner.x + cursor_x as u16;
-                let y = inner.y + cursor_y as u16;
-
-                if x < inner.x + inner.width && y < inner.y + inner.height {
-                    buf[(x, y)].set_style(Style::default().bg(Color::White).fg(Color::Black));
-                }
+            if x < inner.x + inner.width && y < inner.y + inner.height {
+                buf[(x, y)].set_style(Style::default().bg(Color::White).fg(Color::Black));
             }
         }
     }
+}
+
+/// Wrap text into lines, handling explicit newlines
+fn wrap_text(content: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![content.to_string()];
+    }
+    
+    let mut result = Vec::new();
+    for paragraph in content.split('\n') {
+        if paragraph.is_empty() {
+            result.push(String::new());
+        } else {
+            for line in wrap(paragraph, width) {
+                result.push(line.into_owned());
+            }
+        }
+    }
+    if result.is_empty() {
+        result.push(String::new());
+    }
+    result
+}
+
+/// Calculate cursor (x, y) position within wrapped lines
+fn cursor_position_in_wrapped(content: &str, byte_pos: usize, wrapped_lines: &[String]) -> (usize, usize) {
+    let text_before_cursor = &content[..byte_pos];
+    
+    // Count trailing spaces that textwrap might have trimmed
+    let trailing_spaces = text_before_cursor.chars().rev().take_while(|&c| c == ' ').count();
+    
+    // Count how many characters (not bytes) before cursor
+    let chars_before: usize = text_before_cursor.chars().count();
+    
+    let mut chars_consumed = 0usize;
+    for (line_idx, line) in wrapped_lines.iter().enumerate() {
+        let line_chars = line.chars().count();
+        
+        // Check if cursor is on this line
+        if chars_consumed + line_chars >= chars_before - trailing_spaces {
+            let col = (chars_before - trailing_spaces) - chars_consumed;
+            // Get display width of the portion before cursor on this line
+            let prefix: String = line.chars().take(col).collect();
+            let cursor_x = prefix.width() + trailing_spaces;
+            return (cursor_x, line_idx);
+        }
+        
+        chars_consumed += line_chars;
+    }
+    
+    // Cursor at end
+    let last_line_width = wrapped_lines.last().map(|s| s.width()).unwrap_or(0);
+    (last_line_width + trailing_spaces, wrapped_lines.len().saturating_sub(1))
 }
 
 #[cfg(test)]

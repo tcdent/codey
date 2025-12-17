@@ -64,6 +64,7 @@ typetag = "0.2.21"
 
 # Neovim RPC
 nvim-rs = { version = "0.9", features = ["use_tokio"] }
+textwrap = "0.16.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
