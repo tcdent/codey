@@ -1,7 +1,7 @@
 //! Edit file tool with search/replace
 
 use super::{Tool, ToolResult};
-use crate::transcript::{render_approval_prompt, render_result, Block, ToolBlock, Status};
+use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use anyhow::Result;
 use async_trait::async_trait;
 use ratatui::{
@@ -42,6 +42,10 @@ impl EditFileBlock {
 
 #[typetag::serde]
 impl Block for EditFileBlock {
+    fn kind(&self) -> BlockType {
+        BlockType::Tool
+    }
+
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
@@ -93,9 +97,6 @@ impl Block for EditFileBlock {
         self.status = status;
     }
 
-    fn set_result(&mut self, result: String) {
-        self.result = Some(result);
-    }
 
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
@@ -109,9 +110,6 @@ impl Block for EditFileBlock {
         Some(&self.params)
     }
 
-    fn result(&self) -> Option<&str> {
-        self.result.as_deref()
-    }
 }
 
 /// Tool for editing existing files with search/replace

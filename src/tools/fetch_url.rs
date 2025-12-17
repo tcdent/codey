@@ -1,7 +1,7 @@
 //! URL fetching tool
 
 use super::{Tool, ToolResult};
-use crate::transcript::{render_approval_prompt, render_result, Block, ToolBlock, Status};
+use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use anyhow::Result;
 use async_trait::async_trait;
 use ratatui::{
@@ -40,6 +40,10 @@ impl FetchUrlBlock {
 
 #[typetag::serde]
 impl Block for FetchUrlBlock {
+    fn kind(&self) -> BlockType {
+        BlockType::Tool
+    }
+
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
@@ -86,9 +90,6 @@ impl Block for FetchUrlBlock {
         self.status = status;
     }
 
-    fn set_result(&mut self, result: String) {
-        self.result = Some(result);
-    }
 
     fn call_id(&self) -> Option<&str> {
         Some(&self.call_id)
@@ -102,9 +103,6 @@ impl Block for FetchUrlBlock {
         Some(&self.params)
     }
 
-    fn result(&self) -> Option<&str> {
-        self.result.as_deref()
-    }
 }
 
 /// Tool for fetching web content
