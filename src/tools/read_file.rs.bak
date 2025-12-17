@@ -120,6 +120,9 @@ impl Block for ReadFileBlock {
         Some(&self.params)
     }
 
+    fn result(&self) -> Option<&str> {
+        self.result.as_deref()
+    }
 }
 
 /// Tool for reading file contents

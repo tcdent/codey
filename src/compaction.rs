@@ -8,7 +8,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde::{Deserialize, Serialize};
 
-use crate::transcript::{Block, Status};
+use crate::transcript::{Block, BlockType, Status};
+use crate::impl_base_block;
 
 /// The prompt sent to the agent to generate a compaction summary
 pub const COMPACTION_PROMPT: &str = r#"The conversation context is getting large and needs to be compacted.
@@ -25,37 +26,32 @@ Be thorough but concise - this summary will seed a fresh conversation context."#
 /// Compaction summary block - shown when context was compacted
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionBlock {
-    pub summary: String,
+    pub text: String,
     pub status: Status,
-    pub context_tokens: Option<u32>,
 }
 
 impl CompactionBlock {
-    /// Create a pending compaction block (before summary is available)
-    pub fn pending(context_tokens: u32) -> Self {
+    pub fn new(text: impl Into<String>) -> Self {
         Self {
-            summary: String::new(),
-            status: Status::Pending,
-            context_tokens: Some(context_tokens),
+            text: text.into(),
+            status: Status::Running,
         }
     }
 }
 
 #[typetag::serde]
 impl Block for CompactionBlock {
+    impl_base_block!(BlockType::Compaction);
+
     fn render(&self, width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
         match self.status {
             Status::Pending | Status::Running => {
-                let tokens_info = self.context_tokens
-                    .map(|t| format!(" ({} tokens)", t))
-                    .unwrap_or_default();
-
                 lines.push(Line::from(vec![
                     Span::styled("📋 ", Style::default().fg(Color::Yellow)),
                     Span::styled(
-                        format!("Compacting context{}", tokens_info),
+                        "Compacting context",
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
@@ -84,8 +80,8 @@ impl Block for CompactionBlock {
 
                 // Render the summary using markdown
                 let skin = ratskin::RatSkin::default();
-                let text = ratskin::RatSkin::parse_text(&self.summary);
-                for line in skin.parse(text, width) {
+                let parsed = ratskin::RatSkin::parse_text(&self.text);
+                for line in skin.parse(parsed, width) {
                     lines.push(line);
                 }
             }
@@ -101,25 +97,5 @@ impl Block for CompactionBlock {
         }
 
         lines
-    }
-
-    fn status(&self) -> Status {
-        self.status
-    }
-
-    fn set_status(&mut self, status: Status) {
-        self.status = status;
-    }
-
-    fn append_text(&mut self, text: &str) {
-        self.summary.push_str(text);
-    }
-
-    fn text_content(&self) -> Option<&str> {
-        if self.summary.is_empty() {
-            None
-        } else {
-            Some(&self.summary)
-        }
     }
 }

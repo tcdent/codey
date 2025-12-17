@@ -110,6 +110,9 @@ impl Block for EditFileBlock {
         Some(&self.params)
     }
 
+    fn result(&self) -> Option<&str> {
+        self.result.as_deref()
+    }
 }
 
 /// Tool for editing existing files with search/replace

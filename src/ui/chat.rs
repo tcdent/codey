@@ -1,6 +1,6 @@
 //! Chat view component
 
-use crate::transcript::{Role, Status, Transcript, Turn};
+use crate::transcript::{Role, Transcript, Turn};
 use ratatui::{
     buffer::Buffer,
     layout::{Rect, Size},
@@ -98,27 +98,13 @@ impl ChatViewWidget<'_> {
             ),
         };
 
-        // Status indicator for non-complete turns
-        let status_span = match turn.status {
-            Status::Pending => Some(Span::styled(" (queued)", Style::default().fg(Color::Yellow))),
-            Status::Running => {
-                Some(Span::styled(" (thinking...)", Style::default().fg(Color::Blue)))
-            }
-            Status::Error => Some(Span::styled(" (error)", Style::default().fg(Color::Red))),
-            Status::Cancelled => Some(Span::styled(" (cancelled)", Style::default().fg(Color::Yellow))),
-            Status::Complete | Status::Denied => None,
-        };
-
-        let mut header = vec![
+        let header = vec![
             Span::styled(role_text, role_style),
             Span::styled(
                 format!(" ({})", turn.timestamp.format("%H:%M:%S")),
                 Style::default().fg(Color::DarkGray),
             ),
         ];
-        if let Some(status) = status_span {
-            header.push(status);
-        }
         
         let header_lines = vec![Line::from(header)];
         let content_lines = turn.render(width);

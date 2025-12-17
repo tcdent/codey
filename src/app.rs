@@ -1,15 +1,15 @@
 use crate::compaction::{CompactionBlock, COMPACTION_PROMPT};
 use crate::config::Config;
 use crate::llm::{Agent, AgentStep, RequestMode, ToolDecision, Usage};
-use crate::transcript::{Role, Status, TextBlock, ThinkingBlock, Transcript, TurnId};
+use crate::transcript::{BlockType, Role, Status, TextBlock, ThinkingBlock, ToolBlock, Transcript};
 use crate::tools::ToolRegistry;
 use crate::ui::{ChatView, ConnectionStatus, InputBox};
 
 /// Types of messages that can be processed through the event loop
 #[derive(Debug, Clone)]
 enum MessageRequest {
-    /// Regular user message
-    User { content: String, turn_id: TurnId },
+    /// Regular user message (content, turn_id)
+    User(String, usize),
     /// Compaction request (triggered when context exceeds threshold)
     Compaction,
 }
@@ -26,55 +26,17 @@ use ratatui::{
     Terminal,
 };
 use std::io::{self, Stdout, Write};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const APP_NAME: &str = "Codey";
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-const CODEY_DIR: &str = ".codey";
-const TRANSCRIPTS_DIR: &str = "transcripts";
+pub const CODEY_DIR: &str = ".codey";
+pub const TRANSCRIPTS_DIR: &str = "transcripts";
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
 
-/// Get the transcripts directory path, creating it if necessary
-fn get_transcripts_dir() -> Result<PathBuf> {
-    let dir = PathBuf::from(CODEY_DIR).join(TRANSCRIPTS_DIR);
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir).context("Failed to create transcripts directory")?;
-    }
-    Ok(dir)
-}
 
-/// Find the latest transcript number by scanning the transcripts directory
-fn find_latest_transcript_number(dir: &PathBuf) -> Option<u32> {
-    std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            if name.ends_with(".json") {
-                name.trim_end_matches(".json").parse::<u32>().ok()
-            } else {
-                None
-            }
-        })
-        .max()
-}
-
-/// Get the path for a transcript with a given number
-fn transcript_path(dir: &PathBuf, number: u32) -> PathBuf {
-    dir.join(format!("{:06}.json", number))
-}
 
 /// Tracks the currently active block during streaming
-enum ActiveBlock {
-    None,
-    Text(usize),
-    Thinking(usize),
-    Tool(usize),
-    Compaction(usize),
-}
-
 /// Input modes determine which keybindings are active
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputMode {
@@ -214,7 +176,6 @@ pub struct App {
     config: Config,
     terminal: Terminal<CrosstermBackend<Stdout>>,
     transcript: Transcript,
-    transcript_path: PathBuf,
     chat: ChatView,
     input: InputBox,
     status: ConnectionStatus,
@@ -250,34 +211,19 @@ impl App {
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend).context("Failed to create terminal")?;
 
-        // Set up transcript path in current working directory
-        let transcripts_dir = get_transcripts_dir()?;
-        let latest_number = find_latest_transcript_number(&transcripts_dir);
-        
-        let (transcript_path, transcript) = if continue_session {
-            // Continue from latest transcript if it exists
-            match latest_number {
-                Some(n) => {
-                    let path = transcript_path(&transcripts_dir, n);
-                    let transcript = Transcript::load(&path).unwrap_or_default();
-                    (path, transcript)
-                }
-                None => {
-                    // No existing transcripts, start fresh at 000000
-                    (transcript_path(&transcripts_dir, 0), Transcript::new())
-                }
-            }
+        // Load existing transcript or create new one
+        let transcript = if continue_session {
+            Transcript::load()
+                .context("Failed to load transcript")?
         } else {
-            // Start new session with next number
-            let next_number = latest_number.map(|n| n + 1).unwrap_or(0);
-            (transcript_path(&transcripts_dir, next_number), Transcript::new())
+            Transcript::new_numbered()
+                .context("Failed to create new transcript")?
         };
 
         Ok(Self {
             config,
             terminal,
             transcript,
-            transcript_path,
             chat: ChatView::new(),
             input: InputBox::new(),
             status: ConnectionStatus::Disconnected,
@@ -317,12 +263,11 @@ impl App {
             agent.restore_from_transcript(&self.transcript);
         } else {
             // Show welcome message only for new sessions
-            self.transcript.add(
+            self.transcript.add_turn(
                 Role::Assistant,
                 TextBlock::new(
                     "Welcome to Codey! I'm your AI coding assistant. How can I help you today?",
                 ),
-                Status::Complete,
             );
         }
         self.status = ConnectionStatus::Connected;
@@ -544,8 +489,9 @@ impl App {
 
     /// Queue a user message for sending
     fn queue_message(&mut self, content: String) {
-        let turn_id = self.transcript.add(Role::User, TextBlock::new(&content), Status::Pending);
-        self.message_queue.push(MessageRequest::User { content, turn_id });
+        // Create user turn with Pending status and get its ID
+        let turn_id = self.transcript.add_turn(Role::User, TextBlock::pending(&content));
+        self.message_queue.push(MessageRequest::User(content, turn_id));
         self.chat.enable_auto_scroll();
     }
 
@@ -563,26 +509,24 @@ impl App {
         }
 
         match request {
-            MessageRequest::User { content, turn_id } => {
-                // Mark user turn as running
+            MessageRequest::User(content, turn_id) => {
+                // Mark the user turn as complete (it was created as Pending in queue_message)
                 if let Some(turn) = self.transcript.get_mut(turn_id) {
-                    turn.status = Status::Running;
+                    if let Some(block) = turn.content.first_mut() {
+                        block.set_status(Status::Complete);
+                    }
                 }
-                self.draw()?;
 
+                // Stream the assistant response
                 self.stream_response(agent, &content, RequestMode::Normal).await?;
 
-                if let Some(turn) = self.transcript.get_mut(turn_id) {
-                    turn.status = Status::Complete;
-                }
-
                 // Check if compaction is needed after user message
-                if self.should_compact(agent) {
+                if agent.context_tokens() >= self.config.general.compaction_threshold {
                     self.queue_compaction();
                 }
             }
             MessageRequest::Compaction => {
-                // Compaction is handled entirely by stream_response
+                // Stream assistant's compaction summary
                 self.stream_response(agent, COMPACTION_PROMPT, RequestMode::Compaction).await?;
             }
         }
@@ -591,27 +535,17 @@ impl App {
     }
 
     /// Stream a response from the agent with a specific request mode
-    /// Returns the accumulated text response
     async fn stream_response(
         &mut self,
         agent: &mut Agent,
         prompt: &str,
         mode: RequestMode,
     ) -> Result<()> {
-        let mut current_turn_id: Option<TurnId> = None;
-        let mut active_block = ActiveBlock::None;
-
         let mut stream = agent.process_message(prompt, mode);
 
         loop {
             // Check for interrupt before each step
             if self.check_for_interrupt() {
-                if let Some(turn_id) = current_turn_id {
-                    if let Some(turn) = self.transcript.get_mut(turn_id) {
-                        turn.status = Status::Cancelled;
-                    }
-                }
-                self.draw()?;
                 break;
             }
 
@@ -623,125 +557,90 @@ impl App {
 
             match step {
                 AgentStep::TextDelta(text) => {
-                    let turn_id = *current_turn_id.get_or_insert_with(|| {
-                        self.transcript.add_empty(Role::Assistant, Status::Running)
-                    });
-                    if let Some(turn) = self.transcript.get_mut(turn_id) {
-                        match active_block {
-                            ActiveBlock::Text(idx) => turn.append_to_block(idx, &text),
-                            _ => active_block = ActiveBlock::Text(turn.add_block(Box::new(TextBlock::new(&text)))),
-                        }
+                    let turn = self.transcript.get_or_create_current_turn();
+                    if turn.is_active_block_type(BlockType::Text) {
+                        turn.append_to_active(&text);
+                    } else {
+                        turn.start_block(Box::new(TextBlock::new(&text)));
                     }
-                    self.draw_throttled()?;
                 }
                 AgentStep::CompactionDelta(text) => {
-                    let turn_id = *current_turn_id.get_or_insert_with(|| {
-                        self.transcript.add_empty(Role::Assistant, Status::Running)
-                    });
-                    if let Some(turn) = self.transcript.get_mut(turn_id) {
-                        match active_block {
-                            ActiveBlock::Compaction(idx) => turn.append_to_block(idx, &text),
-                            _ => {
-                                let idx = turn.add_block(Box::new(CompactionBlock::pending(0)));
-                                turn.append_to_block(idx, &text);
-                                active_block = ActiveBlock::Compaction(idx);
-                            }
-                        }
+                    let turn = self.transcript.get_or_create_current_turn();
+                    if turn.is_active_block_type(BlockType::Compaction) {
+                        turn.append_to_active(&text);
+                    } else {
+                        turn.start_block(Box::new(CompactionBlock::new(&text)));
                     }
-                    self.draw_throttled()?;
                 }
                 AgentStep::ThinkingDelta(text) => {
-                    let turn_id = *current_turn_id.get_or_insert_with(|| {
-                        self.transcript.add_empty(Role::Assistant, Status::Running)
-                    });
-                    if let Some(turn) = self.transcript.get_mut(turn_id) {
-                        match active_block {
-                            ActiveBlock::Thinking(idx) => turn.append_to_block(idx, &text),
-                            _ => active_block = ActiveBlock::Thinking(turn.add_block(Box::new(ThinkingBlock::new(&text, "")))),
-                        }
+                    let turn = self.transcript.get_or_create_current_turn();
+                    if turn.is_active_block_type(BlockType::Thinking) {
+                        turn.append_to_active(&text);
+                    } else {
+                        turn.start_block(Box::new(ThinkingBlock::new(&text)));
                     }
-                    self.draw()?;
                 }
-                AgentStep::ToolRequest { block, .. } => {
-                    let turn_id = *current_turn_id.get_or_insert_with(|| {
-                        self.transcript.add_empty(Role::Assistant, Status::Running)
-                    });
-                    if let Some(turn) = self.transcript.get_mut(turn_id) {
-                        active_block = ActiveBlock::Tool(turn.add_block(block));
-                    }
+                AgentStep::ToolRequest { call_id, name, params } => {
+                    let turn = self.transcript.get_or_create_current_turn();
+                    turn.start_block(Box::new(ToolBlock::new(call_id, name, params)));
                     self.draw()?;
 
                     let decision = self.wait_for_tool_approval().await?;
 
-                    if let ActiveBlock::Tool(idx) = active_block {
-                        if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id)) {
-                            if let Some(tool) = turn.get_block_mut(idx) {
-                                match decision {
-                                    ToolDecision::Approve => tool.set_status(Status::Running),
-                                    ToolDecision::Deny => tool.set_status(Status::Denied),
-                                }
-                            }
+                    if let Some(block) = self.transcript.get_or_create_current_turn().get_active_block_mut() {
+                        match decision {
+                            ToolDecision::Approve => block.set_status(Status::Running),
+                            ToolDecision::Deny => block.set_status(Status::Denied),
                         }
                     }
                     self.draw()?;
 
                     let tool_result = stream.decide_tool(decision).await;
                     if let Some(AgentStep::ToolResult { result, is_error, .. }) = tool_result {
-                        if let ActiveBlock::Tool(idx) = active_block {
-                            if let Some(turn) = current_turn_id.and_then(|id| self.transcript.get_mut(id)) {
-                                if let Some(tool) = turn.get_block_mut(idx) {
-                                    tool.set_status(if is_error { Status::Error } else { Status::Complete });
-                                    tool.set_result(result);
-                                }
-                            }
+                        if let Some(block) = self.transcript.get_or_create_current_turn().get_active_block_mut() {
+                            block.set_status(if is_error { Status::Error } else { Status::Complete });
+                            block.append_text(&result);
                         }
-                        self.draw()?;
                     }
                 }
                 AgentStep::ToolResult { .. } => {}
                 AgentStep::Retrying { attempt, error } => {
                     self.status = ConnectionStatus::Error(format!("Retry {} - {}", attempt, error));
-                    self.draw()?;
                 }
-                AgentStep::Finished { usage, thinking_signatures } => {
+                AgentStep::Finished { usage, thinking_signatures: _ } => {
                     self.usage = usage;
                     self.status = ConnectionStatus::Connected;
 
-                    if let Some(turn_id) = current_turn_id {
-                        if let Some(turn) = self.transcript.get_mut(turn_id) {
-                            // Apply thinking signatures
-                            let mut sig_iter = thinking_signatures.into_iter();
-                            for block in &mut turn.content {
-                                if block.signature().is_some() {
-                                    if let Some(sig) = sig_iter.next() {
-                                        block.set_signature(&sig);
-                                    }
-                                }
-                            }
-                            // Mark turn complete
-                            turn.status = Status::Complete;
-                            // Mark compaction block complete if present
-                            if let ActiveBlock::Compaction(idx) = active_block {
-                                if let Some(block) = turn.get_block_mut(idx) {
-                                    block.set_status(Status::Complete);
-                                }
-                            }
-                        }
+                    let turn = self.transcript.get_or_create_current_turn();
 
-                        // Save and rotate transcript for compaction (agent handles its own reset)
-                        if matches!(active_block, ActiveBlock::Compaction(_)) {
-                            if let Err(e) = self.transcript.save(&self.transcript_path) {
-                                tracing::error!("Failed to save transcript before compaction: {}", e);
+                    // Mark active block complete
+                    if let Some(block) = turn.get_active_block_mut() {
+                        block.set_status(Status::Complete);
+                    }
+
+                    // Save and rotate transcript for compaction (agent handles its own reset)
+                    if turn.is_active_block_type(BlockType::Compaction) {
+                        if let Err(e) = self.transcript.save() {
+                            tracing::error!("Failed to save transcript before compaction: {}", e);
+                        }
+                        match self.transcript.rotate() {
+                            Ok(new_transcript) => {
+                                self.transcript = new_transcript;
+                                tracing::info!("Compaction complete, rotated to {:?}", self.transcript.path());
                             }
-                            if let Err(e) = self.rotate_transcript() {
+                            Err(e) => {
                                 tracing::error!("Failed to rotate transcript: {}", e);
                             }
-                            tracing::info!("Compaction complete, rotated to {:?}", self.transcript_path);
                         }
                     }
-                    self.draw()?;
                 }
                 AgentStep::Error(msg) => {
+                    // Mark active block as complete (or error) if there is one
+                    let turn = self.transcript.get_or_create_current_turn();
+                    if let Some(block) = turn.get_active_block_mut() {
+                        block.set_status(Status::Error);
+                    }
+
                     let alert_msg = if let Some(start) = msg.find('{') {
                         serde_json::from_str::<serde_json::Value>(&msg[start..])
                             .ok()
@@ -754,34 +653,21 @@ impl App {
                     self.status = ConnectionStatus::Error(msg);
                 }
             }
+            
+            // Throttled draw at end of loop to show streaming updates
+            self.draw_throttled()?;
         }
 
         self.chat.enable_auto_scroll();
         self.draw()?;
 
-        if let Err(e) = self.transcript.save(&self.transcript_path) {
+        // Clear current turn now that streaming is complete
+        self.transcript.clear_current_turn();
+
+        if let Err(e) = self.transcript.save() {
             tracing::error!("Failed to save transcript: {}", e);
         }
 
-        Ok(())
-    }
-
-    /// Check if compaction should be triggered
-    fn should_compact(&self, agent: &Agent) -> bool {
-        agent.context_tokens() >= self.config.general.compaction_threshold
-    }
-
-    /// Rotate to a new transcript file
-    fn rotate_transcript(&mut self) -> Result<()> {
-        let transcripts_dir = get_transcripts_dir()?;
-        let next_number = find_latest_transcript_number(&transcripts_dir)
-            .map(|n| n + 1)
-            .unwrap_or(0);
-
-        self.transcript_path = transcript_path(&transcripts_dir, next_number);
-        self.transcript = Transcript::new();
-
-        tracing::info!("Rotated to new transcript: {:?}", self.transcript_path);
         Ok(())
     }
 

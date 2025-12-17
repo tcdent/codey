@@ -119,6 +119,9 @@ impl Block for ShellBlock {
         Some(&self.params)
     }
 
+    fn result(&self) -> Option<&str> {
+        self.output.as_deref()
+    }
 }
 
 /// Tool for executing shell commands

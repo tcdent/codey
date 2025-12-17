@@ -110,6 +110,9 @@ impl Block for WriteFileBlock {
         Some(&self.params)
     }
 
+    fn result(&self) -> Option<&str> {
+        self.result.as_deref()
+    }
 }
 
 /// Tool for creating new files

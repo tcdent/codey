@@ -103,6 +103,9 @@ impl Block for FetchUrlBlock {
         Some(&self.params)
     }
 
+    fn result(&self) -> Option<&str> {
+        self.result.as_deref()
+    }
 }
 
 /// Tool for fetching web content

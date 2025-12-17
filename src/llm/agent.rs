@@ -1,7 +1,7 @@
 //! Agent loop for handling conversations with tool execution
 
 use crate::auth::OAuthCredentials;
-use crate::transcript::{Block, Role, Transcript};
+use crate::transcript::{BlockType, Role, Transcript};
 use crate::tools::ToolRegistry;
 use anyhow::Result;
 use futures::StreamExt;
@@ -53,7 +53,8 @@ pub enum AgentStep {
     /// Agent wants to execute a tool, needs approval
     ToolRequest {
         call_id: String,
-        block: Box<dyn Block>,
+        name: String,
+        params: serde_json::Value,
     },
     /// Tool finished executing
     ToolResult {
@@ -175,9 +176,8 @@ impl Agent {
         }
         
         for turn in transcript.turns() {
-            // Only restore completed turns - skip incomplete/running/cancelled turns
-            // This also filters out thinking blocks since they don't have `status`
-            if turn.status != crate::transcript::Status::Complete {
+            // Only restore completed turns - skip incomplete turns
+            if !turn.is_complete() {
                 continue;
             }
             
@@ -185,70 +185,73 @@ impl Agent {
                 // Skip system turns - we use our predefined system prompt
                 Role::System => continue,
                 Role::User => {
-                    // For user turns, just collect text
-                    let text: String = turn.content
-                        .iter()
-                        .filter_map(|block| block.text_content())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    
-                    if !text.is_empty() {
-                        // Don't add cache_control here - we'll add it to the last message only
-                        self.messages.push(ChatMessage::user(text));
+                    // Add a message for each text block
+                    for block in &turn.content {
+                        match block.kind() {
+                            BlockType::Text => {
+                                if let Some(text) = block.text() {
+                                    self.messages.push(ChatMessage::user(text));
+                                }
+                            }
+                            _  => {}
+                        }
                     }
                 }
                 Role::Assistant => {
-                    // Build message content: thinking first, then text, then tool calls
                     let mut content = MessageContent::default();
+                    let mut text_parts = Vec::new();
+                    let mut tool_calls = Vec::new();
+                    let mut tool_responses = Vec::new();
                     
-                    // Process blocks in order, but thinking blocks must come first
-                    // First pass: add thinking blocks
+                    // Process blocks by kind
                     for block in &turn.content {
-                        if let (Some(text), Some(sig)) = (block.text_content(), block.signature()) {
-                            content = content.append(ContentPart::Thinking(Thinking::new(text, sig)));
+                        match block.kind() {
+                            BlockType::Text | BlockType::Compaction => {
+                                if let Some(text) = block.text() {
+                                    text_parts.push(text);
+                                }
+                            }
+                            BlockType::Tool => {
+                                // Add tool call
+                                if let (Some(call_id), Some(tool_name), Some(params)) = 
+                                    (block.call_id(), block.tool_name(), block.params()) 
+                                {
+                                    tool_calls.push(ToolCall {
+                                        call_id: call_id.to_string(),
+                                        fn_name: tool_name.to_string(),
+                                        fn_arguments: params.clone(),
+                                    });
+                                    
+                                    // Also collect tool response
+                                    if let Some(text) = block.text() {
+                                        tool_responses.push(ToolResponse::new(call_id.to_string(), text.to_string()));
+                                    }
+                                }
+                            }
+                            BlockType::Thinking => {
+                                // Skip - thinking is not restored to API
+                            }
                         }
                     }
                     
-                    // Second pass: add text blocks (those without signatures)
-                    let text: String = turn.content
-                        .iter()
-                        .filter(|block| block.signature().is_none())
-                        .filter_map(|block| block.text_content())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    
-                    if !text.is_empty() {
-                        content = content.append(ContentPart::Text(text));
+                    // Build assistant message
+                    if !text_parts.is_empty() {
+                        content = content.append(ContentPart::Text(text_parts.join("\n")));
                     }
-                    
-                    // Third pass: add tool calls
-                    for block in &turn.content {
-                        if let (Some(call_id), Some(tool_name), Some(params)) = 
-                            (block.call_id(), block.tool_name(), block.params()) 
-                        {
-                            let tc = ToolCall {
-                                call_id: call_id.to_string(),
-                                fn_name: tool_name.to_string(),
-                                fn_arguments: params.clone(),
-                            };
-                            content = content.append(ContentPart::ToolCall(tc));
-                        }
+                    for tc in tool_calls {
+                        content = content.append(ContentPart::ToolCall(tc));
                     }
                     
                     if !content.is_empty() {
-                        // Don't add cache_control here - we'll add it to the last message only
                         self.messages.push(ChatMessage {
                             role: ChatRole::Assistant,
                             content,
                             options: None,
                         });
                         
-                        // Add tool responses without cache_control - we'll add it to the last message only
-                        for block in &turn.content {
-                            if let (Some(call_id), Some(result)) = (block.call_id(), block.result()) {
-                                let response = ToolResponse::new(call_id.to_string(), result.to_string());
-                                self.messages.push(ChatMessage::from(response));
-                            }
+                        // Add tool responses
+                        for response in tool_responses {
+                            self.messages.push(ChatMessage::from(response));
                         }
                     }
                 }
@@ -615,12 +618,11 @@ impl<'a> AgentStream<'a> {
                 } => {
                     // Yield the current tool request
                     let tool_call = &all_tool_calls[*current_tool_index];
-                    let tool = self.agent.tools.get(&tool_call.fn_name);
-                    let block = tool.create_block(&tool_call.call_id, tool_call.fn_arguments.clone());
 
                     return Some(AgentStep::ToolRequest {
                         call_id: tool_call.call_id.clone(),
-                        block,
+                        name: tool_call.fn_name.clone(),
+                        params: tool_call.fn_arguments.clone(),
                     });
                 }
 
