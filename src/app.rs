@@ -1,22 +1,6 @@
-use crate::compaction::{CompactionBlock, COMPACTION_PROMPT};
-use crate::config::Config;
-use crate::ide::{Ide, Nvim};
-use crate::llm::{Agent, AgentStep, RequestMode, ToolDecision, Usage};
-use crate::tool_filter::ToolFilters;
-use crate::transcript::{BlockType, Role, Status, TextBlock, ThinkingBlock, Transcript};
-use crate::tools::ToolRegistry;
-use crate::ui::{ChatView, ConnectionStatus, InputBox};
-
-/// Types of messages that can be processed through the event loop
-#[derive(Debug, Clone)]
-enum MessageRequest {
-    /// Regular user message (content, turn_id)
-    User(String, usize),
-    /// Compaction request (triggered when context exceeds threshold)
-    Compaction,
-    /// Command execution (command_name, turn_id)
-    Command(String, usize),
-}
+use std::io::{self, Stdout, Write};
+use std::time::{Duration, Instant};
+use std::collections::VecDeque;
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -29,18 +13,75 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     Terminal,
 };
-use std::io::{self, Stdout, Write};
-use std::time::{Duration, Instant};
 
-const APP_NAME: &str = "Codey";
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const CODEY_DIR: &str = ".codey";
-pub const TRANSCRIPTS_DIR: &str = "transcripts";
+use crate::config::Config;
+use crate::llm::{Agent, AgentStep, RequestMode, ToolDecision, Usage};
+use crate::tools::ToolRegistry;
+use crate::tool_filter::ToolFilters;
+use crate::transcript::{BlockType, Role, Status, TextBlock, ThinkingBlock, Transcript};
+use crate::compaction::{CompactionBlock, COMPACTION_PROMPT};
+use crate::ide::{Ide, Nvim};
+use crate::ui::{ChatView, ConnectionStatus, InputBox};
+
+
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
 
+pub const APP_NAME: &str = "Codey";
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const CODEY_DIR: &str = ".codey";
+pub const TRANSCRIPTS_DIR: &str = "transcripts";
 
+const WELCOME_MESSAGE: &str = "Welcome to Codey! I'm your AI coding assistant. How can I help you today?";
+const SYSTEM_PROMPT: &str = r#"You are Codey, an AI coding assistant running in a terminal interface.
 
-/// Tracks the currently active block during streaming
+## Capabilities
+You have access to the following tools:
+- `read_file`: Read file contents, optionally with line ranges
+- `write_file`: Create new files
+- `edit_file`: Make precise edits using search/replace
+- `shell`: Execute bash commands
+- `fetch_url`: Fetch web content
+
+## Guidelines
+
+### Reading Files
+- Always read a file before editing it
+- Use line ranges for large files: `read_file(path, start_line=100, end_line=200)`
+- Use `shell("ls -la")` to explore directories
+- When reading files, be careful about reading large files in one-go. Use line ranges, 
+    or check the file stats with `shell("stat <file_path>")` first.
+- shell grep is a great way to get a line number to read a targeted section of a file
+
+### Editing Files
+- Use `edit_file` for existing files, `write_file` only for new files
+- The `old_string` must match EXACTLY, including whitespace and indentation
+- If `old_string` appears multiple times, include more context to make it unique
+- Apply edits sequentially; each edit sees the result of previous edits
+- UYou can do multiple edits at once, but keep it under 1000 lines
+
+### Shell Commands
+- Prefer `read_file` over `cat`, `head`, `tail`
+- Use `ls` for directory exploration
+- Use `grep` or `rg` for searching code
+- `pwd` is an easy way to remind yourself of your current directory
+- Only prepend a command with cd <some/dir> && if you really need to change directories
+
+### General
+- Be concise but thorough
+- Explain what you're doing before executing tools
+- If a tool fails, explain the error and suggest fixes
+- Ask for clarification if the request is ambiguous
+- If you feel like backing out of a path, always get confirmation before git resetting the work tree
+- Always get confirmation before making destructive changes (this includes building a release)
+"#;
+
+/// Result of polling for events during streaming
+enum PollResult {
+    NoEvent,
+    Handled,
+    Interrupted,
+}
+
 /// Input modes determine which keybindings are active
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputMode {
@@ -49,11 +90,15 @@ enum InputMode {
     ToolApproval,
 }
 
-/// Result of polling for events during streaming
-enum PollResult {
-    NoEvent,
-    Handled,
-    Interrupted,
+/// Types of messages that can be processed through the event loop
+#[derive(Debug, Clone)]
+enum MessageRequest {
+    /// Regular user message (content, turn_id)
+    User(String, usize),
+    /// Compaction request (triggered when context exceeds threshold)
+    Compaction,
+    /// Command execution (command_name, turn_id)
+    Command(String, usize),
 }
 
 /// Actions that can be triggered by key events
@@ -92,6 +137,15 @@ fn map_key(mode: InputMode, key: KeyEvent) -> Option<Action> {
     }
 }
 
+fn map_mouse(mouse: MouseEvent) -> Option<Action> {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => Some(Action::ScrollUp),
+        MouseEventKind::ScrollDown => Some(Action::ScrollDown),
+        _ => None,
+    }
+}
+
+/// Keybindings for normal input mode
 fn map_key_normal(key: KeyEvent) -> Option<Action> {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -125,6 +179,7 @@ fn map_key_normal(key: KeyEvent) -> Option<Action> {
     }
 }
 
+/// Keybindings for streaming input mode
 fn map_key_streaming(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Esc => Some(Action::Interrupt),
@@ -132,6 +187,7 @@ fn map_key_streaming(key: KeyEvent) -> Option<Action> {
     }
 }
 
+/// Keybindings for tool approval mode
 fn map_key_tool_approval(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char('y') | KeyCode::Enter => Some(Action::ApproveTool),
@@ -141,65 +197,24 @@ fn map_key_tool_approval(key: KeyEvent) -> Option<Action> {
     }
 }
 
-fn map_mouse(mouse: MouseEvent) -> Option<Action> {
-    match mouse.kind {
-        MouseEventKind::ScrollUp => Some(Action::ScrollUp),
-        MouseEventKind::ScrollDown => Some(Action::ScrollDown),
-        _ => None,
-    }
-}
-
-const SYSTEM_PROMPT: &str = r#"You are Codey, an AI coding assistant running in a terminal interface.
-
-## Capabilities
-You have access to the following tools:
-- `read_file`: Read file contents, optionally with line ranges
-- `write_file`: Create new files
-- `edit_file`: Make precise edits using search/replace
-- `shell`: Execute bash commands
-- `fetch_url`: Fetch web content
-
-## Guidelines
-
-### Reading Files
-- Always read a file before editing it
-- Use line ranges for large files: `read_file(path, start_line=100, end_line=200)`
-- Use `shell("ls -la")` to explore directories
-- When reading files, be careful about reading large files in one-go. Use line ranges, 
-    or check the file stats with `shell("stat <file_path>")` first.
-
-### Editing Files
-- Use `edit_file` for existing files, `write_file` only for new files
-- The `old_string` must match EXACTLY, including whitespace and indentation
-- If `old_string` appears multiple times, include more context to make it unique
-- Apply edits sequentially; each edit sees the result of previous edits
-
-### Shell Commands
-- Prefer `read_file` over `cat`, `head`, `tail`
-- Use `ls` for directory exploration
-- Use `grep` or `rg` for searching code
-- `pwd` is an easy way to remind yourself of your current directory
-
-### General
-- Be concise but thorough
-- Explain what you're doing before executing tools
-- If a tool fails, explain the error and suggest fixes
-- Ask for clarification if the request is ambiguous
-"#;
-
 /// Application state
 pub struct App {
     config: Config,
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    /// Conversation history
     transcript: Transcript,
+    /// UI views
     chat: ChatView,
     input: InputBox,
+    /// Connection status to the LLM service (TODO unused)
     status: ConnectionStatus,
+    /// LLM usage statistics (TODO: this should live on Agent)
     usage: Usage,
+    /// Flag to indicate a quit request
     should_quit: bool,
     continue_session: bool,
     /// Queue of messages waiting to be processed
-    message_queue: Vec<MessageRequest>,
+    message_queue: VecDeque<MessageRequest>,
     /// Last render time for frame rate limiting
     last_render: Instant,
     /// Alert message to display (cleared on next user input)
@@ -274,7 +289,7 @@ impl App {
             usage: Usage::default(),
             should_quit: false,
             continue_session,
-            message_queue: Vec::new(),
+            message_queue: VecDeque::new(),
             last_render: Instant::now(),
             alert: None,
             tool_filters,
@@ -284,48 +299,29 @@ impl App {
 
     /// Run the main event loop - purely event-driven rendering
     pub async fn run(&mut self) -> Result<()> {
-        let tools = ToolRegistry::new();
-        // Load OAuth credentials if available
         let oauth = crate::auth::OAuthCredentials::load()
             .ok()
             .flatten();
-        if oauth.is_some() {
-            tracing::info!("Using OAuth authentication");
-        }
         
         let mut agent = Agent::new(
             &self.config.general.model,
+            SYSTEM_PROMPT,
             self.config.general.max_tokens,
             self.config.general.max_retries,
-            SYSTEM_PROMPT,
-            tools,
             oauth,
         );
 
-        // Restore agent context if continuing session
-        if self.continue_session && !self.transcript.turns().is_empty() {
+        if self.continue_session {
             agent.restore_from_transcript(&self.transcript);
         } else {
-            // Show welcome message only for new sessions
-            self.transcript.add_turn(
-                Role::Assistant,
-                TextBlock::new(
-                    "Welcome to Codey! I'm your AI coding assistant. How can I help you today?",
-                ),
-            );
+            self.transcript.add_turn(Role::Assistant, TextBlock::new(WELCOME_MESSAGE));
         }
         self.status = ConnectionStatus::Connected;
 
-        // Initial render
         self.draw()?;
-
-        // Main event loop - only renders on actual events
         loop {
-            // Process queued messages first (agent events trigger their own draws)
-            if let Some(request) = self.message_queue.first().cloned() {
-                self.message_queue.remove(0);
+            if let Some(request) = self.message_queue.pop_front() {
                 self.process_message(&mut agent, request).await?;
-                // process_message handles its own draw calls for streaming
                 continue;
             }
 
@@ -349,7 +345,7 @@ impl App {
                 };
 
                 if needs_redraw {
-                    self.draw()?;
+                    self.draw_throttled()?;
                 }
             }
 
@@ -414,31 +410,25 @@ impl App {
     /// Draw with frame rate limiting - skips if called too frequently
     /// Returns true if a draw actually occurred
     fn draw_throttled(&mut self) -> Result<bool> {
-        if self.last_render.elapsed() >= MIN_FRAME_TIME {
-            self.draw()?;
-            Ok(true)
-        } else {
-            Ok(false)
+        if self.last_render.elapsed() < MIN_FRAME_TIME {
+            return Ok(false);
         }
+
+        self.draw()?;
+        Ok(true)
     }
 
     /// Handle an action. Returns true if the action should interrupt/break the current loop.
-    fn handle_action(&mut self, action: Action) -> bool {
-        // Interrupt actions - break out of streaming loop
-        match action {
-            Action::Interrupt => return true,
-            Action::Quit => {
-                self.should_quit = true;
-                return true;
-            }
-            _ => {}
-        }
-
+    fn handle_action(&mut self, action: Action) -> PollResult {
         // Clear alert on any input action
         self.alert = None;
         
-        // Common actions - safe in all modes
         match action {
+            Action::Interrupt => return PollResult::Interrupted,
+            Action::Quit => {
+                self.should_quit = true;
+                return PollResult::Interrupted;
+            }
             Action::InsertChar(c) => self.input.insert_char(c),
             Action::InsertNewline => self.input.insert_newline(),
             Action::DeleteBack => self.input.delete_char(),
@@ -478,10 +468,10 @@ impl App {
                 }
             }
             // These are handled in specific contexts or already matched above
-            Action::Quit | Action::Interrupt | Action::ApproveTool | Action::DenyTool | Action::ApproveToolSession => {}
+            Action::ApproveTool | Action::DenyTool | Action::ApproveToolSession => {}
         }
 
-        false
+        PollResult::Handled
     }
 
     /// Wait for user to approve or deny a tool request
@@ -499,20 +489,18 @@ impl App {
                 continue;
             };
 
-            if let Some(action) = map_key(InputMode::ToolApproval, key) {
-                match action {
-                    Action::ApproveTool => return Ok(ToolDecision::Approve),
-                    Action::DenyTool => return Ok(ToolDecision::Deny),
-                    Action::ApproveToolSession => {
-                        // TODO: implement allow for session
-                        return Ok(ToolDecision::Approve);
-                    }
-                    Action::Quit => {
-                        self.should_quit = true;
-                        return Ok(ToolDecision::Deny);
-                    }
-                    _ => {}
+            match map_key(InputMode::ToolApproval, key) {
+                Some(Action::ApproveTool) => return Ok(ToolDecision::Approve),
+                Some(Action::DenyTool) => return Ok(ToolDecision::Deny),
+                Some(Action::ApproveToolSession) => {
+                    // TODO: implement allow for session
+                    return Ok(ToolDecision::Approve);
                 }
+                Some(Action::Quit) => {
+                    self.should_quit = true;
+                    return Ok(ToolDecision::Deny);
+                }
+                _ => {}
             }
         }
     }
@@ -525,47 +513,44 @@ impl App {
         }
 
         match event::read() {
-            Ok(Event::Key(key)) => {
-                if let Some(action) = map_key(mode, key) {
-                    if self.handle_action(action) {
-                        PollResult::Interrupted
-                    } else {
-                        PollResult::Handled
-                    }
-                } else {
-                    PollResult::NoEvent
-                }
+            Ok(Event::Key(key)) => match map_key(mode, key) {
+                Some(action) => self.handle_action(action),
+                None => PollResult::NoEvent,
             }
-            Ok(Event::Mouse(mouse)) => {
-                if let Some(action) = map_mouse(mouse) {
-                    self.handle_action(action);
-                }
-                PollResult::Handled
+            Ok(Event::Mouse(mouse)) => match map_mouse(mouse) {
+                Some(action) => self.handle_action(action),
+                None => PollResult::NoEvent,
             }
             Ok(Event::Resize(_, _)) => PollResult::Handled,
             _ => PollResult::NoEvent,
         }
     }
 
-    /// Queue a user message for sending
     fn queue_message(&mut self, content: String) {
-        if let Some(command) = crate::commands::parse(&content) {
-            let name = command.name().to_string();
-            let turn_id = self.transcript.add_turn(
-                Role::User, 
-                TextBlock::pending(&format!("/{}", name))
-            );
-            self.message_queue.push(MessageRequest::Command(name, turn_id));
-        } else {
-            let turn_id = self.transcript.add_turn(Role::User, TextBlock::pending(&content));
-            self.message_queue.push(MessageRequest::User(content, turn_id));
-        }
+        let message = match crate::commands::parse(&content) {
+            Some(command) => {
+                // Slash command
+                let name = command.name().to_string();
+                let turn_id = self.transcript.add_turn(
+                    Role::User, 
+                    TextBlock::pending(&format!("/{}", name)));
+                MessageRequest::Command(name, turn_id)
+            },
+            None => {
+                // Regular user message
+                let turn_id = self.transcript.add_turn(
+                    Role::User, 
+                    TextBlock::pending(&content));
+                MessageRequest::User(content, turn_id)
+            },
+        };
+        self.message_queue.push_back(message);
         self.chat.enable_auto_scroll();
     }
 
-    /// Queue a compaction request
     pub fn queue_compaction(&mut self) {
-        self.message_queue.push(MessageRequest::Compaction);
+        // TODO push_front?
+        self.message_queue.push_back(MessageRequest::Compaction);
         self.chat.enable_auto_scroll();
     }
 
@@ -576,13 +561,23 @@ impl App {
         }
 
         match request {
-            MessageRequest::User(content, turn_id) => {
-                // Mark the user turn as complete (it was created as Pending in queue_message)
-                if let Some(turn) = self.transcript.get_mut(turn_id) {
-                    if let Some(block) = turn.content.first_mut() {
-                        block.set_status(Status::Complete);
+             MessageRequest::Command(command, turn_id) => {
+                // Mark the command turn as complete (it was created as Pending in queue_message)
+                self.transcript.get_mut(turn_id)
+                    .and_then(|turn| turn.content.first_mut())
+                    .map(|block| block.set_status(Status::Complete));
+
+                if let Some(cmd) = crate::commands::get(&command) {
+                    if let Err(e) = cmd.execute(self, agent) {
+                        self.alert = Some(format!("Command error: {}", e));
                     }
                 }
+            },
+            MessageRequest::User(content, turn_id) => {
+                // Mark the user turn as complete (it was created as Pending in queue_message)
+                self.transcript.get_mut(turn_id)
+                    .and_then(|turn| turn.content.first_mut())
+                    .map(|block| block.set_status(Status::Complete));
 
                 self.stream_response(agent, &content, RequestMode::Normal).await?;
 
@@ -591,24 +586,10 @@ impl App {
                 if self.usage.context_tokens >= self.config.general.compaction_threshold {
                     self.queue_compaction();
                 }
-            }
+            },
             MessageRequest::Compaction => {
                 // Stream assistant's compaction summary
                 self.stream_response(agent, COMPACTION_PROMPT, RequestMode::Compaction).await?;
-            }
-            MessageRequest::Command(command, turn_id) => {
-                // Mark the command turn as complete (it was created as Pending in queue_message)
-                if let Some(turn) = self.transcript.get_mut(turn_id) {
-                    if let Some(block) = turn.content.first_mut() {
-                        block.set_status(Status::Complete);
-                    }
-                }
-
-                if let Some(cmd) = crate::commands::get(&command) {
-                    if let Err(e) = cmd.execute(self, agent) {
-                        self.alert = Some(format!("Command error: {}", e));
-                    }
-                }
             }
         }
 
@@ -779,7 +760,7 @@ impl App {
         self.chat.enable_auto_scroll();
         self.draw()?;
 
-        // Clear current turn now that streaming is complete
+        // Current turn tracks the active turn inside the transcript
         self.transcript.clear_current_turn();
 
         if let Err(e) = self.transcript.save() {

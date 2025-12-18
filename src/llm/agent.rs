@@ -156,20 +156,19 @@ impl Agent {
     /// Create a new agent with initial messages
     pub fn new(
         model: impl Into<String>,
+        system_prompt: &str,
         max_tokens: u32,
         max_retries: u32,
-        system_prompt: &str,
-        tools: ToolRegistry,
         oauth: Option<OAuthCredentials>,
     ) -> Self {
         Self {
             client: Client::default(),
             model: model.into(),
+            system_prompt: system_prompt.to_string(),
             max_tokens,
             max_retries,
-            tools,
+            tools: ToolRegistry::new(),
             messages: vec![ChatMessage::system(system_prompt)],
-            system_prompt: system_prompt.to_string(),
             total_usage: Usage::default(),
             oauth,
         }
