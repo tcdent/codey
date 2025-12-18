@@ -49,6 +49,13 @@ enum InputMode {
     ToolApproval,
 }
 
+/// Result of polling for events during streaming
+enum PollResult {
+    NoEvent,
+    Handled,
+    Interrupted,
+}
+
 /// Actions that can be triggered by key events
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
@@ -68,7 +75,6 @@ enum Action {
     ScrollDown,
     PageUp,
     PageDown,
-    ClearTranscript,
     Interrupt,
     Quit,
     ApproveTool,
@@ -79,14 +85,6 @@ enum Action {
 
 /// Map a key event to an action based on the current input mode
 fn map_key(mode: InputMode, key: KeyEvent) -> Option<Action> {
-    // Global shortcuts (work in all modes)
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        match key.code {
-            KeyCode::Char('c') => return Some(Action::Quit),
-            _ => {}
-        }
-    }
-
     match mode {
         InputMode::Normal => map_key_normal(key),
         InputMode::Streaming => map_key_streaming(key),
@@ -95,9 +93,12 @@ fn map_key(mode: InputMode, key: KeyEvent) -> Option<Action> {
 }
 
 fn map_key_normal(key: KeyEvent) -> Option<Action> {
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
-            KeyCode::Char('l') => Some(Action::ClearTranscript),
+            KeyCode::Char('c') => Some(Action::Quit),
             KeyCode::Up => Some(Action::ScrollUp),
             KeyCode::Down => Some(Action::ScrollDown),
             _ => None,
@@ -112,8 +113,7 @@ fn map_key_normal(key: KeyEvent) -> Option<Action> {
         KeyCode::Right => Some(Action::CursorRight),
         KeyCode::Home => Some(Action::CursorHome),
         KeyCode::End => Some(Action::CursorEnd),
-        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) 
-                      || key.modifiers.contains(KeyModifiers::ALT) => Some(Action::InsertNewline),
+        KeyCode::Enter if shift || alt => Some(Action::InsertNewline),
         KeyCode::Enter => Some(Action::Submit),
         KeyCode::Esc => Some(Action::ClearInput),
         KeyCode::Up => Some(Action::HistoryPrev),
@@ -128,7 +128,7 @@ fn map_key_normal(key: KeyEvent) -> Option<Action> {
 fn map_key_streaming(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Esc => Some(Action::Interrupt),
-        _ => None,
+        _ => map_key_normal(key),
     }
 }
 
@@ -137,6 +137,14 @@ fn map_key_tool_approval(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('y') | KeyCode::Enter => Some(Action::ApproveTool),
         KeyCode::Char('n') | KeyCode::Esc => Some(Action::DenyTool),
         KeyCode::Char('a') => Some(Action::ApproveToolSession),
+        _ => None,
+    }
+}
+
+fn map_mouse(mouse: MouseEvent) -> Option<Action> {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => Some(Action::ScrollUp),
+        MouseEventKind::ScrollDown => Some(Action::ScrollDown),
         _ => None,
     }
 }
@@ -331,7 +339,9 @@ impl App {
                         true
                     }
                     Event::Mouse(mouse) => {
-                        self.handle_mouse_event(mouse);
+                        if let Some(action) = map_mouse(mouse) {
+                            self.handle_action(action);
+                        }
                         true
                     }
                     Event::Resize(_, _) => true,
@@ -358,7 +368,7 @@ impl App {
         
         self.last_render = Instant::now();
 
-        let chat_widget = self.chat.widget(&self.transcript);
+        let chat_widget = self.chat.widget(&mut self.transcript);
         let input_widget = self.input.widget(
             &self.config.general.model,
             self.usage.context_tokens,
@@ -412,11 +422,22 @@ impl App {
         }
     }
 
-    /// Handle an action
-    fn handle_action(&mut self, action: Action) {
+    /// Handle an action. Returns true if the action should interrupt/break the current loop.
+    fn handle_action(&mut self, action: Action) -> bool {
+        // Interrupt actions - break out of streaming loop
+        match action {
+            Action::Interrupt => return true,
+            Action::Quit => {
+                self.should_quit = true;
+                return true;
+            }
+            _ => {}
+        }
+
         // Clear alert on any input action
         self.alert = None;
         
+        // Common actions - safe in all modes
         match action {
             Action::InsertChar(c) => self.input.insert_char(c),
             Action::InsertNewline => self.input.insert_newline(),
@@ -451,29 +472,16 @@ impl App {
             Action::ScrollDown => self.chat.scroll_down(),
             Action::PageUp => self.chat.page_up(10),
             Action::PageDown => self.chat.page_down(10),
-            Action::ClearTranscript => self.transcript.clear(),
-            Action::Quit => self.should_quit = true,
             Action::TabComplete => {
                 if let Some(completed) = crate::commands::complete(self.input.content()) {
                     self.input.set_content(&completed);
                 }
             }
-            // These are handled in specific contexts
-            Action::Interrupt | Action::ApproveTool | Action::DenyTool | Action::ApproveToolSession => {}
+            // These are handled in specific contexts or already matched above
+            Action::Quit | Action::Interrupt | Action::ApproveTool | Action::DenyTool | Action::ApproveToolSession => {}
         }
-    }
 
-    /// Handle mouse events
-    fn handle_mouse_event(&mut self, mouse: MouseEvent) {
-        match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                self.chat.scroll_up();
-            }
-            MouseEventKind::ScrollDown => {
-                self.chat.scroll_down();
-            }
-            _ => {}
-        }
+        false
     }
 
     /// Wait for user to approve or deny a tool request
@@ -509,25 +517,33 @@ impl App {
         }
     }
 
-    /// Check for interrupt keys without blocking
-    /// Returns true if an interrupt was requested
-    fn check_for_interrupt(&mut self) -> bool {
+    /// Poll for events without blocking.
+    /// Returns (interrupted, needs_redraw)
+    fn poll_events(&mut self, mode: InputMode) -> PollResult {
         if !event::poll(Duration::from_millis(0)).unwrap_or(false) {
-            return false;
+            return PollResult::NoEvent;
         }
-        let Ok(Event::Key(key)) = event::read() else {
-            return false;
-        };
-        let Some(action) = map_key(InputMode::Streaming, key) else {
-            return false;
-        };
-        match action {
-            Action::Interrupt => true,
-            Action::Quit => {
-                self.should_quit = true;
-                true
+
+        match event::read() {
+            Ok(Event::Key(key)) => {
+                if let Some(action) = map_key(mode, key) {
+                    if self.handle_action(action) {
+                        PollResult::Interrupted
+                    } else {
+                        PollResult::Handled
+                    }
+                } else {
+                    PollResult::NoEvent
+                }
             }
-            _ => false,
+            Ok(Event::Mouse(mouse)) => {
+                if let Some(action) = map_mouse(mouse) {
+                    self.handle_action(action);
+                }
+                PollResult::Handled
+            }
+            Ok(Event::Resize(_, _)) => PollResult::Handled,
+            _ => PollResult::NoEvent,
         }
     }
 
@@ -555,7 +571,6 @@ impl App {
 
     /// Process a message request (user message or compaction)
     async fn process_message(&mut self, agent: &mut Agent, request: MessageRequest) -> Result<()> {
-        // Refresh OAuth token if needed
         if let Err(e) = agent.refresh_oauth_if_needed().await {
             tracing::warn!("Failed to refresh OAuth token: {}", e);
         }
@@ -569,10 +584,8 @@ impl App {
                     }
                 }
 
-                // Stream the assistant response
                 self.stream_response(agent, &content, RequestMode::Normal).await?;
 
-                // Check if compaction is needed after user message
                 if agent.context_tokens() >= self.config.general.compaction_threshold {
                     self.queue_compaction();
                 }
@@ -589,7 +602,6 @@ impl App {
                     }
                 }
 
-                // Execute the command
                 if let Some(cmd) = crate::commands::get(&command) {
                     if let Err(e) = cmd.execute(self, agent) {
                         self.alert = Some(format!("Command error: {}", e));
@@ -611,9 +623,11 @@ impl App {
         let mut stream = agent.process_message(prompt, mode);
 
         loop {
-            // Check for interrupt before each step
-            if self.check_for_interrupt() {
-                break;
+            // Poll for user input on every iteration (non-blocking)
+            match self.poll_events(InputMode::Streaming) {
+                PollResult::Interrupted => break,
+                PollResult::Handled => { self.draw_throttled()?; }
+                PollResult::NoEvent => {}
             }
 
             let step = match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
