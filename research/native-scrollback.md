@@ -374,32 +374,22 @@ impl App {
 
 ### 4. Session Restore
 
-On startup, push existing transcript to scrollback, then mark all as frozen:
+No special handling needed. On startup, existing turns render through the hot zone like normal - overflow naturally promotes to scrollback:
 
 ```rust
 pub async fn run(&mut self) -> Result<()> {
+    // Initial render pushes existing content through hot zone
+    // Overflow promotes to scrollback automatically
     let width = self.terminal.size()?.width;
+    self.hot_zone.render_active_turns(&self.transcript, width, &mut self.terminal)?;
+    self.draw_viewport()?;
 
-    if self.continue_session {
-        for turn in self.transcript.turns() {
-            let lines = turn.render(width);
-
-            // Push all lines to scrollback
-            for line in lines {
-                self.terminal.insert_before(1, |buf| {
-                    Paragraph::new(line.into_owned()).render(buf.area, buf);
-                })?;
-            }
-
-            // Mark as frozen - this turn will never be re-rendered
-            self.hot_zone.frozen_turn_ids.insert(turn.id);
-        }
-    }
-
-    // Main loop starts with empty hot zone, all history frozen in scrollback
+    // Main loop continues normally
     // ...
 }
 ```
+
+The hot zone handles everything uniformly - no distinction between "restoring" vs "streaming".
 
 ### 5. Cleanup Changes
 
@@ -503,15 +493,9 @@ When committing lines to scrollback while also updating viewport:
 
 ### 7. Session Restore Performance
 
-For large transcripts, pushing all lines via `insert_before(1, ...)` one at a time may be slow.
+Large transcripts will push many lines to scrollback on initial render. This happens once at startup via the normal hot zone overflow mechanism - no special handling needed.
 
-**Optimization:** Batch into larger chunks:
-```rust
-// Instead of line-by-line:
-terminal.insert_before(chunk.len(), |buf| {
-    Paragraph::new(chunk).render(buf.area, buf);
-})?;
-```
+If slow, the existing line-by-line promotion is already optimal since each `insert_before(1, ...)` is a single scroll operation.
 
 ### 8. Turn/Block Boundaries in Scrollback
 
