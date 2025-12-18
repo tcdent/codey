@@ -2,12 +2,14 @@ mod edit_file;
 mod fetch_url;
 mod read_file;
 mod shell;
+mod web_search;
 mod write_file;
 
 pub use edit_file::EditFileTool;
 pub use fetch_url::FetchUrlTool;
 pub use read_file::ReadFileTool;
 pub use shell::ShellTool;
+pub use web_search::WebSearchTool;
 pub use write_file::WriteFileTool;
 
 use crate::ide::{IdeAction, ToolPreview};
@@ -91,6 +93,7 @@ impl ToolRegistry {
         registry.register(Box::new(EditFileTool));
         registry.register(Box::new(ShellTool::new()));
         registry.register(Box::new(FetchUrlTool::new()));
+        registry.register(Box::new(WebSearchTool::new()));
 
         registry
     }
