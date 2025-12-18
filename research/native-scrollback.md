@@ -249,10 +249,10 @@ pub async fn new(config: Config, continue_session: bool) -> Result<Self> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
 
-    // DON'T enter alternate screen
+    // No EnterAlternateScreen - we want native scrollback
+    // No EnableMouseCapture - terminal handles scroll natively
     execute!(
         stdout,
-        EnableMouseCapture,  // May need to disable for native scroll
         crossterm::terminal::SetTitle(...),
     )?;
 
@@ -267,7 +267,7 @@ pub async fn new(config: Config, continue_session: bool) -> Result<Self> {
         }
     )?;
 
-    let hot_zone = HotZone::new(terminal_size.1);
+    let hot_zone = HotZone::new(terminal_size.1 as usize);
 
     // ...
 }
@@ -396,11 +396,8 @@ The hot zone handles everything uniformly - no distinction between "restoring" v
 ```rust
 fn cleanup(&mut self) -> Result<()> {
     disable_raw_mode()?;
-    execute!(
-        self.terminal.backend_mut(),
-        // NO LeaveAlternateScreen - we never entered it
-        DisableMouseCapture,
-    )?;
+    // No LeaveAlternateScreen - we never entered it
+    // No DisableMouseCapture - we never enabled it
     self.terminal.show_cursor()?;
     Ok(())
 }
