@@ -586,7 +586,9 @@ impl App {
 
                 self.stream_response(agent, &content, RequestMode::Normal).await?;
 
-                if agent.context_tokens() >= self.config.general.compaction_threshold {
+                // TODO the agent should track it's context not the app so we can support parallel
+                // agents in the future; not sure how compaction works on a background agent yet
+                if self.usage.context_tokens >= self.config.general.compaction_threshold {
                     self.queue_compaction();
                 }
             }
