@@ -17,10 +17,9 @@ use ratatui::{
 use crate::commands::Command;
 use crate::config::Config;
 use crate::llm::{Agent, AgentStep, RequestMode, ToolDecision, Usage};
-use crate::tools::ToolRegistry;
 use crate::tool_filter::ToolFilters;
-use crate::transcript::{BlockType, Role, Status, TextBlock, ThinkingBlock, Transcript};
-use crate::compaction::{CompactionBlock, COMPACTION_PROMPT};
+use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
+use crate::compaction::COMPACTION_PROMPT;
 use crate::ide::{Ide, Nvim};
 use crate::ui::{ChatView, ConnectionStatus, InputBox};
 
@@ -621,6 +620,9 @@ impl App {
     ) -> Result<()> {
         let mut stream = agent.process_message(prompt, mode);
 
+        // Begin the assistant turn for streaming
+        self.transcript.begin_turn(Role::Assistant);
+
         loop {
             // Poll for user input on every iteration (non-blocking)
             match self.poll_events(InputMode::Streaming) {
@@ -637,36 +639,20 @@ impl App {
 
             match step {
                 AgentStep::TextDelta(text) => {
-                    let turn = self.transcript.get_or_create_current_turn();
-                    if turn.is_active_block_type(BlockType::Text) {
-                        turn.append_to_active(&text);
-                    } else {
-                        turn.start_block(Box::new(TextBlock::new(&text)));
-                    }
+                    self.transcript.stream_delta(BlockType::Text, &text);
                 }
                 AgentStep::CompactionDelta(text) => {
-                    let turn = self.transcript.get_or_create_current_turn();
-                    if turn.is_active_block_type(BlockType::Compaction) {
-                        turn.append_to_active(&text);
-                    } else {
-                        turn.start_block(Box::new(CompactionBlock::new(&text)));
-                    }
+                    self.transcript.stream_delta(BlockType::Compaction, &text);
                 }
                 AgentStep::ThinkingDelta(text) => {
-                    let turn = self.transcript.get_or_create_current_turn();
-                    if turn.is_active_block_type(BlockType::Thinking) {
-                        turn.append_to_active(&text);
-                    } else {
-                        turn.start_block(Box::new(ThinkingBlock::new(&text)));
-                    }
+                    self.transcript.stream_delta(BlockType::Thinking, &text);
                 }
                 AgentStep::ToolRequest { call_id, name, params } => {
                     // Get tool info via stream.agent (stream holds mutable borrow)
                     let tool = stream.agent.get_tool(&name);
                     let post_actions = tool.post_actions(&params);
 
-                    self.transcript.get_or_create_current_turn()
-                        .start_block(tool.create_block(&call_id, params.clone()));
+                    self.transcript.start_block(tool.create_block(&call_id, params.clone()));
                     self.draw()?;
 
                     // Show preview in IDE if the tool provides one
@@ -691,18 +677,16 @@ impl App {
                         }
                     }
 
-                    if let Some(block) = self.transcript.get_or_create_current_turn().get_active_block_mut() {
-                        match decision {
-                            ToolDecision::Approve => block.set_status(Status::Running),
-                            ToolDecision::Deny => block.set_status(Status::Denied),
-                        }
-                    }
+                    self.transcript.mark_active_block(match decision {
+                        ToolDecision::Approve => Status::Running,
+                        ToolDecision::Deny => Status::Denied,
+                    });
                     self.draw()?;
 
                     let tool_result = stream.decide_tool(decision).await;
                     if let Some(AgentStep::ToolResult { result, is_error, .. }) = tool_result {
-                        if let Some(block) = self.transcript.get_or_create_current_turn().get_active_block_mut() {
-                            block.set_status(if is_error { Status::Error } else { Status::Complete });
+                        self.transcript.mark_active_block(if is_error { Status::Error } else { Status::Complete });
+                        if let Some(block) = self.transcript.active_block_mut() {
                             block.append_text(&result);
                         }
 
@@ -726,15 +710,11 @@ impl App {
                     self.usage = usage;
                     self.status = ConnectionStatus::Connected;
 
-                    let turn = self.transcript.get_or_create_current_turn();
-
-                    // Mark active block complete
-                    if let Some(block) = turn.get_active_block_mut() {
-                        block.set_status(Status::Complete);
-                    }
-
                     // Save and rotate transcript for compaction (agent handles its own reset)
-                    if turn.is_active_block_type(BlockType::Compaction) {
+                    // TODO we should explicitly mark this state somewhere other than the transcript
+                    if self.transcript.is_streaming_block_type(BlockType::Compaction) {
+                        // finish_turn before save so block is marked complete
+                        self.transcript.finish_turn();
                         if let Err(e) = self.transcript.save() {
                             tracing::error!("Failed to save transcript before compaction: {}", e);
                         }
@@ -750,11 +730,7 @@ impl App {
                     }
                 }
                 AgentStep::Error(msg) => {
-                    // Mark active block as complete (or error) if there is one
-                    let turn = self.transcript.get_or_create_current_turn();
-                    if let Some(block) = turn.get_active_block_mut() {
-                        block.set_status(Status::Error);
-                    }
+                    self.transcript.mark_active_block(Status::Error);
 
                     let alert_msg = if let Some(start) = msg.find('{') {
                         serde_json::from_str::<serde_json::Value>(&msg[start..])
@@ -776,8 +752,8 @@ impl App {
         self.chat.enable_auto_scroll();
         self.draw()?;
 
-        // Current turn tracks the active turn inside the transcript
-        self.transcript.clear_current_turn();
+        // Finish the turn (marks block complete, clears current turn)
+        self.transcript.finish_turn();
 
         if let Err(e) = self.transcript.save() {
             tracing::error!("Failed to save transcript: {}", e);
