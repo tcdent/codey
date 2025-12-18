@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 use crate::app::{CODEY_DIR, TRANSCRIPTS_DIR};
+use crate::compaction::CompactionBlock;
 
 /// Get the transcripts directory path, creating it if necessary
 fn get_transcripts_dir() -> std::io::Result<PathBuf> {
@@ -523,20 +524,80 @@ impl Transcript {
         self.current_turn_id = None;
     }
 
-    /// Get or create the current assistant turn for streaming
-    pub fn get_or_create_current_turn(&mut self) -> &mut Turn {
-        if self.current_turn_id.is_none() {
-            let id = self.add_empty(Role::Assistant);
-            self.current_turn_id = Some(id);
+    // =========================================================================
+    // Turn streaming lifecycle
+    // =========================================================================
+
+    /// Begin a new turn for streaming. Must call finish_turn() when done.
+    pub fn begin_turn(&mut self, role: Role) {
+        if self.current_turn_id.is_some() {
+            panic!("Cannot begin turn: previous turn not finished");
         }
-        let turn_id = self.current_turn_id.unwrap();
-        self.get_mut(turn_id).unwrap()
+        let id = self.add_empty(role);
+        self.current_turn_id = Some(id);
     }
 
-    /// Clear the current turn (called after streaming is complete)
-    pub fn clear_current_turn(&mut self) {
+    /// Finish the current turn - marks active block complete, clears current turn.
+    pub fn finish_turn(&mut self) {
+        self.mark_active_block(Status::Complete);
         self.current_turn_id = None;
     }
+
+    /// Get mutable reference to the current turn. Panics if no turn is active.
+    fn current_turn_mut(&mut self) -> &mut Turn {
+        let turn_id = self.current_turn_id
+            .expect("No active turn - call begin_turn() first");
+        self.get_mut(turn_id)
+            .expect("Current turn ID is invalid")
+    }
+
+    /// Stream a delta to the current turn.
+    /// Appends to active block if type matches, otherwise starts a new block.
+    /// Panics if no turn is active.
+    pub fn stream_delta(&mut self, kind: BlockType, text: &str) {
+        let turn = self.current_turn_mut();
+        if turn.is_active_block_type(kind) {
+            turn.append_to_active(text);
+        } else {
+            let block: Box<dyn Block> = match kind {
+                BlockType::Text => Box::new(TextBlock::new(text)),
+                BlockType::Thinking => Box::new(ThinkingBlock::new(text)),
+                BlockType::Compaction => Box::new(CompactionBlock::new(text)),
+                BlockType::Tool => panic!("Use start_block for tools"),
+            };
+            turn.start_block(block);
+        }
+    }
+
+    /// Start a new block on the current turn. Panics if no turn is active.
+    pub fn start_block(&mut self, block: Box<dyn Block>) {
+        self.current_turn_mut().start_block(block);
+    }
+
+    /// Get mutable reference to the active block.
+    pub fn active_block_mut(&mut self) -> Option<&mut (dyn Block + 'static)> {
+        let turn_id = self.current_turn_id?;
+        self.get_mut(turn_id)?.get_active_block_mut()
+    }
+
+    /// Set status on the active block.
+    pub fn mark_active_block(&mut self, status: Status) {
+        if let Some(block) = self.active_block_mut() {
+            block.set_status(status);
+        }
+    }
+
+    /// Check if current turn's active block matches a type.
+    pub fn is_streaming_block_type(&self, kind: BlockType) -> bool {
+        self.current_turn_id
+            .and_then(|id| self.turns.iter().find(|t| t.id == id))
+            .map(|t| t.is_active_block_type(kind))
+            .unwrap_or(false)
+    }
+
+    // =========================================================================
+    // Persistence
+    // =========================================================================
 
     /// Save transcript to its path
     pub fn save(&self) -> std::io::Result<()> {
