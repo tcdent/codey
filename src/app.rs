@@ -14,6 +14,7 @@ use ratatui::{
     Terminal,
 };
 
+use crate::commands::Command;
 use crate::config::Config;
 use crate::llm::{Agent, AgentStep, RequestMode, ToolDecision, Usage};
 use crate::tools::ToolRegistry;
@@ -463,10 +464,10 @@ impl App {
             Action::PageUp => self.chat.page_up(10),
             Action::PageDown => self.chat.page_down(10),
             Action::TabComplete => {
-                if let Some(completed) = crate::commands::complete(self.input.content()) {
+                if let Some(completed) = Command::complete(self.input.content()) {
                     self.input.set_content(&completed);
                 }
-            }
+    }
             // These are handled in specific contexts or already matched above
             Action::ApproveTool | Action::DenyTool | Action::ApproveToolSession => {}
         }
@@ -496,7 +497,7 @@ impl App {
                     // TODO: implement allow for session
                     return Ok(ToolDecision::Approve);
                 }
-                Some(Action::Quit) => {
+    Some(Action::Quit) => {
                     self.should_quit = true;
                     return Ok(ToolDecision::Deny);
                 }
@@ -527,7 +528,7 @@ impl App {
     }
 
     fn queue_message(&mut self, content: String) {
-        let message = match crate::commands::parse(&content) {
+        let message = match Command::parse(&content) {
             Some(command) => {
                 // Slash command
                 let name = command.name().to_string();
@@ -561,15 +562,30 @@ impl App {
         }
 
         match request {
-             MessageRequest::Command(command, turn_id) => {
+             MessageRequest::Command(name, turn_id) => {
                 // Mark the command turn as complete (it was created as Pending in queue_message)
                 self.transcript.get_mut(turn_id)
                     .and_then(|turn| turn.content.first_mut())
                     .map(|block| block.set_status(Status::Complete));
 
-                if let Some(cmd) = crate::commands::get(&command) {
-                    if let Err(e) = cmd.execute(self, agent) {
-                        self.alert = Some(format!("Command error: {}", e));
+                if let Some(command) = Command::get(&name) {
+                    match command.execute(self, agent) {
+                        Ok(None) => {}
+                        Ok(Some(output)) => {
+                            // Show command output in a new assistant turn
+                            // TODO this could be a special block type, and we should
+                            // decide if it gets sent to the agent or not
+                            
+                            let idx = self.transcript.add_empty(Role::Assistant);
+                            if let Some(turn) = self.transcript.get_mut(idx) {
+                                let block_id = turn.start_block(Box::new(TextBlock::new(&output)));
+                                turn.complete_block(block_id);
+                            }
+                            self.draw()?;
+                        }
+                        Err(e) => {
+                            self.alert = Some(format!("Command error: {}", e));
+                        }
                     }
                 }
             },
