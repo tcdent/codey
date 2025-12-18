@@ -88,20 +88,76 @@ terminal.insert_before(1, |buf| {
 })?;
 ```
 
-### Scrolling Regions Feature (v0.29+)
+### Backend Selection
 
-Enable flicker-free `insert_before()`:
+**Recommendation: Crossterm** (already in use)
+
+| Backend | Windows | Linux/Mac | Scrolling Regions |
+|---------|---------|-----------|-------------------|
+| Crossterm | ✅ (Win10+) | ✅ | ✅ |
+| Termion | ❌ | ✅ | ✅ |
+| Termwiz | ✅ | ✅ | ✅ |
+
+Crossterm is the most popular and best documented. All backends support scrolling regions when the feature is enabled.
+
+## Tearing Prevention
+
+There are **two separate mechanisms** for preventing visual tearing:
+
+### 1. `scrolling-regions` Feature (for `insert_before()`)
+
+Enable flicker-free scrollback promotion:
 
 ```toml
 # Cargo.toml
 ratatui = { version = "0.30.0-beta.0", features = ["scrolling-regions"] }
 ```
 
-This uses ANSI escape sequences (`^[[X;Yr`) to create scroll regions, allowing smooth content insertion without full-screen redraws.
+This uses ANSI escape sequences (`^[[X;Yr`) to create scroll regions, allowing smooth content insertion without full-screen redraws. **Required for this implementation.**
 
 **Backend methods added:**
 - `scroll_region_up(region: Range<u16>, line_count: u16)`
 - `scroll_region_down(region: Range<u16>, line_count: u16)`
+
+### 2. `BeginSynchronizedUpdate` (for `terminal.draw()`)
+
+Prevents tearing during viewport redraws by buffering changes:
+
+```rust
+queue!(backend, BeginSynchronizedUpdate)?;
+// All rendering here is buffered
+terminal.draw(...)?;
+queue!(backend, EndSynchronizedUpdate)?;
+backend.flush()?;
+```
+
+**You probably don't need this** because:
+- Ratatui's double-buffering already minimizes redraws (only changed cells are written)
+- `scrolling-regions` handles the `insert_before()` case
+- Synchronized updates add latency
+
+**When you might need it:**
+- If you see tearing during fast streaming updates
+- If terminal doesn't fully support scrolling regions
+
+### Optimal Configuration
+
+```toml
+# Cargo.toml - enable scrolling regions, remove synchronized updates
+ratatui = { version = "0.30.0-beta.0", features = ["scrolling-regions"] }
+```
+
+```rust
+// Don't use BeginSynchronizedUpdate unless you observe tearing
+fn draw_viewport(&mut self) -> Result<()> {
+    self.terminal.draw(|frame| {
+        // ... render widgets
+    })?;
+    Ok(())
+}
+```
+
+Test without synchronized updates first. The `scrolling-regions` feature was specifically designed to eliminate the flickering that `insert_before()` used to cause.
 
 ## Implementation Plan
 
@@ -482,11 +538,25 @@ Layout::vertical([
 ])
 ```
 
-### 6. Synchronized Updates During Commit
+### 6. Tearing During Fast Updates
 
-When committing lines to scrollback while also updating viewport:
-- Use `BeginSynchronizedUpdate` / `EndSynchronizedUpdate`
-- Prevents visual tearing during the push
+The `scrolling-regions` feature handles `insert_before()` flicker. If you still see tearing:
+
+1. **First**: Ensure `scrolling-regions` feature is enabled
+2. **Second**: Try adding synchronized updates as fallback:
+
+```rust
+fn render_frame(&mut self) -> Result<()> {
+    queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
+    self.hot_zone.render_active_turns(...)?;
+    self.draw_viewport()?;
+    queue!(self.terminal.backend_mut(), EndSynchronizedUpdate)?;
+    self.terminal.backend_mut().flush()?;
+    Ok(())
+}
+```
+
+**Note**: Synchronized updates add latency - only use if needed.
 
 ### 7. Session Restore Performance
 
@@ -516,5 +586,8 @@ Currently, turns have visual separators and headers. These need to be included w
 - [Ratatui Terminal Documentation](https://docs.rs/ratatui/latest/ratatui/struct.Terminal.html)
 - [Inline Viewport Example](https://ratatui.rs/examples/apps/inline/)
 - [v0.29.0 Release - Scrolling Regions](https://ratatui.rs/highlights/v029/)
+- [GitHub PR #1341 - Scrolling Regions Implementation](https://github.com/ratatui/ratatui/pull/1341)
 - [GitHub Issue #1426 - insert_lines_before](https://github.com/ratatui/ratatui/issues/1426)
 - [GitHub Issue #2077 - Scrolling regions feature flag](https://github.com/ratatui/ratatui/issues/2077)
+- [Backend Comparison](https://ratatui.rs/concepts/backends/comparison/)
+- [BeginSynchronizedUpdate docs](https://docs.rs/crossterm/latest/crossterm/terminal/struct.BeginSynchronizedUpdate.html)
