@@ -28,6 +28,15 @@ use ratatui::{
 use textwrap::wrap;
 use unicode_width::UnicodeWidthStr;
 
+/// Format a token count with "k" suffix for thousands
+fn format_tokens(count: u32) -> String {
+    if count >= 1000 {
+        format!("{}k", count / 1000)
+    } else {
+        "<1k".to_string()
+    }
+}
+
 /// Input box widget state
 #[derive(Debug, Clone)]
 pub struct InputBox {
@@ -50,6 +59,12 @@ impl InputBox {
     /// Get the current content
     pub fn content(&self) -> &str {
         &self.content
+    }
+
+    /// Set the content and move cursor to end
+    pub fn set_content(&mut self, content: &str) {
+        self.content = content.to_string();
+        self.cursor_position = self.content.len();
     }
 
     /// Get the cursor position
@@ -206,9 +221,17 @@ impl InputBox {
         }
     }
 
-    /// Render the input box with model name as title
-    pub fn widget<'a>(&'a self, model: &'a str) -> InputBoxWidget<'a> {
-        InputBoxWidget { state: self, model }
+    /// Render the input box with model name as title and usage display
+    pub fn widget<'a>(
+        &'a self,
+        model: &'a str,
+        context_tokens: u32,
+    ) -> InputBoxWidget<'a> {
+        InputBoxWidget {
+            state: self,
+            model,
+            context_tokens,
+        }
     }
 }
 
@@ -222,14 +245,20 @@ impl Default for InputBox {
 pub struct InputBoxWidget<'a> {
     state: &'a InputBox,
     model: &'a str,
+    /// Current context window size in tokens
+    context_tokens: u32,
 }
 
 impl Widget for InputBoxWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        // Build the usage string for right title
+        let usage_title = format!(" {} ", format_tokens(self.context_tokens));
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(format!(" {} ", self.model));
+            .title(format!(" {} ", self.model))
+            .title_top(Line::from(usage_title).right_aligned());
 
         let inner = block.inner(area);
         block.render(area, buf);

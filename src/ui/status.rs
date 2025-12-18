@@ -115,7 +115,7 @@ impl Widget for StatusBar<'_> {
                 spans.push(Span::raw(" │ "));
                 
                 // Build token display with cache info if available
-                let mut token_text = format!("Tokens: {} in / {} out", usage.input_tokens, usage.output_tokens);
+                let mut token_text = format!("Tokens: {} in / {} out", usage.context_tokens, usage.output_tokens);
                 
                 // Add cache stats if non-zero
                 if usage.cache_creation_tokens > 0 || usage.cache_read_tokens > 0 {

@@ -24,25 +24,16 @@
 //!
 //! # Evaluation Order
 //!
-//! 1. If any deny pattern matches → `FilterResult::Deny`
-//! 2. If any allow pattern matches → `FilterResult::Allow`
-//! 3. Otherwise → `FilterResult::NoMatch` (use permission level)
+//! 1. If any deny pattern matches → `Some(ToolDecision::Deny)`
+//! 2. If any allow pattern matches → `Some(ToolDecision::Approve)`
+//! 3. Otherwise → `None` (prompt user)
 
 use anyhow::{Context, Result};
 use fancy_regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Result of evaluating filters against tool parameters
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FilterResult {
-    /// A deny pattern matched - block the tool call
-    Deny,
-    /// An allow pattern matched (no deny matched) - auto-approve
-    Allow,
-    /// No patterns matched - fall back to permission level
-    NoMatch,
-}
+use crate::permission::ToolDecision;
 
 /// Filter configuration with allow and deny pattern lists
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -80,22 +71,22 @@ impl CompiledToolFilter {
     }
 
     /// Evaluate patterns against a value
-    pub fn evaluate(&self, value: &str) -> FilterResult {
+    pub fn evaluate(&self, value: &str) -> Option<ToolDecision> {
         // Check deny patterns first
         for pattern in &self.deny {
             if pattern.is_match(value).unwrap_or(false) {
-                return FilterResult::Deny;
+                return Some(ToolDecision::Deny);
             }
         }
 
         // Check allow patterns
         for pattern in &self.allow {
             if pattern.is_match(value).unwrap_or(false) {
-                return FilterResult::Allow;
+                return Some(ToolDecision::Approve);
             }
         }
 
-        FilterResult::NoMatch
+        None
     }
 }
 
@@ -135,10 +126,8 @@ impl ToolFilters {
     }
 
     /// Evaluate filters for a specific tool
-    pub fn evaluate(&self, tool_name: &str, params: &serde_json::Value) -> FilterResult {
-        let Some(filter) = self.tools.get(tool_name) else {
-            return FilterResult::NoMatch;
-        };
+    pub fn evaluate(&self, tool_name: &str, params: &serde_json::Value) -> Option<ToolDecision> {
+        let filter = self.tools.get(tool_name)?;
 
         // Get the primary parameter value for this tool
         let param_name = primary_param(tool_name);
@@ -149,7 +138,7 @@ impl ToolFilters {
                 let s = v.to_string();
                 return filter.evaluate(&s);
             }
-            None => return FilterResult::NoMatch,
+            None => return None,
         };
 
         filter.evaluate(value)
@@ -169,9 +158,9 @@ mod tests {
         };
         let filter = CompiledToolFilter::compile("shell", &config).unwrap();
 
-        assert_eq!(filter.evaluate("ls -la"), FilterResult::Allow);
-        assert_eq!(filter.evaluate("cat file.txt"), FilterResult::Allow);
-        assert_eq!(filter.evaluate("rm -rf /"), FilterResult::NoMatch);
+        assert_eq!(filter.evaluate("ls -la"), Some(ToolDecision::Approve));
+        assert_eq!(filter.evaluate("cat file.txt"), Some(ToolDecision::Approve));
+        assert_eq!(filter.evaluate("rm -rf /"), None);
     }
 
     #[test]
@@ -182,9 +171,9 @@ mod tests {
         };
         let filter = CompiledToolFilter::compile("shell", &config).unwrap();
 
-        assert_eq!(filter.evaluate("rm -rf /"), FilterResult::Deny);
-        assert_eq!(filter.evaluate("sudo rm -rf"), FilterResult::Deny);
-        assert_eq!(filter.evaluate("ls -la"), FilterResult::NoMatch);
+        assert_eq!(filter.evaluate("rm -rf /"), Some(ToolDecision::Deny));
+        assert_eq!(filter.evaluate("sudo rm -rf"), Some(ToolDecision::Deny));
+        assert_eq!(filter.evaluate("ls -la"), None);
     }
 
     #[test]
@@ -196,8 +185,8 @@ mod tests {
         let filter = CompiledToolFilter::compile("shell", &config).unwrap();
 
         // "sudo ls" matches both allow (^ls) and deny (sudo), deny wins
-        assert_eq!(filter.evaluate("sudo ls"), FilterResult::Deny);
-        assert_eq!(filter.evaluate("ls -la"), FilterResult::Allow);
+        assert_eq!(filter.evaluate("sudo ls"), Some(ToolDecision::Deny));
+        assert_eq!(filter.evaluate("ls -la"), Some(ToolDecision::Approve));
     }
 
     #[test]
@@ -213,15 +202,15 @@ mod tests {
 
         assert_eq!(
             filters.evaluate("shell", &json!({"command": "ls -la"})),
-            FilterResult::Allow
+            Some(ToolDecision::Approve)
         );
         assert_eq!(
             filters.evaluate("shell", &json!({"command": "rm -rf /"})),
-            FilterResult::Deny
+            Some(ToolDecision::Deny)
         );
         assert_eq!(
             filters.evaluate("shell", &json!({"command": "echo hello"})),
-            FilterResult::NoMatch
+            None
         );
     }
 
@@ -238,15 +227,15 @@ mod tests {
 
         assert_eq!(
             filters.evaluate("read_file", &json!({"path": "src/main.rs"})),
-            FilterResult::Allow
+            Some(ToolDecision::Approve)
         );
         assert_eq!(
             filters.evaluate("read_file", &json!({"path": ".env"})),
-            FilterResult::Deny
+            Some(ToolDecision::Deny)
         );
         assert_eq!(
             filters.evaluate("read_file", &json!({"path": "README.md"})),
-            FilterResult::NoMatch
+            None
         );
     }
 
@@ -261,10 +250,10 @@ mod tests {
         configs.insert("shell".to_string(), config);
         let filters = ToolFilters::compile(&configs).unwrap();
 
-        // Missing "command" param should result in NoMatch
+        // Missing "command" param should result in None
         assert_eq!(
             filters.evaluate("shell", &json!({"other_param": "value"})),
-            FilterResult::NoMatch
+            None
         );
     }
 
@@ -289,10 +278,10 @@ mod tests {
         configs.insert("shell".to_string(), config);
         let filters = ToolFilters::compile(&configs).unwrap();
 
-        // Unknown tool returns NoMatch
+        // Unknown tool returns None
         assert_eq!(
             filters.evaluate("unknown_tool", &json!({"command": "ls"})),
-            FilterResult::NoMatch
+            None
         );
     }
 
@@ -305,7 +294,7 @@ mod tests {
         // Empty config means no filter registered
         assert_eq!(
             filters.evaluate("shell", &json!({"command": "ls"})),
-            FilterResult::NoMatch
+            None
         );
     }
 }

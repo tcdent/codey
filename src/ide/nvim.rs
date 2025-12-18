@@ -80,11 +80,17 @@ impl Handler for NvimHandler {
 pub struct Nvim {
     client: Arc<Mutex<Neovim<NvimWriter>>>,
     socket_path: PathBuf,
+    show_diffs: bool,
+    auto_reload: bool,
 }
 
 impl Nvim {
     /// Connect to a Neovim instance at the given socket path
-    pub async fn connect(socket_path: impl Into<PathBuf>) -> Result<Self> {
+    async fn connect(
+        socket_path: impl Into<PathBuf>,
+        show_diffs: bool,
+        auto_reload: bool,
+    ) -> Result<Self> {
         let socket_path = socket_path.into();
         info!("Connecting to nvim at {:?}", socket_path);
 
@@ -106,6 +112,8 @@ impl Nvim {
         Ok(Self {
             client: Arc::new(Mutex::new(client)),
             socket_path,
+            show_diffs,
+            auto_reload,
         })
     }
 
@@ -115,11 +123,14 @@ impl Nvim {
     /// 1. Explicit socket path if provided
     /// 2. Tmux session-based socket: /tmp/nvim-{session}.sock
     /// 3. $NVIM_LISTEN_ADDRESS environment variable
-    pub async fn discover(explicit_socket: Option<PathBuf>) -> Result<Option<Self>> {
+    pub async fn discover(config: &crate::config::NvimConfig) -> Result<Option<Self>> {
+        let show_diffs = config.show_diffs;
+        let auto_reload = config.auto_reload;
+
         // 1. Explicit socket path
-        if let Some(path) = explicit_socket {
+        if let Some(path) = &config.socket {
             if path.exists() {
-                return Ok(Some(Self::connect(path).await?));
+                return Ok(Some(Self::connect(path, show_diffs, auto_reload).await?));
             }
             warn!("Configured nvim socket does not exist: {:?}", path);
         }
@@ -139,7 +150,7 @@ impl Nvim {
                         let socket_path = PathBuf::from(format!("/tmp/nvim-{}.sock", session_name));
                         if socket_path.exists() {
                             info!("Discovered nvim socket from tmux session: {:?}", socket_path);
-                            return Ok(Some(Self::connect(socket_path).await?));
+                            return Ok(Some(Self::connect(socket_path, show_diffs, auto_reload).await?));
                         }
                     }
                 }
@@ -151,7 +162,7 @@ impl Nvim {
             let path = PathBuf::from(&addr);
             if path.exists() {
                 info!("Discovered nvim socket from NVIM_LISTEN_ADDRESS: {:?}", path);
-                return Ok(Some(Self::connect(path).await?));
+                return Ok(Some(Self::connect(path, show_diffs, auto_reload).await?));
             }
         }
 
@@ -427,6 +438,9 @@ impl Ide for Nvim {
     }
 
     async fn show_preview(&self, preview: &ToolPreview) -> Result<()> {
+        if !self.show_diffs {
+            return Ok(());
+        }
         match preview {
             ToolPreview::Diff { path, original, modified } => {
                 let lang = detect_filetype(path);
@@ -444,6 +458,9 @@ impl Ide for Nvim {
     }
 
     async fn reload_buffer(&self, path: &str) -> Result<()> {
+        if !self.auto_reload {
+            return Ok(());
+        }
         self.reload_buffer_internal(path).await
     }
 
@@ -664,11 +681,12 @@ impl Ide for Nvim {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::NvimConfig;
 
     #[tokio::test]
     #[ignore] // Requires running nvim instance
     async fn test_discover_nvim() {
-        let nvim = Nvim::discover(None).await.unwrap();
+        let nvim = Nvim::discover(&NvimConfig::default()).await.unwrap();
         if let Some(nvim) = nvim {
             println!("Connected to {} at {:?}", nvim.name(), nvim.socket_path());
         } else {
@@ -679,7 +697,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires running nvim instance
     async fn test_show_preview() {
-        let nvim = Nvim::discover(None).await.unwrap().expect("Need nvim");
+        let nvim = Nvim::discover(&NvimConfig::default()).await.unwrap().expect("Need nvim");
         let preview = ToolPreview::Diff {
             path: "test.rs".to_string(),
             original: r#"fn main() {
@@ -698,7 +716,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires running nvim instance
     async fn test_get_current_file() {
-        let nvim = Nvim::discover(None).await.unwrap().expect("Need nvim");
+        let nvim = Nvim::discover(&NvimConfig::default()).await.unwrap().expect("Need nvim");
         let file = nvim.get_current_file().await.unwrap();
         println!("Current file: {:?}", file);
     }
@@ -706,7 +724,7 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires running nvim instance
     async fn test_get_selection() {
-        let nvim = Nvim::discover(None).await.unwrap().expect("Need nvim");
+        let nvim = Nvim::discover(&NvimConfig::default()).await.unwrap().expect("Need nvim");
         let selection = nvim.get_selection().await.unwrap();
         println!("Selection: {:?}", selection);
     }

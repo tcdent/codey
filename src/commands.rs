@@ -2,45 +2,83 @@
 
 use anyhow::Result;
 
-/// Available slash commands
-#[derive(Debug, Clone)]
-pub enum Command {
-    Compact,
+/// Trait for slash commands
+pub trait Command: Send + Sync {
+    /// Command name (without the leading /)
+    fn name(&self) -> &'static str;
+    
+    /// Short description for help
+    fn description(&self) -> &'static str;
+    
+    /// Execute the command
+    fn execute(&self, app: &mut crate::app::App, agent: &mut crate::llm::Agent) -> Result<()>;
 }
 
-/// Parse input text and return command if it starts with /
-pub fn parse_command(input: &str) -> Result<Command> {
+// ============================================================================
+// Built-in Commands
+// ============================================================================
+
+/// Compact conversation history
+pub struct Compact;
+
+impl Command for Compact {
+    fn name(&self) -> &'static str {
+        "compact"
+    }
+    
+    fn description(&self) -> &'static str {
+        "Compact conversation history to reduce context size"
+    }
+    
+    fn execute(&self, app: &mut crate::app::App, _agent: &mut crate::llm::Agent) -> Result<()> {
+        app.queue_compaction();
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Command Registry (static)
+// ============================================================================
+
+/// All available commands
+const COMMANDS: &[&dyn Command] = &[&Compact];
+
+/// Get a command by name
+pub fn get(name: &str) -> Option<&'static dyn Command> {
+    COMMANDS.iter().find(|cmd| cmd.name() == name).copied()
+}
+
+/// Get completion for partial input, returns full command if unique match
+pub fn complete(input: &str) -> Option<String> {
     let input = input.trim();
-    
     if !input.starts_with('/') {
-        anyhow::bail!("Not a command");
+        return None;
     }
     
-    let cmd_name = input[1..].split_whitespace().next()
-        .ok_or_else(|| anyhow::anyhow!("Empty command"))?;
+    let partial = &input[1..];
+    let matches: Vec<_> = COMMANDS
+        .iter()
+        .filter(|cmd| cmd.name().starts_with(partial))
+        .collect();
     
-    match cmd_name {
-        "compact" => Ok(Command::Compact),
-        unknown => anyhow::bail!("Unknown command: /{}", unknown),
+    if matches.len() == 1 {
+        Some(format!("/{}", matches[0].name()))
+    } else {
+        None
     }
 }
 
-impl Command {
-    /// Execute the command with access to app and agent
-    pub fn execute(&self, app: &mut crate::app::App, agent: &mut crate::llm::Agent) -> Result<()> {
-        match self {
-            Command::Compact => {
-                // Queue compaction through normal message system
-                app.queue_compaction();
-                Ok(())
-            }
-        }
+/// Parse input and return matching command, or None
+pub fn parse(input: &str) -> Option<&'static dyn Command> {
+    let input = input.trim();
+    if !input.starts_with('/') {
+        return None;
     }
     
-    /// Get the display text for this command
-    pub fn display_text(&self) -> &'static str {
-        match self {
-            Command::Compact => "/compact",
-        }
-    }
+    let cmd_name = input[1..].split_whitespace().next()?;
+    
+    COMMANDS
+        .iter()
+        .find(|cmd| cmd.name() == cmd_name)
+        .copied()
 }

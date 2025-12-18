@@ -1,8 +1,8 @@
 use crate::compaction::{CompactionBlock, COMPACTION_PROMPT};
 use crate::config::Config;
-use crate::ide::{Ide, Nvim, ToolPreview};
+use crate::ide::{Ide, Nvim};
 use crate::llm::{Agent, AgentStep, RequestMode, ToolDecision, Usage};
-use crate::tool_filter::{FilterResult, ToolFilters};
+use crate::tool_filter::ToolFilters;
 use crate::transcript::{BlockType, Role, Status, TextBlock, ThinkingBlock, Transcript};
 use crate::tools::ToolRegistry;
 use crate::ui::{ChatView, ConnectionStatus, InputBox};
@@ -14,8 +14,8 @@ enum MessageRequest {
     User(String, usize),
     /// Compaction request (triggered when context exceeds threshold)
     Compaction,
-    /// Command execution (command, turn_id)
-    Command(crate::commands::Command, usize),
+    /// Command execution (command_name, turn_id)
+    Command(String, usize),
 }
 
 use anyhow::{Context, Result};
@@ -74,6 +74,7 @@ enum Action {
     ApproveTool,
     DenyTool,
     ApproveToolSession,
+    TabComplete,
 }
 
 /// Map a key event to an action based on the current input mode
@@ -119,6 +120,7 @@ fn map_key_normal(key: KeyEvent) -> Option<Action> {
         KeyCode::Down => Some(Action::HistoryNext),
         KeyCode::PageUp => Some(Action::PageUp),
         KeyCode::PageDown => Some(Action::PageDown),
+        KeyCode::Tab => Some(Action::TabComplete),
         _ => None,
     }
 }
@@ -155,6 +157,8 @@ You have access to the following tools:
 - Always read a file before editing it
 - Use line ranges for large files: `read_file(path, start_line=100, end_line=200)`
 - Use `shell("ls -la")` to explore directories
+- When reading files, be careful about reading large files in one-go. Use line ranges, 
+    or check the file stats with `shell("stat <file_path>")` first.
 
 ### Editing Files
 - Use `edit_file` for existing files, `write_file` only for new files
@@ -234,7 +238,7 @@ impl App {
 
         // Try to connect to neovim if enabled
         let ide: Option<Box<dyn Ide>> = if config.ide.nvim.enabled {
-            match Nvim::discover(config.ide.nvim.socket.clone()).await {
+            match Nvim::discover(&config.ide.nvim).await {
                 Ok(Some(nvim)) => {
                     tracing::info!("Connected to {} at {:?}", nvim.name(), nvim.socket_path());
                     Some(Box::new(nvim))
@@ -355,7 +359,10 @@ impl App {
         self.last_render = Instant::now();
 
         let chat_widget = self.chat.widget(&self.transcript);
-        let input_widget = self.input.widget(&self.config.general.model);
+        let input_widget = self.input.widget(
+            &self.config.general.model,
+            self.usage.context_tokens,
+        );
         let alert = self.alert.clone();
 
         // Calculate input height based on content, with min 3 and max half screen
@@ -446,6 +453,11 @@ impl App {
             Action::PageDown => self.chat.page_down(10),
             Action::ClearTranscript => self.transcript.clear(),
             Action::Quit => self.should_quit = true,
+            Action::TabComplete => {
+                if let Some(completed) = crate::commands::complete(self.input.content()) {
+                    self.input.set_content(&completed);
+                }
+            }
             // These are handled in specific contexts
             Action::Interrupt | Action::ApproveTool | Action::DenyTool | Action::ApproveToolSession => {}
         }
@@ -521,28 +533,18 @@ impl App {
 
     /// Queue a user message for sending
     fn queue_message(&mut self, content: String) {
-        // Check if this is a command
-        if content.trim().starts_with('/') {
-            match crate::commands::parse_command(&content) {
-                Ok(command) => {
-                    let display = command.display_text().to_string();
-                    let turn_id = self.transcript.add_turn(
-                        Role::User, 
-                        TextBlock::pending(&display)
-                    );
-                    self.message_queue.push(MessageRequest::Command(command, turn_id));
-                    self.chat.enable_auto_scroll();
-                }
-                Err(e) => {
-                    self.alert = Some(format!("{}", e));
-                }
-            }
+        if let Some(command) = crate::commands::parse(&content) {
+            let name = command.name().to_string();
+            let turn_id = self.transcript.add_turn(
+                Role::User, 
+                TextBlock::pending(&format!("/{}", name))
+            );
+            self.message_queue.push(MessageRequest::Command(name, turn_id));
         } else {
-            // Create user turn with Pending status and get its ID
             let turn_id = self.transcript.add_turn(Role::User, TextBlock::pending(&content));
             self.message_queue.push(MessageRequest::User(content, turn_id));
-            self.chat.enable_auto_scroll();
         }
+        self.chat.enable_auto_scroll();
     }
 
     /// Queue a compaction request
@@ -588,8 +590,10 @@ impl App {
                 }
 
                 // Execute the command
-                if let Err(e) = command.execute(self, agent) {
-                    self.alert = Some(format!("Command error: {}", e));
+                if let Some(cmd) = crate::commands::get(&command) {
+                    if let Err(e) = cmd.execute(self, agent) {
+                        self.alert = Some(format!("Command error: {}", e));
+                    }
                 }
             }
         }
@@ -644,40 +648,35 @@ impl App {
                     }
                 }
                 AgentStep::ToolRequest { call_id, name, params } => {
-                    let turn = self.transcript.get_or_create_current_turn();
-                    
-                    // Evaluate tool filters before prompting
-                    let filter_result = self.tool_filters.evaluate(&name, &params);
-                    
                     // Get tool info via stream.agent (stream holds mutable borrow)
                     let tool = stream.agent.get_tool(&name);
-                    let block = tool.create_block(&call_id, params.clone());
-                    let preview = tool.preview(&params);
                     let post_actions = tool.post_actions(&params);
 
-                    turn.start_block(block);
+                    self.transcript.get_or_create_current_turn()
+                        .start_block(tool.create_block(&call_id, params.clone()));
                     self.draw()?;
 
                     // Show preview in IDE if the tool provides one
-                    if let Some(preview) = preview {
-                        self.show_ide_preview(&preview).await;
+                    if let Some(preview) = tool.preview(&params) {
+                        if let Some(ide) = &self.ide {
+                            if let Err(e) = ide.show_preview(&preview).await {
+                                tracing::warn!("Failed to show IDE preview: {}", e);
+                            }
+                        }
                     }
 
                     // Determine decision based on filter result or user approval
-                    let decision = match filter_result {
-                        FilterResult::Allow => {
-                            tracing::debug!("Tool {} auto-approved by filter", name);
-                            ToolDecision::Approve
-                        }
-                        FilterResult::Deny => {
-                            tracing::debug!("Tool {} auto-denied by filter", name);
-                            ToolDecision::Deny
-                        }
-                        _ => self.wait_for_tool_approval().await?,
+                    let decision = match self.tool_filters.evaluate(&name, &params) {
+                        Some(decision) => decision,
+                        None => self.wait_for_tool_approval().await?,
                     };
 
                     // Close preview after decision is made
-                    self.close_ide_preview().await;
+                    if let Some(ide) = &self.ide {
+                        if let Err(e) = ide.close_preview().await {
+                            tracing::warn!("Failed to close IDE preview: {}", e);
+                        }
+                    }
 
                     if let Some(block) = self.transcript.get_or_create_current_turn().get_active_block_mut() {
                         match decision {
@@ -697,7 +696,11 @@ impl App {
                         // Execute post-actions from the tool (e.g., reload buffer)
                         if !is_error {
                             for action in post_actions {
-                                self.execute_ide_action(&action).await;
+                                if let Some(ide) = &self.ide {
+                                    if let Err(e) = ide.execute(&action).await {
+                                        tracing::warn!("Failed to execute IDE action: {}", e);
+                                    }
+                                }
                             }
                         }
                     }
@@ -768,58 +771,6 @@ impl App {
         }
 
         Ok(())
-    }
-
-    // ========================================================================
-    // IDE Integration
-    // ========================================================================
-
-    /// Show a preview in the IDE before tool approval
-    async fn show_ide_preview(&self, preview: &ToolPreview) {
-        // Check config
-        if !self.config.ide.nvim.show_diffs {
-            return;
-        }
-
-        let ide = match &self.ide {
-            Some(ide) => ide,
-            None => return,
-        };
-
-        if let Err(e) = ide.show_preview(preview).await {
-            tracing::warn!("Failed to show IDE preview: {}", e);
-        }
-    }
-
-    /// Close any open preview windows in the IDE
-    async fn close_ide_preview(&self) {
-        let ide = match &self.ide {
-            Some(ide) => ide,
-            None => return,
-        };
-
-        if let Err(e) = ide.close_preview().await {
-            tracing::warn!("Failed to close IDE preview: {}", e);
-        }
-    }
-
-    /// Execute an IDE action (e.g., reload buffer after file change)
-    async fn execute_ide_action(&self, action: &crate::ide::IdeAction) {
-        // Check config for auto-reload
-        if let crate::ide::IdeAction::ReloadBuffer(_) = action {
-            if !self.config.ide.nvim.auto_reload {
-                return;
-            }
-        }
-
-        let ide = match &self.ide {
-            Some(ide) => ide,
-            None => return,
-        };
-
-        if let Err(e) = ide.execute(action).await {
-            tracing::warn!("Failed to execute IDE action: {}", e);
-        }
     }
 
     /// Cleanup terminal

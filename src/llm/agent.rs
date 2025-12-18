@@ -19,40 +19,39 @@ const ANTHROPIC_BETA_HEADER: &str = concat!(
     "fine-grained-tool-streaming-2025-05-14",
 );
 const ANTHROPIC_USER_AGENT: &str = "ai-sdk/anthropic/2.0.50 ai-sdk/provider-utils/3.0.18 runtime/bun/1.3.4";
+/// Default thinking budget in tokens
+const DEFAULT_THINKING_BUDGET: u32 = 2000;
+
 
 /// Token usage tracking
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Usage {
-    /// Cumulative input tokens across the session
-    pub input_tokens: u32,
     /// Cumulative output tokens across the session
     pub output_tokens: u32,
-    /// Current context window size (last request's input tokens)
-    /// This is used to determine when compaction is needed
+    /// Current context window size (total input tokens for last request)
+    /// This is: input_tokens + cache_creation_input_tokens + cache_read_input_tokens
     pub context_tokens: u32,
-    /// Cumulative cache creation tokens (tokens written to cache)
+    /// Cache creation tokens in last request
     pub cache_creation_tokens: u32,
-    /// Cumulative cache read tokens (tokens read from cache)
+    /// Cache read tokens in last request  
     pub cache_read_tokens: u32,
 }
 
 impl Usage {
     /// Format usage information for logging
-    pub fn format_log(&self, genai_usage: &genai::chat::Usage) -> String {
-        let mut details = format!("Turn tokens: input={} output={}", self.input_tokens, self.output_tokens);
+    pub fn format_log(&self) -> String {
+        // context_tokens = total input (uncached + cache_creation + cache_read)
+        let mut details = format!("Context: {} tokens", self.context_tokens);
         
-        if self.cache_creation_tokens > 0 {
-            details.push_str(&format!(" cache_creation={}", self.cache_creation_tokens));
-        }
-        if self.cache_read_tokens > 0 {
-            details.push_str(&format!(" cached={}", self.cache_read_tokens));
+        if self.cache_read_tokens > 0 || self.cache_creation_tokens > 0 {
+            details.push_str(&format!(
+                " (cached: {}, new: {})",
+                self.cache_read_tokens,
+                self.cache_creation_tokens
+            ));
         }
         
-        if let Some(ref completion_details) = genai_usage.completion_tokens_details {
-            if let Some(reasoning) = completion_details.reasoning_tokens {
-                details.push_str(&format!(" reasoning={}", reasoning));
-            }
-        }
+        details.push_str(&format!(", output: {}", self.output_tokens));
         
         details
     }
@@ -60,11 +59,11 @@ impl Usage {
 
 impl std::ops::AddAssign for Usage {
     fn add_assign(&mut self, other: Self) {
-        self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
-        self.cache_creation_tokens += other.cache_creation_tokens;
-        self.cache_read_tokens += other.cache_read_tokens;
-        // context_tokens is set directly, not accumulated
+        // These represent current state, not cumulative
+        self.context_tokens = other.context_tokens;
+        self.cache_creation_tokens = other.cache_creation_tokens;
+        self.cache_read_tokens = other.cache_read_tokens;
     }
 }
 
@@ -375,9 +374,6 @@ pub struct AgentStream<'a> {
     mode: RequestMode,
 }
 
-/// Default thinking budget in tokens (16k allows substantial reasoning)
-const DEFAULT_THINKING_BUDGET: u32 = 16000;
-
 impl<'a> AgentStream<'a> {
     fn new(agent: &'a mut Agent, mode: RequestMode) -> Self {
         let opts = mode.options();
@@ -437,10 +433,12 @@ impl<'a> AgentStream<'a> {
             }
         }
 
+        // Total context = uncached input + cache creation + cache read
+        let context_tokens = input_tokens + cache_creation_tokens + cache_read_tokens;
+
         Usage {
-            input_tokens,
             output_tokens,
-            context_tokens: input_tokens,
+            context_tokens,
             cache_creation_tokens,
             cache_read_tokens,
         }
@@ -555,7 +553,10 @@ impl<'a> AgentStream<'a> {
                                     if let Some(ref genai_usage) = end.captured_usage {
                                         let turn_usage = Self::extract_turn_usage(genai_usage);
                                         self.agent.total_usage += turn_usage;
-                                        info!("{}", turn_usage.format_log(genai_usage));
+                                        info!("{}", turn_usage.format_log());
+                                        debug!("Updated total_usage.context_tokens = {}", self.agent.total_usage.context_tokens);
+                                    } else {
+                                        debug!("No captured_usage in End event");
                                     }
                                     // Capture thinking blocks first (before consuming end)
                                     if let Some(captured) = end.captured_thinking_blocks.take() {
