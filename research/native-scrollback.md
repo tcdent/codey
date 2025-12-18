@@ -105,85 +105,139 @@ This uses ANSI escape sequences (`^[[X;Yr`) to create scroll regions, allowing s
 
 ## Implementation Plan
 
-### 1. Create Line Buffer Structure
+### 1. Create Hot Zone Structure
+
+The hot zone is a sliding window that tracks:
+- Lines currently visible in the viewport (re-renderable)
+- How many lines from active turns have been committed to scrollback
+- Which turns are "frozen" (fully committed, never re-render)
 
 ```rust
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashSet};
 use ratatui::text::Line;
 
 pub struct HotZone {
     /// Lines currently in the re-renderable hot zone
     lines: VecDeque<Line<'static>>,
     /// Maximum lines before overflow commits to scrollback
-    max_lines: u16,
+    max_lines: usize,
+    /// Lines committed from ACTIVE turns (not frozen ones)
+    committed_count: usize,
+    /// Turn IDs fully committed to scrollback - never re-render these
+    frozen_turn_ids: HashSet<usize>,
 }
 
 impl HotZone {
-    pub fn new(max_lines: u16) -> Self {
+    pub fn new(max_lines: usize) -> Self {
         Self {
-            lines: VecDeque::new(),
+            lines: VecDeque::with_capacity(max_lines),
             max_lines,
+            committed_count: 0,
+            frozen_turn_ids: HashSet::new(),
         }
     }
 
-    /// Push a line, committing overflow to scrollback
-    pub fn push_line(
+    /// Render only active (non-frozen) turns.
+    /// Overflow lines promote to scrollback automatically.
+    pub fn render_active_turns<B: Backend>(
         &mut self,
-        line: Line<'static>,
-        terminal: &mut Terminal<impl Backend>,
+        transcript: &Transcript,
+        width: u16,
+        terminal: &mut Terminal<B>,
     ) -> Result<()> {
-        self.lines.push_back(line);
-        self.commit_overflow(terminal)
-    }
+        // Only render turns NOT in frozen set - avoids re-rendering
+        // entire conversation history
+        let active_lines: Vec<Line<'static>> = transcript
+            .turns()
+            .filter(|t| !self.frozen_turn_ids.contains(&t.id))
+            .flat_map(|t| t.render(width).into_iter().map(|l| l.into_owned()))
+            .collect();
 
-    /// Push multiple lines
-    pub fn push_lines(
-        &mut self,
-        lines: Vec<Line<'static>>,
-        terminal: &mut Terminal<impl Backend>,
-    ) -> Result<()> {
-        for line in lines {
+        // Skip lines already committed to scrollback
+        let hot_lines: Vec<_> = active_lines
+            .into_iter()
+            .skip(self.committed_count)
+            .collect();
+
+        self.lines.clear();
+
+        for line in hot_lines {
             self.lines.push_back(line);
-        }
-        self.commit_overflow(terminal)
-    }
 
-    /// Commit overflowing lines to scrollback
-    fn commit_overflow(
-        &mut self,
-        terminal: &mut Terminal<impl Backend>,
-    ) -> Result<()> {
-        while self.lines.len() > self.max_lines as usize {
-            let committed = self.lines.pop_front().unwrap();
-            terminal.insert_before(1, |buf| {
-                Paragraph::new(committed).render(buf.area, buf);
-            })?;
+            // Overflow promotes to scrollback
+            while self.lines.len() > self.max_lines {
+                let committed = self.lines.pop_front().unwrap();
+                terminal.insert_before(1, |buf| {
+                    Paragraph::new(committed).render(buf.area, buf);
+                })?;
+                self.committed_count += 1;
+            }
         }
+
         Ok(())
     }
 
-    /// Re-render the last N lines (for markdown updates)
-    pub fn rerender_tail(&mut self, count: usize, new_lines: Vec<Line<'static>>) {
-        // Remove old tail
-        for _ in 0..count.min(self.lines.len()) {
-            self.lines.pop_back();
-        }
-        // Add new rendering
-        for line in new_lines {
-            self.lines.push_back(line);
-        }
+    /// Mark a turn as frozen when all its lines are in scrollback.
+    /// Resets committed_count since frozen turns leave the active set.
+    pub fn freeze_turn(&mut self, turn_id: usize, turn_line_count: usize) {
+        self.frozen_turn_ids.insert(turn_id);
+        // Adjust committed_count: subtract the frozen turn's lines
+        self.committed_count = self.committed_count.saturating_sub(turn_line_count);
+    }
+
+    /// Check if a turn should be frozen (all lines committed)
+    pub fn should_freeze_turn(&self, turn_line_count: usize) -> bool {
+        self.committed_count >= turn_line_count
     }
 
     /// Get current lines for viewport rendering
-    pub fn lines(&self) -> impl Iterator<Item = &Line<'static>> {
-        self.lines.iter()
+    pub fn lines(&self) -> &VecDeque<Line<'static>> {
+        &self.lines
     }
 
-    /// Current line count
-    pub fn len(&self) -> usize {
-        self.lines.len()
+    /// Clear everything (e.g., new session)
+    pub fn reset(&mut self) {
+        self.lines.clear();
+        self.committed_count = 0;
+        self.frozen_turn_ids.clear();
     }
 }
+```
+
+### Key Concepts
+
+**Frozen vs Active Turns:**
+- **Active turns**: Have content in the hot zone, get re-rendered on each frame
+- **Frozen turns**: Fully committed to scrollback, never re-rendered
+
+**Why this matters:**
+- Avoids O(entire conversation) re-rendering
+- Only active turns (usually 1-2) are processed each frame
+- `committed_count` tracks position within active turns only
+
+**The flow for a streaming response:**
+```
+1. User submits message
+   → User turn rendered into hot zone
+   → If overflows, lines promote to scrollback
+
+2. Assistant streams tokens
+   → Re-render active turns (user + assistant)
+   → Skip first `committed_count` lines (already in scrollback)
+   → Overflow promotes, committed_count increments
+
+3. User turn fully scrolls out
+   → All user turn lines now in scrollback
+   → freeze_turn(user_turn_id) - never re-render it again
+   → committed_count adjusts
+
+4. Assistant continues streaming
+   → Only assistant turn is re-rendered now
+   → Process continues...
+
+5. Turn ends
+   → Hot zone still has last N lines visible
+   → Next interaction starts, old content naturally scrolls up
 ```
 
 ### 2. Modify Terminal Setup
@@ -222,74 +276,132 @@ pub async fn new(config: Config, continue_session: bool) -> Result<Self> {
 ### 3. Modify Rendering Pipeline
 
 ```rust
-// During streaming, convert Turn/Block output to lines and push to hot zone
-AgentStep::TextDelta(text) => {
-    let turn = self.transcript.get_or_create_current_turn();
-    turn.append_to_active(&text);
-
-    // Re-render the current block and update hot zone
-    let width = self.terminal.size()?.width;
-    let rendered_lines = turn.render(width);
-
-    // Calculate how many lines changed (for efficient rerender)
-    let new_line_count = rendered_lines.len();
-    let prev_line_count = self.prev_render_line_count;
-
-    // Rerender the tail that may have changed
-    self.hot_zone.rerender_tail(prev_line_count, rendered_lines);
-    self.prev_render_line_count = new_line_count;
-}
-```
-
-### 4. Simplify Viewport Widget
-
-```rust
-// src/ui/viewport.rs (replaces complex chat.rs)
-
-pub struct ViewportWidget<'a> {
-    hot_zone: &'a HotZone,
-    input: &'a InputBox,
+// In your App struct
+struct App {
+    terminal: Terminal<CrosstermBackend<Stdout>>,
+    hot_zone: HotZone,
+    transcript: Transcript,
+    input: InputBox,
 }
 
-impl Widget for ViewportWidget<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        let chunks = Layout::vertical([
-            Constraint::Min(1),           // Hot zone content
-            Constraint::Length(5),        // Input box
-        ]).split(area);
+impl App {
+    async fn stream_response(&mut self, agent: &mut Agent, prompt: &str) -> Result<()> {
+        let mut stream = agent.process_message(prompt);
 
-        // Render hot zone lines
-        let lines: Vec<Line> = self.hot_zone.lines().cloned().collect();
-        Paragraph::new(lines).render(chunks[0], buf);
+        loop {
+            let step = stream.next().await;
 
-        // Render input
-        self.input.widget().render(chunks[1], buf);
-    }
-}
-```
+            match step {
+                Some(AgentStep::TextDelta(text)) => {
+                    let turn = self.transcript.get_or_create_current_turn();
+                    turn.append_to_active(&text);
 
-### 5. Session Restore
+                    // Re-render active turns, overflow promotes to scrollback
+                    let width = self.terminal.size()?.width;
+                    self.hot_zone.render_active_turns(
+                        &self.transcript,
+                        width,
+                        &mut self.terminal,
+                    )?;
 
-```rust
-pub async fn run(&mut self) -> Result<()> {
-    // On startup, push all existing transcript content to scrollback
-    if self.continue_session {
-        for turn in self.transcript.turns() {
-            let lines = turn.render(self.terminal.size()?.width);
-            for line in lines {
-                self.terminal.insert_before(1, |buf| {
-                    Paragraph::new(line).render(buf.area, buf);
-                })?;
+                    // Check if any active turns should be frozen
+                    self.check_freeze_turns(width);
+
+                    // Redraw viewport
+                    self.draw_viewport()?;
+                }
+
+                Some(AgentStep::Finished { .. }) => {
+                    // Nothing special - hot zone keeps last N lines
+                    // Next turn will naturally push old content up
+                    break;
+                }
+
+                None => break,
+                _ => { /* handle other steps */ }
             }
+        }
+
+        Ok(())
+    }
+
+    /// Check if any active turns have fully scrolled into scrollback
+    fn check_freeze_turns(&mut self, width: u16) {
+        let mut to_freeze = Vec::new();
+
+        for turn in self.transcript.turns() {
+            if self.hot_zone.frozen_turn_ids.contains(&turn.id) {
+                continue;
+            }
+
+            let line_count = turn.render(width).len();
+
+            if self.hot_zone.should_freeze_turn(line_count) {
+                to_freeze.push((turn.id, line_count));
+            } else {
+                // Once we hit a turn that's not fully committed, stop
+                // (turns are ordered, later turns can't be frozen if earlier ones aren't)
+                break;
+            }
+        }
+
+        for (turn_id, line_count) in to_freeze {
+            self.hot_zone.freeze_turn(turn_id, line_count);
         }
     }
 
-    // Main loop with empty hot zone
+    fn draw_viewport(&mut self) -> Result<()> {
+        self.terminal.draw(|frame| {
+            let area = frame.area();
+
+            let chunks = Layout::vertical([
+                Constraint::Min(1),        // Hot zone content
+                Constraint::Length(5),     // Input box
+            ]).split(area);
+
+            // Render hot zone lines
+            let lines: Vec<Line> = self.hot_zone.lines().iter().cloned().collect();
+            frame.render_widget(Paragraph::new(lines), chunks[0]);
+
+            // Render input
+            frame.render_widget(self.input.widget(), chunks[1]);
+        })?;
+
+        Ok(())
+    }
+}
+```
+
+### 4. Session Restore
+
+On startup, push existing transcript to scrollback, then mark all as frozen:
+
+```rust
+pub async fn run(&mut self) -> Result<()> {
+    let width = self.terminal.size()?.width;
+
+    if self.continue_session {
+        for turn in self.transcript.turns() {
+            let lines = turn.render(width);
+
+            // Push all lines to scrollback
+            for line in lines {
+                self.terminal.insert_before(1, |buf| {
+                    Paragraph::new(line.into_owned()).render(buf.area, buf);
+                })?;
+            }
+
+            // Mark as frozen - this turn will never be re-rendered
+            self.hot_zone.frozen_turn_ids.insert(turn.id);
+        }
+    }
+
+    // Main loop starts with empty hot zone, all history frozen in scrollback
     // ...
 }
 ```
 
-### 6. Cleanup Changes
+### 5. Cleanup Changes
 
 ```rust
 fn cleanup(&mut self) -> Result<()> {
@@ -410,11 +522,12 @@ Currently, turns have visual separators and headers. These need to be included w
 
 | Aspect | Before (tui-scrollview) | After (native scrollback) |
 |--------|------------------------|---------------------------|
-| Render complexity | O(all turns) | O(hot zone lines) |
-| Memory for scroll | Full virtual buffer | Hot zone only (~12 lines) |
+| Render complexity | O(all turns) | O(active turns only, typically 1-2) |
+| Memory for scroll | Full virtual buffer | Hot zone only (viewport height) |
 | Scroll performance | Custom, can lag | Native, instant |
 | Copy/paste | Custom selection | Native terminal |
-| Markdown re-render | All visible turns | Hot zone tail only |
+| Markdown re-render | All visible turns | Active turns only |
+| Frozen content | N/A | Never re-rendered, zero cost |
 
 ## References
 
