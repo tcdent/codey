@@ -433,6 +433,9 @@ fn cleanup(&mut self) -> Result<()> {
 - `scroll_up()`, `scroll_down()`, `page_up()`, `page_down()` methods
 - `auto_scroll` logic
 - `EnterAlternateScreen` / `LeaveAlternateScreen`
+- `EnableMouseCapture` / `DisableMouseCapture` - terminal handles scroll natively
+- Mouse event handling (`MouseEventKind::ScrollUp`, `ScrollDown`)
+- `map_mouse()` function and related action mappings
 
 ## Edge Cases to Resolve
 
@@ -463,16 +466,14 @@ Event::Resize(width, height) => {
 }
 ```
 
-### 3. Mouse Capture vs Native Scroll
+### 3. Mouse Events Removed
 
-With mouse capture enabled:
-- Terminal can't use mouse wheel for native scrollback
-- Must disable mouse capture OR handle scroll events manually
+With native scrollback, we remove mouse capture entirely:
+- Terminal handles scroll wheel natively
+- No need for `EnableMouseCapture` / `DisableMouseCapture`
+- No need for `map_mouse()` or scroll action handling
 
-**Options:**
-- Disable `EnableMouseCapture` entirely (lose mouse input)
-- Capture mouse but forward scroll events (complex)
-- Hybrid: disable capture when not streaming (user can scroll natively)
+**Trade-off:** We lose any other mouse functionality (click-to-position, selection, etc.) but this is acceptable for a keyboard-first TUI.
 
 ### 4. Content Width in `insert_before()`
 
