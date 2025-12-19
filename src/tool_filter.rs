@@ -98,6 +98,7 @@ fn primary_param(tool_name: &str) -> &'static str {
         "write_file" => "path",
         "edit_file" => "path",
         "fetch_url" => "url",
+        "web_search" => "query",
         _ => "command", // Default fallback
     }
 }

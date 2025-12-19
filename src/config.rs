@@ -107,6 +107,8 @@ pub struct ToolsConfig {
     pub edit_file: ToolFilterConfig,
     /// Filter patterns for fetch_url tool (matches against url)
     pub fetch_url: ToolFilterConfig,
+    /// Filter patterns for web_search tool (matches against query)
+    pub web_search: ToolFilterConfig,
 }
 
 impl Default for ToolsConfig {
@@ -118,12 +120,14 @@ impl Default for ToolsConfig {
                 "edit_file".to_string(),
                 "shell".to_string(),
                 "fetch_url".to_string(),
+                "web_search".to_string(),
             ],
             shell: ToolFilterConfig::default(),
             read_file: ToolFilterConfig::default(),
             write_file: ToolFilterConfig::default(),
             edit_file: ToolFilterConfig::default(),
             fetch_url: ToolFilterConfig::default(),
+            web_search: ToolFilterConfig::default(),
         }
     }
 }
@@ -137,6 +141,7 @@ impl ToolsConfig {
         map.insert("write_file".to_string(), self.write_file.clone());
         map.insert("edit_file".to_string(), self.edit_file.clone());
         map.insert("fetch_url".to_string(), self.fetch_url.clone());
+        map.insert("web_search".to_string(), self.web_search.clone());
         map
     }
 }
