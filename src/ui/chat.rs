@@ -5,7 +5,16 @@
 //! scrollback buffer via `insert_before()`. This provides O(active turns)
 //! rendering instead of O(entire conversation).
 
-use std::collections::{HashSet, VecDeque};
+// Scrollback
+// this is content which has passed above the hot zone
+
+// Hot Zone
+// this is content currently rendered in the Viewport
+
+// Frozen Turns
+// one that has already passed into scrollback
+
+use std::collections::{HashSet, HashMap, VecDeque};
 use std::io::Stdout;
 
 use ratatui::{
@@ -21,10 +30,6 @@ use ratatui::{
 use crate::transcript::{Role, Transcript, Turn};
 
 /// Chat view with native scrollback support.
-/// 
-/// The "hot zone" is a sliding window of lines that are actively rendered
-/// in the viewport. When new content causes overflow, the oldest lines are
-/// committed to the terminal's native scrollback buffer.
 #[derive(Debug)]
 pub struct ChatView {
     /// Lines currently in the hot zone (re-renderable)
@@ -35,18 +40,22 @@ pub struct ChatView {
     committed_count: usize,
     /// Turn IDs fully committed to scrollback - never re-render these
     frozen_turn_ids: HashSet<usize>,
+    /// Mapping of turn ID to line count (for frozen turns)
+    turn_line_counts: HashMap<usize, usize>,
+
     /// Width used for last render (to detect resize)
-    last_width: u16,
+    width: u16,
 }
 
 impl ChatView {
     pub fn new(max_lines: usize) -> Self {
         Self {
-            lines: VecDeque::with_capacity(10000),  // TODO do we need to cap this?
+            lines: VecDeque::with_capacity(10000),  // TODO do we need to pre-size this?
             max_lines,
             committed_count: 0,
             frozen_turn_ids: HashSet::new(),
-            last_width: 0,
+            turn_line_counts: HashMap::new(),
+            width: 0,
         }
     }
 
@@ -67,15 +76,18 @@ impl ChatView {
         //     self.committed_count = 0;
         //     self.frozen_turn_ids.clear();
         // }
-        self.last_width = width;
+        self.width = width;
 
-        // Render only non-frozen turns
-        let active_lines: Vec<Line<'static>> = transcript
-            .turns()
-            .iter()
-            .filter(|t| !self.frozen_turn_ids.contains(&t.id))
-            .flat_map(|turn| Self::render_turn_to_lines(turn, width))
-            .collect();
+        // Render non-frozen turns to lines
+        let mut active_lines: Vec<Line<'static>> = Vec::new();
+        for turn in transcript.turns() {
+            if self.frozen_turn_ids.contains(&turn.id) {
+                continue;
+            }
+            let render = Self::render_turn_to_lines(turn, self.width);
+            self.turn_line_counts.insert(turn.id, render.len());
+            active_lines.extend(render);
+        }
 
         // Skip lines already committed to scrollback
         let hot_lines: Vec<_> = active_lines
@@ -91,6 +103,7 @@ impl ChatView {
             // Overflow promotes to scrollback
             while self.lines.len() > self.max_lines {
                 let committed = self.lines.pop_front().unwrap();
+
                 terminal.insert_before(1, |buf| {
                     Paragraph::new(committed).render(buf.area, buf);
                 })?;
@@ -99,34 +112,28 @@ impl ChatView {
         }
 
         // Check if any turns should be frozen
-        self.check_freeze_turns(transcript, width);
-
-        Ok(())
-    }
-
-    /// Check if any active turns have fully scrolled into scrollback
-    fn check_freeze_turns(&mut self, transcript: &Transcript, width: u16) {
         let mut cumulative_lines = 0usize;
 
         for turn in transcript.turns() {
             if self.frozen_turn_ids.contains(&turn.id) {
                 continue;
             }
-
-            let turn_line_count = Self::render_turn_to_lines(turn, width).len();
-            cumulative_lines += turn_line_count;
+            let turn_line_count = self.turn_line_counts.get(&turn.id).unwrap_or(&0);
+            cumulative_lines += *turn_line_count;
 
             if cumulative_lines <= self.committed_count {
                 // This turn is fully committed to scrollback
                 self.frozen_turn_ids.insert(turn.id);
                 // Subtract this turn's lines from committed_count since
                 // frozen turns are filtered out of active_lines
-                self.committed_count -= turn_line_count;
+                self.committed_count -= *turn_line_count;
             } else {
                 // Once we hit a turn that's not fully committed, stop
                 break;
             }
         }
+
+        Ok(())
     }
 
     /// Render a turn to lines (header + content + separator)
@@ -197,21 +204,11 @@ impl Widget for ChatViewWidget<'_> {
             return;
         }
 
-        // Collect lines and render as paragraph
-        let lines: Vec<Line> = self.view.lines.iter().cloned().collect();
-        
-        // Calculate how many lines we can show
-        let visible_lines = area.height as usize;
-        let total_lines = lines.len();
-        
-        // Show the most recent lines (bottom-aligned)
-        let skip = total_lines.saturating_sub(visible_lines);
-        let visible: Vec<Line> = lines.into_iter().skip(skip).collect();
+        // Bottom-aligned: only clone visible lines
+        let skip = self.view.lines.len().saturating_sub(area.height as usize);
+        let visible: Vec<Line> = self.view.lines.iter().skip(skip).cloned().collect();
 
-        let content_block = Block::default();
-
-        let paragraph = Paragraph::new(visible).block(content_block);
-        paragraph.render(area, buf);
+        Paragraph::new(visible).render(area, buf);
     }
 }
 

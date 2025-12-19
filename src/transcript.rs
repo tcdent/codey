@@ -8,7 +8,6 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use textwrap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -464,12 +463,6 @@ pub struct Transcript {
     /// ID of the current turn being streamed to (if any)
     #[serde(skip)]
     current_turn_id: Option<usize>,
-}
-
-impl Default for Transcript {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Transcript {
