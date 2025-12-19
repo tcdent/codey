@@ -21,7 +21,7 @@ use crate::tool_filter::ToolFilters;
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
 use crate::compaction::COMPACTION_PROMPT;
 use crate::ide::{Ide, Nvim};
-use crate::ui::{ChatView, ConnectionStatus, InputBox};
+use crate::ui::{Attachment, ChatView, ConnectionStatus, InputBox};
 
 
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
@@ -107,7 +107,6 @@ enum Action {
     InsertChar(char),
     InsertNewline,
     DeleteBack,
-    DeleteForward,
     CursorLeft,
     CursorRight,
     CursorHome,
@@ -148,7 +147,6 @@ fn map_key_normal(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char(c) => Some(Action::InsertChar(c)),
         KeyCode::Backspace => Some(Action::DeleteBack),
-        KeyCode::Delete => Some(Action::DeleteForward),
         KeyCode::Left => Some(Action::CursorLeft),
         KeyCode::Right => Some(Action::CursorRight),
         KeyCode::Home => Some(Action::CursorHome),
@@ -341,8 +339,7 @@ impl App {
                     Event::Paste(content) => {
                         // Large pastes become attachments, small ones inline
                         if content.len() > 200 {
-                            let label = format!("pasted ({} chars)", content.len());
-                            self.input.add_attachment(label, content);
+                            self.input.add_attachment(Attachment::pasted(content));
                         } else {
                             for c in content.chars() {
                                 self.input.insert_char(c);
@@ -439,7 +436,6 @@ impl App {
             Action::InsertChar(c) => self.input.insert_char(c),
             Action::InsertNewline => self.input.insert_newline(),
             Action::DeleteBack => self.input.delete_char(),
-            Action::DeleteForward => self.input.delete_char_forward(),
             Action::CursorLeft => self.input.move_cursor_left(),
             Action::CursorRight => self.input.move_cursor_right(),
             Action::CursorHome => self.input.move_cursor_start(),
@@ -537,6 +533,14 @@ impl App {
             },
         };
         self.message_queue.push_back(message);
+
+        // TODO fix this when we clean up render calls. 
+        let size = self.terminal.size()
+            .expect("Failed to get terminal size");
+        self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)
+            .expect("Failed to render chat to scrollback");
+        self.draw()
+            .expect("Failed to draw terminal after queuing message");
     }
 
     pub fn queue_compaction(&mut self) {

@@ -5,5 +5,5 @@ mod input;
 mod status;
 
 pub use chat::ChatView;
-pub use input::InputBox;
+pub use input::{Attachment, InputBox};
 pub use status::ConnectionStatus;

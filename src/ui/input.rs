@@ -37,11 +37,41 @@ fn format_tokens(count: u32) -> String {
     }
 }
 
-/// Pasted or attached content shown as a pill
+/// Type of attached content
+#[derive(Debug, Clone)]
+pub enum AttachmentKind {
+    /// Pasted text content
+    PastedText { char_count: usize },
+    // Future: IdeSelection { file: String, line_start: usize, line_end: usize },
+}
+
+/// Attached content shown as a pill
 #[derive(Debug, Clone)]
 pub struct Attachment {
-    pub label: String,
+    pub kind: AttachmentKind,
     pub content: String,
+}
+
+impl Attachment {
+    /// Create a new pasted text attachment
+    pub fn pasted(content: String) -> Self {
+        Self {
+            kind: AttachmentKind::PastedText { char_count: content.len() },
+            content,
+        }
+    }
+
+    /// Get the label for this attachment
+    pub fn label(&self) -> String {
+        match &self.kind {
+            AttachmentKind::PastedText { char_count } => format!("pasted ({} chars)", char_count),
+        }
+    }
+
+    /// Get the display string (pill format with trailing space)
+    pub fn display(&self) -> String {
+        format!("[\u{1F4CE} {}] ", self.label())
+    }
 }
 
 /// A segment of input - either typed text or an attachment pill
@@ -49,6 +79,148 @@ pub struct Attachment {
 pub enum Segment {
     Text(String),
     Attachment(Attachment),
+}
+
+impl Segment {
+    /// Byte length for cursor positioning within this segment.
+    /// Text: full string length, Attachment: 0 (cursor sits at position 0)
+    fn len(&self) -> usize {
+        match self {
+            Segment::Text(s) => s.len(),
+            Segment::Attachment(_) => 0,
+        }
+    }
+
+    /// Cursor offset when positioned at the "end" of this segment
+    fn end_offset(&self) -> usize {
+        match self {
+            Segment::Text(s) => s.len(),
+            Segment::Attachment(_) => 0,
+        }
+    }
+
+    /// Display string length (for calculating wrapped positions)
+    fn display_len(&self) -> usize {
+        match self {
+            Segment::Text(s) => s.len(),
+            Segment::Attachment(a) => a.display().len(),
+        }
+    }
+
+    /// Get display representation
+    fn display(&self) -> String {
+        match self {
+            Segment::Text(s) => s.clone(),
+            Segment::Attachment(a) => a.display(),
+        }
+    }
+
+    /// Get expanded content (full attachment content for submit)
+    fn expanded(&self) -> String {
+        match self {
+            Segment::Text(s) => s.clone(),
+            Segment::Attachment(a) => a.content.clone(),
+        }
+    }
+
+    /// Get text content only (None for attachments)
+    fn text_content(&self) -> Option<&str> {
+        match self {
+            Segment::Text(s) => Some(s),
+            Segment::Attachment(_) => None,
+        }
+    }
+
+    /// Get as mutable text, if this is a Text segment
+    fn as_text_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Segment::Text(s) => Some(s),
+            Segment::Attachment(_) => None,
+        }
+    }
+
+    /// Check if this is a text segment
+    fn is_text(&self) -> bool {
+        matches!(self, Segment::Text(_))
+    }
+
+    /// Check if this is empty (empty text or always false for attachments)
+    fn is_empty(&self) -> bool {
+        match self {
+            Segment::Text(s) => s.is_empty(),
+            Segment::Attachment(_) => false,
+        }
+    }
+
+    /// Get previous cursor offset within this segment, or None if at start
+    fn prev_cursor_offset(&self, current: usize) -> Option<usize> {
+        match self {
+            Segment::Text(s) if current > 0 => {
+                let mut new_pos = current - 1;
+                while !s.is_char_boundary(new_pos) && new_pos > 0 {
+                    new_pos -= 1;
+                }
+                Some(new_pos)
+            }
+            _ => None,
+        }
+    }
+
+    /// Get next cursor offset within this segment, or None if at end
+    fn next_cursor_offset(&self, current: usize) -> Option<usize> {
+        match self {
+            Segment::Text(s) if current < s.len() => {
+                let mut new_pos = current + 1;
+                while !s.is_char_boundary(new_pos) && new_pos < s.len() {
+                    new_pos += 1;
+                }
+                Some(new_pos)
+            }
+            _ => None,
+        }
+    }
+
+    /// Delete character before offset, returns new offset if successful
+    fn delete_char_before(&mut self, offset: usize) -> Option<usize> {
+        match self {
+            Segment::Text(s) if offset > 0 => {
+                let mut new_pos = offset - 1;
+                while !s.is_char_boundary(new_pos) && new_pos > 0 {
+                    new_pos -= 1;
+                }
+                s.drain(new_pos..offset);
+                Some(new_pos)
+            }
+            _ => None,
+        }
+    }
+
+    /// Take ownership of text content, leaving empty string
+    fn take_text(&mut self) -> String {
+        match self {
+            Segment::Text(s) => std::mem::take(s),
+            Segment::Attachment(_) => String::new(),
+        }
+    }
+
+    /// Append text to this segment (no-op for attachments)
+    fn push_str(&mut self, text: &str) {
+        if let Segment::Text(s) = self {
+            s.push_str(text);
+        }
+    }
+
+    /// Split text at offset, returning the after portion. No-op for attachments.
+    fn split_off(&mut self, offset: usize) -> String {
+        match self {
+            Segment::Text(s) if offset < s.len() => {
+                let after = s[offset..].to_string();
+                s.truncate(offset);
+                after
+            }
+            _ => String::new(),
+        }
+    }
 }
 
 /// Input box widget state
@@ -74,7 +246,7 @@ impl InputBox {
 
     /// Ensure cursor is on a text segment, creating one if needed
     fn ensure_text_segment(&mut self) {
-        if let Segment::Attachment(_) = &self.segments[self.cursor_seg] {
+        if !self.segments[self.cursor_seg].is_text() {
             // If on attachment, move to/create next text segment
             if self.cursor_seg + 1 >= self.segments.len() {
                 self.segments.push(Segment::Text(String::new()));
@@ -86,43 +258,25 @@ impl InputBox {
 
     /// Get display string (text + pill labels) for wrapping
     fn display_string(&self) -> String {
-        self.segments
-            .iter()
-            .map(|seg| match seg {
-                Segment::Text(s) => s.clone(),
-                Segment::Attachment(a) => format!("[\u{1F4CE} {}] ", a.label),
-            })
-            .collect()
+        self.segments.iter().map(|seg| seg.display()).collect()
     }
 
     /// Get expanded string (text + full attachment content) for submit
     fn expanded_string(&self) -> String {
-        self.segments
-            .iter()
-            .map(|seg| match seg {
-                Segment::Text(s) => s.clone(),
-                Segment::Attachment(a) => a.content.clone(),
-            })
-            .collect()
+        self.segments.iter().map(|seg| seg.expanded()).collect()
     }
 
     /// Get typed text only (for tab completion)
     pub fn content(&self) -> String {
         self.segments
             .iter()
-            .filter_map(|seg| match seg {
-                Segment::Text(s) => Some(s.clone()),
-                Segment::Attachment(_) => None,
-            })
+            .filter_map(|seg| seg.text_content().map(str::to_owned))
             .collect()
     }
 
     /// Check if input is empty (no text, no attachments)
     pub fn is_empty(&self) -> bool {
-        self.segments.iter().all(|seg| match seg {
-            Segment::Text(s) => s.is_empty(),
-            Segment::Attachment(_) => false,
-        })
+        self.segments.iter().all(|seg| seg.is_empty())
     }
 
     /// Set the content and move cursor to end (replaces all with single text)
@@ -153,141 +307,66 @@ impl InputBox {
 
     /// Delete the character before the cursor
     pub fn delete_char(&mut self) {
-        let is_text = matches!(&self.segments[self.cursor_seg], Segment::Text(_));
-        
-        if is_text {
-            if self.cursor_offset > 0 {
-                // Delete within text
-                if let Segment::Text(s) = &mut self.segments[self.cursor_seg] {
-                    let mut new_pos = self.cursor_offset - 1;
-                    while !s.is_char_boundary(new_pos) && new_pos > 0 {
-                        new_pos -= 1;
-                    }
-                    s.drain(new_pos..self.cursor_offset);
-                    self.cursor_offset = new_pos;
-                }
-            } else if self.cursor_seg > 0 {
-                // At start of text segment - check what's before
-                let prev = self.cursor_seg - 1;
-                let prev_is_attachment = matches!(&self.segments[prev], Segment::Attachment(_));
-                
-                if prev_is_attachment {
-                    self.segments.remove(prev);
-                    self.cursor_seg -= 1;
-                } else {
-                    // Merge with previous text
-                    let current = if let Segment::Text(s) = &mut self.segments[self.cursor_seg] {
-                        std::mem::take(s)
-                    } else {
-                        String::new()
-                    };
-                    let prev_len = if let Segment::Text(s) = &self.segments[prev] {
-                        s.len()
-                    } else {
-                        0
-                    };
-                    if let Segment::Text(prev_s) = &mut self.segments[prev] {
-                        prev_s.push_str(&current);
-                    }
-                    self.segments.remove(self.cursor_seg);
-                    self.cursor_seg = prev;
-                    self.cursor_offset = prev_len;
-                }
-            }
-        } else {
-            // Delete this attachment
+        // Try to delete within current segment
+        if let Some(new_offset) = self.segments[self.cursor_seg].delete_char_before(self.cursor_offset) {
+            self.cursor_offset = new_offset;
+            return;
+        }
+
+        // At start of segment - behavior depends on segment type
+        if !self.segments[self.cursor_seg].is_text() {
+            // On Attachment: delete the attachment itself
             self.segments.remove(self.cursor_seg);
             if self.cursor_seg > 0 {
                 self.cursor_seg -= 1;
-                if let Segment::Text(s) = &self.segments[self.cursor_seg] {
-                    self.cursor_offset = s.len();
-                }
+                self.cursor_offset = self.segments[self.cursor_seg].end_offset();
             } else {
                 if self.segments.is_empty() {
                     self.segments.push(Segment::Text(String::new()));
                 }
                 self.cursor_offset = 0;
             }
+            return;
         }
-    }
 
-    /// Delete the character at the cursor
-    pub fn delete_char_forward(&mut self) {
-        match &mut self.segments[self.cursor_seg] {
-            Segment::Text(s) => {
-                if self.cursor_offset < s.len() {
-                    let mut end_pos = self.cursor_offset + 1;
-                    while !s.is_char_boundary(end_pos) && end_pos < s.len() {
-                        end_pos += 1;
-                    }
-                    s.drain(self.cursor_offset..end_pos);
-                } else if self.cursor_seg + 1 < self.segments.len() {
-                    // Delete next segment
-                    self.segments.remove(self.cursor_seg + 1);
-                }
-            }
-            Segment::Attachment(_) => {
-                self.segments.remove(self.cursor_seg);
-                if self.segments.is_empty() {
-                    self.segments.push(Segment::Text(String::new()));
-                    self.cursor_seg = 0;
-                }
-                self.cursor_offset = 0;
-            }
+        // On Text at offset 0: delete what's before
+        if self.cursor_seg == 0 {
+            return; // Nothing before
+        }
+
+        let prev = self.cursor_seg - 1;
+        if self.segments[prev].is_text() {
+            // Merge with previous text segment
+            let current_text = self.segments[self.cursor_seg].take_text();
+            let prev_len = self.segments[prev].len();
+            self.segments[prev].push_str(&current_text);
+            self.segments.remove(self.cursor_seg);
+            self.cursor_seg = prev;
+            self.cursor_offset = prev_len;
+        } else {
+            // Previous is Attachment: just remove it
+            self.segments.remove(prev);
+            self.cursor_seg -= 1;
         }
     }
 
     /// Move cursor left
     pub fn move_cursor_left(&mut self) {
-        match &self.segments[self.cursor_seg] {
-            Segment::Text(s) => {
-                if self.cursor_offset > 0 {
-                    let mut new_pos = self.cursor_offset - 1;
-                    while !s.is_char_boundary(new_pos) && new_pos > 0 {
-                        new_pos -= 1;
-                    }
-                    self.cursor_offset = new_pos;
-                } else if self.cursor_seg > 0 {
-                    self.cursor_seg -= 1;
-                    self.cursor_offset = match &self.segments[self.cursor_seg] {
-                        Segment::Text(s) => s.len(),
-                        Segment::Attachment(_) => 0,
-                    };
-                }
-            }
-            Segment::Attachment(_) => {
-                if self.cursor_seg > 0 {
-                    self.cursor_seg -= 1;
-                    self.cursor_offset = match &self.segments[self.cursor_seg] {
-                        Segment::Text(s) => s.len(),
-                        Segment::Attachment(_) => 0,
-                    };
-                }
-            }
+        if let Some(new_offset) = self.segments[self.cursor_seg].prev_cursor_offset(self.cursor_offset) {
+            self.cursor_offset = new_offset;
+        } else if self.cursor_seg > 0 {
+            self.cursor_seg -= 1;
+            self.cursor_offset = self.segments[self.cursor_seg].end_offset();
         }
     }
 
     /// Move cursor right
     pub fn move_cursor_right(&mut self) {
-        match &self.segments[self.cursor_seg] {
-            Segment::Text(s) => {
-                if self.cursor_offset < s.len() {
-                    let mut new_pos = self.cursor_offset + 1;
-                    while !s.is_char_boundary(new_pos) && new_pos < s.len() {
-                        new_pos += 1;
-                    }
-                    self.cursor_offset = new_pos;
-                } else if self.cursor_seg + 1 < self.segments.len() {
-                    self.cursor_seg += 1;
-                    self.cursor_offset = 0;
-                }
-            }
-            Segment::Attachment(_) => {
-                if self.cursor_seg + 1 < self.segments.len() {
-                    self.cursor_seg += 1;
-                    self.cursor_offset = 0;
-                }
-            }
+        if let Some(new_offset) = self.segments[self.cursor_seg].next_cursor_offset(self.cursor_offset) {
+            self.cursor_offset = new_offset;
+        } else if self.cursor_seg + 1 < self.segments.len() {
+            self.cursor_seg += 1;
+            self.cursor_offset = 0;
         }
     }
 
@@ -300,10 +379,7 @@ impl InputBox {
     /// Move cursor to end
     pub fn move_cursor_end(&mut self) {
         self.cursor_seg = self.segments.len() - 1;
-        self.cursor_offset = match &self.segments[self.cursor_seg] {
-            Segment::Text(s) => s.len(),
-            Segment::Attachment(_) => 0,
-        };
+        self.cursor_offset = self.segments[self.cursor_seg].end_offset();
     }
 
     /// Insert a newline
@@ -312,41 +388,24 @@ impl InputBox {
     }
 
     /// Add attachment at cursor position
-    pub fn add_attachment(&mut self, label: String, content: String) {
-        let attachment = Attachment { label, content };
+    pub fn add_attachment(&mut self, attachment: Attachment) {
+        let seg = &self.segments[self.cursor_seg];
         
-        match &self.segments[self.cursor_seg] {
-            Segment::Text(s) => {
-                if self.cursor_offset == 0 {
-                    // Insert before current text
-                    self.segments.insert(self.cursor_seg, Segment::Attachment(attachment));
-                    self.cursor_seg += 1;
-                } else if self.cursor_offset == s.len() {
-                    // Insert after current text
-                    self.segments.insert(self.cursor_seg + 1, Segment::Attachment(attachment));
-                    self.segments.insert(self.cursor_seg + 2, Segment::Text(String::new()));
-                    self.cursor_seg += 2;
-                    self.cursor_offset = 0;
-                } else {
-                    // Split text and insert in middle
-                    let after = s[self.cursor_offset..].to_string();
-                    if let Segment::Text(s) = &mut self.segments[self.cursor_seg] {
-                        s.truncate(self.cursor_offset);
-                    }
-                    self.segments.insert(self.cursor_seg + 1, Segment::Attachment(attachment));
-                    self.segments.insert(self.cursor_seg + 2, Segment::Text(after));
-                    self.cursor_seg += 2;
-                    self.cursor_offset = 0;
-                }
-            }
-            Segment::Attachment(_) => {
-                // Insert after attachment
-                self.segments.insert(self.cursor_seg + 1, Segment::Attachment(attachment));
-                self.segments.insert(self.cursor_seg + 2, Segment::Text(String::new()));
-                self.cursor_seg += 2;
-                self.cursor_offset = 0;
-            }
+        // At start of text segment: insert before
+        if seg.is_text() && self.cursor_offset == 0 {
+            self.segments.insert(self.cursor_seg, Segment::Attachment(attachment));
+            self.cursor_seg += 1;
+            return;
         }
+
+        // In middle of text: split first
+        let after = self.segments[self.cursor_seg].split_off(self.cursor_offset);
+
+        // Insert attachment after current segment, then empty text for cursor
+        self.segments.insert(self.cursor_seg + 1, Segment::Attachment(attachment));
+        self.segments.insert(self.cursor_seg + 2, Segment::Text(after));
+        self.cursor_seg += 2;
+        self.cursor_offset = 0;
     }
 
     /// Clear the input
@@ -488,7 +547,7 @@ impl Widget for InputBoxWidget<'_> {
                 let (text, style) = match seg {
                     Segment::Text(s) => (s.clone(), Style::default()),
                     Segment::Attachment(a) => (
-                        format!("[\u{1F4CE} {}] ", a.label),
+                        a.display(),
                         Style::default().bg(Color::DarkGray).fg(Color::White),
                     ),
                 };
@@ -527,18 +586,14 @@ impl Widget for InputBoxWidget<'_> {
 
         // Calculate cursor byte position within display string
         let mut cursor_byte_pos = 0usize;
+        let (cursor_seg, cursor_offset) = self.state.cursor();
         for (i, seg) in self.state.segments().iter().enumerate() {
-            if i == self.state.cursor().0 {
-                match seg {
-                    Segment::Text(_) => cursor_byte_pos += self.state.cursor().1,
-                    Segment::Attachment(a) => cursor_byte_pos += format!("[\u{1F4CE} {}] ", a.label).len(),
-                }
+            if i == cursor_seg {
+                // For cursor segment: Text uses offset, Attachment uses full display
+                cursor_byte_pos += if seg.is_text() { cursor_offset } else { seg.display_len() };
                 break;
             }
-            match seg {
-                Segment::Text(s) => cursor_byte_pos += s.len(),
-                Segment::Attachment(a) => cursor_byte_pos += format!("[\u{1F4CE} {}] ", a.label).len(),
-            }
+            cursor_byte_pos += seg.display_len();
         }
 
         let (cursor_x, cursor_y) = cursor_position_in_wrapped(
@@ -670,7 +725,7 @@ mod tests {
     fn test_attachment() {
         let mut input = InputBox::new();
         input.insert_char('a');
-        input.add_attachment("file.txt".to_string(), "file contents".to_string());
+        input.add_attachment(Attachment::pasted("file contents".to_string()));
         input.insert_char('b');
 
         assert_eq!(input.content(), "ab");  // Text only
