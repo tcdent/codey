@@ -332,7 +332,6 @@ dependencies = [
  "pretty_assertions",
  "rand 0.8.5",
  "ratatui",
- "ratatui-core",
  "ratskin",
  "reqwest",
  "serde",
@@ -347,7 +346,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "tui-scrollview",
  "typetag",
  "unicode-width 0.2.0",
  "url",
@@ -1723,6 +1721,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "numtoa"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6aa2c4e539b869820a2b82e1aef6ff40aa85e65decdd5185e83fb4b1249cd00f"
+
+[[package]]
 name = "nvim-rs"
 version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2111,6 +2115,7 @@ dependencies = [
  "ratatui-core",
  "ratatui-crossterm",
  "ratatui-macros",
+ "ratatui-termion",
  "ratatui-termwiz",
  "ratatui-widgets",
 ]
@@ -2153,6 +2158,17 @@ checksum = "b59d6fd5d3796a0305d4bfb1e5f7b86db2f4968a8c69b439f379f73efa4495c3"
 dependencies = [
  "ratatui-core",
  "ratatui-widgets",
+]
+
+[[package]]
+name = "ratatui-termion"
+version = "0.1.0-beta.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11e650d976cd2da59c24f6da76c2797d55059d902e85bdfdb9f97c2ee6be0334"
+dependencies = [
+ "instability",
+ "ratatui-core",
+ "termion",
 ]
 
 [[package]]
@@ -2800,6 +2816,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "termion"
+version = "4.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f44138a9ae08f0f502f24104d82517ef4da7330c35acd638f1f29d3cd5475ecb"
+dependencies = [
+ "libc",
+ "numtoa",
+]
+
+[[package]]
 name = "termios"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3207,17 +3233,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "tui-scrollview"
-version = "0.6.0-alpha.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e65e4b83e3f793f519b287ee6565a84e4529216e24f265887387d8bee4a4671"
-dependencies = [
- "indoc",
- "ratatui-core",
- "ratatui-widgets",
-]
 
 [[package]]
 name = "typeid"

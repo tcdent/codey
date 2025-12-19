@@ -1,17 +1,17 @@
-use std::io::{self, Stdout, Write};
+use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 use std::collections::VecDeque;
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind},
-    execute, queue,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, BeginSynchronizedUpdate, EndSynchronizedUpdate},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    Terminal,
+    Terminal, TerminalOptions, Viewport,
 };
 
 use crate::commands::Command;
@@ -116,10 +116,6 @@ enum Action {
     ClearInput,
     HistoryPrev,
     HistoryNext,
-    ScrollUp,
-    ScrollDown,
-    PageUp,
-    PageDown,
     Interrupt,
     Quit,
     ApproveTool,
@@ -137,14 +133,6 @@ fn map_key(mode: InputMode, key: KeyEvent) -> Option<Action> {
     }
 }
 
-fn map_mouse(mouse: MouseEvent) -> Option<Action> {
-    match mouse.kind {
-        MouseEventKind::ScrollUp => Some(Action::ScrollUp),
-        MouseEventKind::ScrollDown => Some(Action::ScrollDown),
-        _ => None,
-    }
-}
-
 /// Keybindings for normal input mode
 fn map_key_normal(key: KeyEvent) -> Option<Action> {
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -153,8 +141,6 @@ fn map_key_normal(key: KeyEvent) -> Option<Action> {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         return match key.code {
             KeyCode::Char('c') => Some(Action::Quit),
-            KeyCode::Up => Some(Action::ScrollUp),
-            KeyCode::Down => Some(Action::ScrollDown),
             _ => None,
         };
     }
@@ -172,8 +158,6 @@ fn map_key_normal(key: KeyEvent) -> Option<Action> {
         KeyCode::Esc => Some(Action::ClearInput),
         KeyCode::Up => Some(Action::HistoryPrev),
         KeyCode::Down => Some(Action::HistoryNext),
-        KeyCode::PageUp => Some(Action::PageUp),
-        KeyCode::PageDown => Some(Action::PageDown),
         KeyCode::Tab => Some(Action::TabComplete),
         _ => None,
     }
@@ -233,8 +217,6 @@ impl App {
         let mut stdout = io::stdout();
         execute!(
             stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
             crossterm::terminal::SetTitle(format!("{} v{}", APP_NAME, APP_VERSION)),
             crossterm::event::PushKeyboardEnhancementFlags(
                 crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
@@ -244,7 +226,16 @@ impl App {
         .context("Failed to setup terminal")?;
 
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend).context("Failed to create terminal")?;
+        let terminal_size = crossterm::terminal::size()?;
+        let VIEWPORT_HEIGHT = 12; // TODO: make configurable
+        
+        // Use inline viewport for native scrollback support
+        let terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(VIEWPORT_HEIGHT),
+            }
+        ).context("Failed to create terminal")?;
 
         // Load existing transcript or create new one
         let transcript = if continue_session {
@@ -279,11 +270,17 @@ impl App {
             None
         };
 
+        // Okay so in tracing down trying to get the viewport to line up with the 
+        // scroll, it looks like we need to subtract the height of the input from 
+        // the viewport in order to get the height of the chat view
+        // TODO All of those dimensions are in the draw method 
+        let chat_height = VIEWPORT_HEIGHT.saturating_sub(5) as usize;
+
         Ok(Self {
             config,
             terminal,
             transcript,
-            chat: ChatView::new(),
+            chat: ChatView::new(chat_height),
             input: InputBox::new(),
             status: ConnectionStatus::Disconnected,
             usage: Usage::default(),
@@ -314,11 +311,17 @@ impl App {
         if self.continue_session {
             agent.restore_from_transcript(&self.transcript);
         } else {
-            self.transcript.add_turn(Role::Assistant, TextBlock::new(WELCOME_MESSAGE));
+            self.transcript.add_turn(Role::Assistant, TextBlock::pending(WELCOME_MESSAGE));
         }
         self.status = ConnectionStatus::Connected;
 
         self.draw()?;
+
+        // Initial render - populate hot zone from transcript
+        let size = self.terminal.size()?;
+        self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+        self.draw()?;
+        
         loop {
             if let Some(request) = self.message_queue.pop_front() {
                 self.process_message(&mut agent, request).await?;
@@ -334,13 +337,9 @@ impl App {
                         }
                         true
                     }
-                    Event::Mouse(mouse) => {
-                        if let Some(action) = map_mouse(mouse) {
-                            self.handle_action(action);
-                        }
+                    Event::Resize(_width, height) => {
                         true
                     }
-                    Event::Resize(_, _) => true,
                     _ => false,
                 };
 
@@ -357,27 +356,26 @@ impl App {
         self.cleanup()
     }
 
-    /// Draw the UI with synchronized updates to prevent tearing
+    /// Draw the UI
     fn draw(&mut self) -> Result<()> {
         use ratatui::style::{Color, Style};
         use ratatui::widgets::Paragraph;
         
         self.last_render = Instant::now();
 
-        let chat_widget = self.chat.widget(&mut self.transcript);
+        // Calculate dimensions
+        let size = self.terminal.size()?;
+        let input_height = self.input.required_height(size.width);
+        let max_input_height = size.height / 2;
+        let input_height = input_height.min(max_input_height).max(5);
+
+        // Draw the viewport (hot zone content + input)
+        let chat_widget = self.chat.widget();
         let input_widget = self.input.widget(
             &self.config.general.model,
             self.usage.context_tokens,
         );
         let alert = self.alert.clone();
-
-        // Calculate input height based on content, with min 3 and max half screen
-        let input_height = self.input.required_height(self.terminal.size()?.width);
-        let max_input_height = self.terminal.size()?.height / 2;
-        let input_height = input_height.min(max_input_height).max(5);
-
-        // Begin synchronized update - terminal buffers all changes
-        queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
 
         self.terminal.draw(|frame| {
             let chunks = Layout::default()
@@ -399,10 +397,6 @@ impl App {
                 frame.render_widget(alert_widget, chunks[2]);
             }
         })?;
-
-        // End synchronized update - terminal renders atomically
-        queue!(self.terminal.backend_mut(), EndSynchronizedUpdate)?;
-        self.terminal.backend_mut().flush()?;
 
         Ok(())
     }
@@ -445,28 +439,16 @@ impl App {
             }
             Action::ClearInput => self.input.clear(),
             Action::HistoryPrev => {
-                if self.input.content().is_empty() {
-                    self.input.history_prev();
-                } else {
-                    self.chat.scroll_up();
-                }
+                self.input.history_prev();
             }
             Action::HistoryNext => {
-                if self.input.content().is_empty() {
-                    self.input.history_next();
-                } else {
-                    self.chat.scroll_down();
-                }
+                self.input.history_next();
             }
-            Action::ScrollUp => self.chat.scroll_up(),
-            Action::ScrollDown => self.chat.scroll_down(),
-            Action::PageUp => self.chat.page_up(10),
-            Action::PageDown => self.chat.page_down(10),
             Action::TabComplete => {
                 if let Some(completed) = Command::complete(self.input.content()) {
                     self.input.set_content(&completed);
                 }
-    }
+            }
             // These are handled in specific contexts or already matched above
             Action::ApproveTool | Action::DenyTool | Action::ApproveToolSession => {}
         }
@@ -496,7 +478,7 @@ impl App {
                     // TODO: implement allow for session
                     return Ok(ToolDecision::Approve);
                 }
-    Some(Action::Quit) => {
+                Some(Action::Quit) => {
                     self.should_quit = true;
                     return Ok(ToolDecision::Deny);
                 }
@@ -506,7 +488,6 @@ impl App {
     }
 
     /// Poll for events without blocking.
-    /// Returns (interrupted, needs_redraw)
     fn poll_events(&mut self, mode: InputMode) -> PollResult {
         if !event::poll(Duration::from_millis(0)).unwrap_or(false) {
             return PollResult::NoEvent;
@@ -517,11 +498,9 @@ impl App {
                 Some(action) => self.handle_action(action),
                 None => PollResult::NoEvent,
             }
-            Ok(Event::Mouse(mouse)) => match map_mouse(mouse) {
-                Some(action) => self.handle_action(action),
-                None => PollResult::NoEvent,
+            Ok(Event::Resize(_, height)) => {
+                PollResult::Handled
             }
-            Ok(Event::Resize(_, _)) => PollResult::Handled,
             _ => PollResult::NoEvent,
         }
     }
@@ -545,13 +524,11 @@ impl App {
             },
         };
         self.message_queue.push_back(message);
-        self.chat.enable_auto_scroll();
     }
 
     pub fn queue_compaction(&mut self) {
         // TODO push_front?
         self.message_queue.push_back(MessageRequest::Compaction);
-        self.chat.enable_auto_scroll();
     }
 
     /// Process a message request (user message or compaction)
@@ -577,8 +554,7 @@ impl App {
                             
                             let idx = self.transcript.add_empty(Role::Assistant);
                             if let Some(turn) = self.transcript.get_mut(idx) {
-                                let block_id = turn.start_block(Box::new(TextBlock::new(&output)));
-                                turn.complete_block(block_id);
+                                turn.start_block(Box::new(TextBlock::complete(&output)));
                             }
                             self.draw()?;
                         }
@@ -593,6 +569,11 @@ impl App {
                 self.transcript.get_mut(turn_id)
                     .and_then(|turn| turn.content.first_mut())
                     .map(|block| block.set_status(Status::Complete));
+
+                // Show user message immediately
+                let size = self.terminal.size()?;
+                self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+                self.draw()?;
 
                 self.stream_response(agent, &content, RequestMode::Normal).await?;
 
@@ -653,6 +634,8 @@ impl App {
                     let post_actions = tool.post_actions(&params);
 
                     self.transcript.start_block(tool.create_block(&call_id, params.clone()));
+                    let size = self.terminal.size()?;
+                    self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
                     self.draw()?;
 
                     // Show preview in IDE if the tool provides one
@@ -681,6 +664,8 @@ impl App {
                         ToolDecision::Approve => Status::Running,
                         ToolDecision::Deny => Status::Denied,
                     });
+                    // let size = self.terminal.size()?;
+                    self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
                     self.draw()?;
 
                     let tool_result = stream.decide_tool(decision).await;
@@ -689,6 +674,8 @@ impl App {
                         if let Some(block) = self.transcript.active_block_mut() {
                             block.append_text(&result);
                         }
+                        self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+                        self.draw()?;
 
                         // Execute post-actions from the tool (e.g., reload buffer)
                         if !is_error {
@@ -745,11 +732,14 @@ impl App {
                 }
             }
             
+            // Update hot zone with new content and commit overflow to scrollback
+            let size = self.terminal.size()?;
+            self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+            
             // Throttled draw at end of loop to show streaming updates
             self.draw_throttled()?;
         }
 
-        self.chat.enable_auto_scroll();
         self.draw()?;
 
         // Finish the turn (marks block complete, clears current turn)
@@ -767,8 +757,6 @@ impl App {
         disable_raw_mode().context("Failed to disable raw mode")?;
         execute!(
             self.terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture,
             crossterm::event::PopKeyboardEnhancementFlags
         )
         .context("Failed to cleanup terminal")?;
