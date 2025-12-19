@@ -591,3 +591,94 @@ Currently, turns have visual separators and headers. These need to be included w
 - [GitHub Issue #2077 - Scrolling regions feature flag](https://github.com/ratatui/ratatui/issues/2077)
 - [Backend Comparison](https://ratatui.rs/concepts/backends/comparison/)
 - [BeginSynchronizedUpdate docs](https://docs.rs/crossterm/latest/crossterm/terminal/struct.BeginSynchronizedUpdate.html)
+
+## Deep Dive: `insert_before` Constraints
+
+### The Fundamental Problem
+
+When using `Viewport::Inline(term_height)` (viewport = full screen), `insert_before` has a critical limitation:
+
+**Terminal scroll captures the entire visible screen, not specific lines.**
+
+The `insert_before` implementation calls `scroll_up()` which:
+1. Positions cursor at bottom of screen
+2. Outputs newlines via `backend.append_lines(n)`
+3. Terminal emulator scrolls everything up
+4. Whatever was visible (including input widget) goes into scrollback
+
+This means if you call `insert_before` while your viewport has rendered content (hot zone + input), the ENTIRE frame gets pushed to scrollback - not just the overflow lines you're trying to commit.
+
+### Why the Diagrams Are Misleading
+
+The ratatui docs show:
+```
++---------------------+
+| pre-existing line 1 |  ← Content ABOVE viewport
+| pre-existing line 2 |
++---------------------+
+|       viewport      |  ← Our render area
++---------------------+
+|                     |  ← Empty space below
++---------------------+
+```
+
+This model assumes the viewport is SMALLER than the screen, with room above for "pre-existing" content. But with `Viewport::Inline(term_height)`, the viewport IS the full screen - there's no space above, so everything goes straight to scrollback.
+
+### The `scrolling-regions` Solution
+
+The `scrolling-regions` feature (behind a feature flag) provides a smarter implementation for full-screen viewports:
+
+```rust
+// From lib/ratatui-core/src/terminal/terminal.rs
+#[cfg(feature = "scrolling-regions")]
+fn insert_before_scrolling_regions(...) {
+    // Handle the special case where the viewport takes up the whole screen.
+    if self.viewport_area.height == self.last_known_area.height {
+        // "Borrow" the top line of the viewport. Draw over it, then immediately
+        // scroll it into scrollback. Do this repeatedly until the whole buffer
+        // has been put into scrollback.
+        while !buffer.is_empty() {
+            self.draw_lines(0, 1, buffer)?;           // Draw 1 line at row 0
+            self.backend.scroll_region_up(0..1, 1)?;  // Scroll JUST row 0
+        }
+        // Redraw the top line of the viewport.
+        self.draw_lines_over_cleared(0, 1, &top_line)?;
+        return Ok(());
+    }
+    // ... handle other cases
+}
+```
+
+This uses ANSI scrolling regions (`CSI Pt;Pb r` to set region, `CSI n S` to scroll) to scroll only specific rows, avoiding the whole-screen capture problem.
+
+### Implementation Status
+
+To enable `scrolling-regions`:
+
+1. **Add feature to Cargo.toml:**
+   ```toml
+   ratatui-core = { version = "0.1.0-beta.0", features = ["scrolling-regions"] }
+   ```
+
+2. **Implement backend methods** (not yet in ratatui-crossterm):
+   ```rust
+   // Required trait methods:
+   fn scroll_region_up(&mut self, region: Range<u16>, line_count: u16) -> Result<()>;
+   fn scroll_region_down(&mut self, region: Range<u16>, line_count: u16) -> Result<()>;
+   ```
+
+3. **ANSI escape sequences needed:**
+   - `CSI Pt ; Pb r` - Set scrolling region (DECSTBM)
+   - `CSI n S` - Scroll up n lines within region
+   - `CSI n T` - Scroll down n lines within region
+   - `CSI r` - Reset scrolling region to full screen
+
+### Current Workaround
+
+Without `scrolling-regions`, the workaround is to only call `insert_before` at "stable" points when we're about to redraw anyway:
+
+1. **After streaming completes** (turn is finished)
+2. **After session restore** (before main loop)
+3. **Never during streaming** (let hot zone grow temporarily)
+
+This prevents the input widget from being captured in scrollback, at the cost of potentially having more lines in the hot zone during streaming than `max_lines` allows.
