@@ -218,6 +218,7 @@ impl App {
         execute!(
             stdout,
             crossterm::terminal::SetTitle(format!("{} v{}", APP_NAME, APP_VERSION)),
+            crossterm::event::EnableBracketedPaste,
             crossterm::event::PushKeyboardEnhancementFlags(
                 crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
                     | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
@@ -337,6 +338,18 @@ impl App {
                         }
                         true
                     }
+                    Event::Paste(content) => {
+                        // Large pastes become attachments, small ones inline
+                        if content.len() > 200 {
+                            let label = format!("pasted ({} chars)", content.len());
+                            self.input.add_attachment(label, content);
+                        } else {
+                            for c in content.chars() {
+                                self.input.insert_char(c);
+                            }
+                        }
+                        true
+                    }
                     Event::Resize(_width, height) => {
                         true
                     }
@@ -445,10 +458,10 @@ impl App {
                 self.input.history_next();
             }
             Action::TabComplete => {
-                if let Some(completed) = Command::complete(self.input.content()) {
+                if let Some(completed) = Command::complete(&self.input.content()) {
                     self.input.set_content(&completed);
                 }
-    }
+            }
             // These are handled in specific contexts or already matched above
             Action::ApproveTool | Action::DenyTool | Action::ApproveToolSession => {}
         }
@@ -757,6 +770,7 @@ impl App {
         disable_raw_mode().context("Failed to disable raw mode")?;
         execute!(
             self.terminal.backend_mut(),
+            crossterm::event::DisableBracketedPaste,
             crossterm::event::PopKeyboardEnhancementFlags
         )
         .context("Failed to cleanup terminal")?;
