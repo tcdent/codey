@@ -14,36 +14,6 @@ use std::path::{Path, PathBuf};
 use crate::app::{CODEY_DIR, TRANSCRIPTS_DIR};
 use crate::compaction::CompactionBlock;
 
-/// Get the transcripts directory path, creating it if necessary
-fn get_transcripts_dir() -> std::io::Result<PathBuf> {
-    let dir = PathBuf::from(CODEY_DIR).join(TRANSCRIPTS_DIR);
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir)?;
-    }
-    Ok(dir)
-}
-
-/// Find the latest transcript number by scanning the transcripts directory
-fn find_latest_transcript_number(dir: &Path) -> Option<u32> {
-    std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            if name.ends_with(".json") {
-                name.trim_end_matches(".json").parse::<u32>().ok()
-            } else {
-                None
-            }
-        })
-        .max()
-}
-
-/// Get the path for a transcript with a given number
-fn transcript_path(dir: &Path, number: u32) -> PathBuf {
-    dir.join(format!("{:06}.json", number))
-}
 
 /// Role of the message sender
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,31 +45,37 @@ pub enum BlockType {
     Compaction,
 }
 
-/// Macro to implement common Block trait methods for blocks with text and status fields
-#[macro_export]
-macro_rules! impl_base_block {
-    ($block_type:expr) => {
-        fn kind(&self) -> BlockType {
-            $block_type
-        }
-
-        fn status(&self) -> Status {
-            self.status
-        }
-
-        fn set_status(&mut self, status: Status) {
-            self.status = status;
-        }
-
-        fn append_text(&mut self, text: &str) {
-            self.text.push_str(text);
-        }
-
-        fn text(&self) -> Option<&str> {
-            Some(&self.text)
-        }
-    };
+/// Get the transcripts directory path, creating it if necessary
+fn get_transcripts_dir() -> std::io::Result<PathBuf> {
+    let dir = PathBuf::from(CODEY_DIR).join(TRANSCRIPTS_DIR);
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)?;
+    }
+    Ok(dir)
 }
+
+/// Find the latest transcript number by scanning the transcripts directory
+fn find_latest_transcript_number(dir: &Path) -> Option<u32> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if name.ends_with(".json") {
+                name.trim_end_matches(".json").parse::<u32>().ok()
+            } else {
+                None
+            }
+        })
+        .max()
+}
+
+/// Get the path for a transcript with a given number
+fn transcript_path(dir: &Path, number: u32) -> PathBuf {
+    dir.join(format!("{:06}.json", number))
+}
+
 
 /// Trait for all blocks in a turn
 #[typetag::serde(tag = "type")]
@@ -143,7 +119,32 @@ pub trait Block: Send + Sync {
 
     /// Get the tool params (for restoring agent context)
     fn params(&self) -> Option<&serde_json::Value> { None }
+}
 
+/// Macro to implement common Block trait methods for blocks with text and status fields
+#[macro_export]
+macro_rules! impl_base_block {
+    ($block_type:expr) => {
+        fn kind(&self) -> BlockType {
+            $block_type
+        }
+
+        fn status(&self) -> Status {
+            self.status
+        }
+
+        fn set_status(&mut self, status: Status) {
+            self.status = status;
+        }
+
+        fn append_text(&mut self, text: &str) {
+            self.text.push_str(text);
+        }
+
+        fn text(&self) -> Option<&str> {
+            Some(&self.text)
+        }
+    };
 }
 
 /// Simple text content
@@ -154,6 +155,7 @@ pub struct TextBlock {
 }
 
 impl TextBlock {
+    // TODO Delete `new` and force using a keyword to create
     pub fn new(text: impl Into<String>) -> Self {
         Self { 
             text: text.into(),
@@ -165,6 +167,13 @@ impl TextBlock {
         Self {
             text: text.into(),
             status: Status::Pending,
+        }
+    }
+
+    pub fn complete(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            status: Status::Complete,
         }
     }
 }
@@ -202,17 +211,14 @@ impl Block for ThinkingBlock {
     impl_base_block!(BlockType::Thinking);
 
     fn render(&self, width: u16) -> Vec<Line<'_>> {
-        use ratatui::style::{Color, Style};
+        let mut lines = Vec::new();
+        let style = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC);
 
-        // Render thinking with dimmed style
-        let skin = ratskin::RatSkin::default();
-        let text = ratskin::RatSkin::parse_text(&self.text);
-        let mut lines = skin.parse(text, width);
-
-        // Apply dim styling to all lines
-        let dim_style = Style::default().fg(Color::DarkGray);
-        for line in &mut lines {
-            *line = line.clone().patch_style(dim_style);
+        let wrapped = textwrap::wrap(&self.text, width as usize);
+        for line in wrapped {
+            lines.push(Line::from(Span::styled(line, style)));
         }
         lines
     }
@@ -457,12 +463,6 @@ pub struct Transcript {
     /// ID of the current turn being streamed to (if any)
     #[serde(skip)]
     current_turn_id: Option<usize>,
-}
-
-impl Default for Transcript {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl Transcript {

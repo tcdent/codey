@@ -1,81 +1,145 @@
-//! Chat view component
+//! Chat view component with native terminal scrollback
+//!
+//! Uses a "hot zone" approach: recent content is rendered in the viewport,
+//! and as it overflows, lines are committed to the terminal's native
+//! scrollback buffer via `insert_before()`. This provides O(active turns)
+//! rendering instead of O(entire conversation).
 
-use crate::transcript::{Role, Transcript, Turn};
+// Scrollback
+// this is content which has passed above the hot zone
+
+// Hot Zone
+// this is content currently rendered in the Viewport
+
+// Frozen Turns
+// one that has already passed into scrollback
+
+use std::collections::{HashSet, HashMap, VecDeque};
+use std::io::Stdout;
+
 use ratatui::{
+    backend::CrosstermBackend,
     buffer::Buffer,
-    layout::{Rect, Size},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Padding, Paragraph, StatefulWidget, Widget},
+    widgets::{Block, Padding, Paragraph, Widget},
+    Terminal,
 };
-use tui_scrollview::{ScrollView, ScrollViewState};
 
-/// Chat view state - renders from a Transcript
-#[derive(Debug, Default)]
+use crate::transcript::{Role, Transcript, Turn};
+
+/// Chat view with native scrollback support.
+#[derive(Debug)]
 pub struct ChatView {
-    /// Scroll state managed by tui-scrollview
-    pub scroll_state: ScrollViewState,
-    /// Track if we should auto-scroll to bottom
-    auto_scroll: bool,
+    /// Lines currently in the hot zone (re-renderable)
+    lines: VecDeque<Line<'static>>,
+    /// Maximum lines before overflow commits to scrollback
+    max_lines: usize,
+    /// Lines committed from active turns (not frozen ones)
+    committed_count: usize,
+    /// Turn IDs fully committed to scrollback - never re-render these
+    frozen_turn_ids: HashSet<usize>,
+    /// Mapping of turn ID to line count (for frozen turns)
+    turn_line_counts: HashMap<usize, usize>,
+
+    /// Width used for last render (to detect resize)
+    width: u16,
 }
 
 impl ChatView {
-    pub fn new() -> Self {
+    pub fn new(max_lines: usize) -> Self {
         Self {
-            scroll_state: ScrollViewState::new(),
-            auto_scroll: true,
+            lines: VecDeque::with_capacity(10000),  // TODO do we need to pre-size this?
+            max_lines,
+            committed_count: 0,
+            frozen_turn_ids: HashSet::new(),
+            turn_line_counts: HashMap::new(),
+            width: 0,
         }
     }
 
-    /// Scroll up by one line
-    pub fn scroll_up(&mut self) {
-        self.auto_scroll = false;
-        self.scroll_state.scroll_up();
-    }
+    /// Render active (non-frozen) turns into the hot zone.
+    /// Overflow lines are committed to native scrollback via `insert_before()`.
+    pub fn render_to_scrollback(
+        &mut self,
+        transcript: &Transcript,
+        width: u16,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> anyhow::Result<()> {
+        // Check for width change - if so, we need to re-render everything
+        // TODO disabling width change for now since it's not essential
+        // // but we can't fix already-committed content
+        // if width != self.last_width && self.last_width != 0 {
+        //     // Width changed - reset committed count since line counts may differ
+        //     // Note: already-committed content in scrollback may have wrong width
+        //     self.committed_count = 0;
+        //     self.frozen_turn_ids.clear();
+        // }
+        self.width = width;
 
-    /// Scroll down by one line
-    pub fn scroll_down(&mut self) {
-        self.scroll_state.scroll_down();
-    }
-
-    /// Scroll up by a page
-    pub fn page_up(&mut self, page_size: usize) {
-        self.auto_scroll = false;
-        for _ in 0..page_size {
-            self.scroll_state.scroll_up();
+        // Render non-frozen turns to lines
+        let mut active_lines: Vec<Line<'static>> = Vec::new();
+        for turn in transcript.turns() {
+            if self.frozen_turn_ids.contains(&turn.id) {
+                continue;
+            }
+            let render = Self::render_turn_to_lines(turn, self.width);
+            self.turn_line_counts.insert(turn.id, render.len());
+            active_lines.extend(render);
         }
-    }
 
-    /// Scroll down by a page
-    pub fn page_down(&mut self, page_size: usize) {
-        for _ in 0..page_size {
-            self.scroll_state.scroll_down();
+        // Skip lines already committed to scrollback
+        let hot_lines: Vec<_> = active_lines
+            .into_iter()
+            .skip(self.committed_count)
+            .collect();
+
+        self.lines.clear();
+
+        for line in hot_lines {
+            self.lines.push_back(line);
+
+            // Overflow promotes to scrollback
+            while self.lines.len() > self.max_lines {
+                let committed = self.lines.pop_front().unwrap();
+
+                terminal.insert_before(1, |buf| {
+                    Paragraph::new(committed).render(buf.area, buf);
+                })?;
+                self.committed_count += 1;
+            }
         }
-    }
 
-    /// Enable auto-scroll
-    pub fn enable_auto_scroll(&mut self) {
-        self.auto_scroll = true;
-    }
+        // Check if any turns should be frozen
+        let mut cumulative_lines = 0usize;
 
-    /// Create a widget that renders the given transcript
-    pub fn widget<'a>(&'a mut self, transcript: &'a Transcript) -> ChatViewWidget<'a> {
-        ChatViewWidget {
-            view: self,
-            transcript,
+        for turn in transcript.turns() {
+            if self.frozen_turn_ids.contains(&turn.id) {
+                continue;
+            }
+            let turn_line_count = self.turn_line_counts.get(&turn.id).unwrap_or(&0);
+            cumulative_lines += *turn_line_count;
+
+            if cumulative_lines <= self.committed_count {
+                // This turn is fully committed to scrollback
+                self.frozen_turn_ids.insert(turn.id);
+                // Subtract this turn's lines from committed_count since
+                // frozen turns are filtered out of active_lines
+                self.committed_count -= *turn_line_count;
+            } else {
+                // Once we hit a turn that's not fully committed, stop
+                break;
+            }
         }
+
+        Ok(())
     }
-}
 
-/// Chat view widget for rendering
-pub struct ChatViewWidget<'a> {
-    view: &'a mut ChatView,
-    transcript: &'a Transcript,
-}
+    /// Render a turn to lines (header + content + separator)
+    fn render_turn_to_lines(turn: &Turn, width: u16) -> Vec<Line<'static>> {
+        let mut lines = Vec::new();
 
-impl ChatViewWidget<'_> {
-    /// Returns (header_lines, content_lines) for a turn
-    fn render_turn(turn: &Turn, width: u16) -> (Vec<Line<'_>>, Vec<Line<'_>>) {
         // Role header
         let (role_text, role_style) = match turn.role {
             Role::User => (
@@ -98,19 +162,40 @@ impl ChatViewWidget<'_> {
             ),
         };
 
-        let header = vec![
+        let header = Line::from(vec![
             Span::styled(role_text, role_style),
             Span::styled(
                 format!(" ({})", turn.timestamp.format("%H:%M:%S")),
                 Style::default().fg(Color::DarkGray),
             ),
-        ];
-        
-        let header_lines = vec![Line::from(header)];
-        let content_lines = turn.render(width);
-        
-        (header_lines, content_lines)
+        ]);
+        lines.push(header);
+
+        // Content lines - convert to owned by mapping spans
+        for line in turn.render(width) {
+            let owned_spans: Vec<Span<'static>> = line
+                .spans
+                .iter()
+                .map(|span| Span::styled(span.content.to_string(), span.style))
+                .collect();
+            lines.push(Line::from(owned_spans));
+        }
+
+        // Separator (empty line)
+        lines.push(Line::default());
+
+        lines
     }
+
+    /// Create a widget for rendering the hot zone content
+    pub fn widget(&self) -> ChatViewWidget<'_> {
+        ChatViewWidget { view: self }
+    }
+}
+
+/// Widget for rendering the hot zone content in the viewport
+pub struct ChatViewWidget<'a> {
+    view: &'a ChatView,
 }
 
 impl Widget for ChatViewWidget<'_> {
@@ -119,82 +204,12 @@ impl Widget for ChatViewWidget<'_> {
             return;
         }
 
-        let inner = area;
-        // Subtract scrollbar width
-        let content_width = inner.width.saturating_sub(2);
+        // Bottom-aligned: only clone visible lines
+        let skip = self.view.lines.len().saturating_sub(area.height as usize);
+        let visible: Vec<Line> = self.view.lines.iter().skip(skip).cloned().collect();
 
-        // First pass: calculate total height and collect rendered turns
-        let mut total_height: u16 = 0;
-        let mut rendered_turns: Vec<(Vec<Line>, Vec<Line>)> = Vec::new();
-        
-        for turn in self.transcript.turns() {
-            let (header, content) = Self::render_turn(turn, content_width.saturating_sub(2));
-            // header + content block + separator
-            let turn_height = header.len() as u16 + content.len() as u16 + 1;
-            total_height += turn_height;
-            rendered_turns.push((header, content));
-        }
-
-        let content_height = total_height.max(1);
-
-        // If auto-scroll is enabled, calculate offset to show bottom
-        if self.view.auto_scroll {
-            let max_offset = content_height.saturating_sub(inner.height);
-            self.view.scroll_state.set_offset(ratatui::layout::Position::new(0, max_offset));
-        }
-
-        // Create scroll view
-        let mut scroll_view = ScrollView::new(Size::new(content_width, content_height))
-            .vertical_scrollbar_visibility(tui_scrollview::ScrollbarVisibility::Always)
-            .horizontal_scrollbar_visibility(tui_scrollview::ScrollbarVisibility::Never);
-
-        // Second pass: render each turn at its position
-        let mut y_offset: u16 = 0;
-        for (header, content) in rendered_turns {
-            // Render header
-            let header_paragraph = Paragraph::new(header);
-            scroll_view.render_widget(
-                header_paragraph,
-                Rect::new(0, y_offset, content_width, 1),
-            );
-            y_offset += 1;
-
-            // Render content in a styled block
-            let content_height = content.len() as u16;
-            if content_height > 0 {
-                let content_block = Block::default()
-                    .style(Style::default().bg(Color::Indexed(234)))
-                    .padding(Padding::left(1));
-                let content_paragraph = Paragraph::new(content).block(content_block);
-                scroll_view.render_widget(
-                    content_paragraph,
-                    Rect::new(0, y_offset, content_width, content_height),
-                );
-                y_offset += content_height;
-            }
-
-            // Separator
-            y_offset += 1;
-        }
-
-        // Render the scroll view
-        scroll_view.render(inner, buf, &mut self.view.scroll_state);
+        Paragraph::new(visible).render(area, buf);
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn test_chat_view_scroll() {
-        let mut chat = ChatView::new();
-        assert!(chat.auto_scroll);
-
-        chat.scroll_up();
-        assert!(!chat.auto_scroll);
-
-        chat.enable_auto_scroll();
-        assert!(chat.auto_scroll);
-    }
-}
