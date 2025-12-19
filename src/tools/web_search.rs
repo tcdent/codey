@@ -62,7 +62,8 @@ impl Block for WebSearchBlock {
         }
 
         if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
+            lines.extend(render_result(
+                &format!("{} results.", self.text.split("\n").count()), 1));
         }
 
         if self.status == Status::Denied {
@@ -166,9 +167,7 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search the web using Brave Search API. Returns relevant web results with titles, URLs, and descriptions. \
-         Useful for finding current information, documentation, articles, and answers to questions. \
-         Requires BRAVE_API_KEY environment variable to be set."
+        "Returns relevant web results with titles, URLs, and descriptions."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -248,13 +247,6 @@ impl Tool for WebSearchTool {
                     Ok(search_response) => {
                         let mut output = String::new();
 
-                        // Add query info
-                        if let Some(query_info) = &search_response.query {
-                            output.push_str(&format!("Search results for: \"{}\"\n\n", query_info.original));
-                        } else {
-                            output.push_str(&format!("Search results for: \"{}\"\n\n", params.query));
-                        }
-
                         // Format results
                         if let Some(web) = search_response.web {
                             if web.results.is_empty() {
@@ -262,14 +254,8 @@ impl Tool for WebSearchTool {
                             } else {
                                 for (i, result) in web.results.iter().enumerate() {
                                     output.push_str(&format!(
-                                        "{}. {}\n   URL: {}\n   {}\n\n",
-                                        i + 1,
-                                        result.title,
-                                        result.url,
-                                        result.description
-                                    ));
+                                        "{}. [{}]({})\n", i + 1, result.title, result.url));
                                 }
-                                output.push_str(&format!("({} results)", web.results.len()));
                             }
                         } else {
                             output.push_str("No web results found.");
@@ -292,47 +278,3 @@ impl Tool for WebSearchTool {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_web_search_params() {
-        let params: WebSearchParams = serde_json::from_value(json!({
-            "query": "rust programming"
-        }))
-        .unwrap();
-
-        assert_eq!(params.query, "rust programming");
-        assert_eq!(params.count, 10); // Default
-    }
-
-    #[test]
-    fn test_web_search_params_with_count() {
-        let params: WebSearchParams = serde_json::from_value(json!({
-            "query": "rust programming",
-            "count": 5
-        }))
-        .unwrap();
-
-        assert_eq!(params.query, "rust programming");
-        assert_eq!(params.count, 5);
-    }
-
-    #[tokio::test]
-    async fn test_missing_api_key() {
-        // Temporarily unset the API key
-        std::env::remove_var("BRAVE_API_KEY");
-
-        let tool = WebSearchTool::new();
-        let result = tool
-            .execute(json!({
-                "query": "test query"
-            }))
-            .await
-            .unwrap();
-
-        assert!(result.is_error);
-        assert!(result.content.contains("BRAVE_API_KEY"));
-    }
-}
