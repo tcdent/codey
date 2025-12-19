@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
     // Set up file-based logging
     let log_file = std::fs::File::create("/tmp/codey.log")?;
     tracing_subscriber::registry()
-        .with(EnvFilter::new("debug"))
+        .with(EnvFilter::new("debug,nvim_rs=off"))
         .with(fmt::layer().with_writer(log_file).with_ansi(false))
         .init();
 
