@@ -1,22 +1,15 @@
-mod edit_file;
-mod fetch_url;
-mod read_file;
-mod shell;
-mod web_search;
-mod write_file;
+mod exec;
+mod impls;
 
-pub use edit_file::EditFileTool;
-pub use fetch_url::FetchUrlTool;
-pub use read_file::ReadFileTool;
-pub use shell::ShellTool;
-pub use web_search::WebSearchTool;
-pub use write_file::WriteFileTool;
+pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
+pub use impls::{EditFileTool, FetchUrlTool, ReadFileTool, ShellTool, WebSearchTool, WriteFileTool};
 
 use crate::ide::{IdeAction, ToolPreview};
 use crate::transcript::Block;
 use anyhow::Result;
-use async_trait::async_trait;
+use futures::stream::{BoxStream, StreamExt};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Result of a tool execution
 #[derive(Debug, Clone)]
@@ -41,8 +34,16 @@ impl ToolResult {
     }
 }
 
+/// Output from a streaming tool execution
+#[derive(Debug)]
+pub enum ToolOutput {
+    /// Partial output (streamed)
+    Delta(String),
+    /// Execution complete
+    Done(ToolResult),
+}
+
 /// Trait for tool implementations
-#[async_trait]
 pub trait Tool: Send + Sync {
     /// Get the tool name
     fn name(&self) -> &'static str;
@@ -53,8 +54,11 @@ pub trait Tool: Send + Sync {
     /// Get the JSON schema for the tool's parameters
     fn schema(&self) -> serde_json::Value;
 
-    /// Execute the tool with the given parameters
-    async fn execute(&self, params: serde_json::Value) -> Result<ToolResult>;
+    /// Execute the tool, returning a stream of output
+    /// 
+    /// The stream yields `Delta` for partial output and ends with `Done`.
+    /// For non-streaming tools, just yield a single `Done`.
+    fn execute(&self, params: serde_json::Value) -> BoxStream<'static, ToolOutput>;
 
     /// Create a block for displaying this tool call in the TUI
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block>;
@@ -76,9 +80,18 @@ pub trait Tool: Send + Sync {
     }
 }
 
+/// Helper to create a single-item stream for non-streaming tools
+pub fn once_ready(result: Result<ToolResult>) -> BoxStream<'static, ToolOutput> {
+    let output = match result {
+        Ok(r) => ToolOutput::Done(r),
+        Err(e) => ToolOutput::Done(ToolResult::error(e.to_string())),
+    };
+    Box::pin(futures::stream::once(async move { output }))
+}
+
 /// Registry of available tools
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: HashMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -88,18 +101,18 @@ impl ToolRegistry {
             tools: HashMap::new(),
         };
 
-        registry.register(Box::new(ReadFileTool));
-        registry.register(Box::new(WriteFileTool));
-        registry.register(Box::new(EditFileTool));
-        registry.register(Box::new(ShellTool::new()));
-        registry.register(Box::new(FetchUrlTool::new()));
-        registry.register(Box::new(WebSearchTool::new()));
+        registry.register(Arc::new(ReadFileTool));
+        registry.register(Arc::new(WriteFileTool));
+        registry.register(Arc::new(EditFileTool));
+        registry.register(Arc::new(ShellTool::new()));
+        registry.register(Arc::new(FetchUrlTool::new()));
+        registry.register(Arc::new(WebSearchTool::new()));
 
         registry
     }
 
     /// Register a tool
-    pub fn register(&mut self, tool: Box<dyn Tool>) {
+    pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
@@ -108,6 +121,14 @@ impl ToolRegistry {
         self.tools
             .get(name)
             .map(|t| t.as_ref())
+            .expect("unknown tool")
+    }
+
+    /// Get a cloneable Arc to a tool by name (for spawning tasks)
+    pub fn get_arc(&self, name: &str) -> Arc<dyn Tool> {
+        self.tools
+            .get(name)
+            .cloned()
             .expect("unknown tool")
     }
 

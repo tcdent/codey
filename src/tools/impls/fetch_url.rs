@@ -1,10 +1,10 @@
 //! URL fetching tool
 
-use super::{Tool, ToolResult};
+use super::{Tool, ToolOutput, ToolResult};
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
-use anyhow::Result;
-use async_trait::async_trait;
+use async_stream::stream;
+use futures::stream::BoxStream;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -121,7 +121,6 @@ struct FetchUrlParams {
     max_length: Option<usize>,
 }
 
-#[async_trait]
 impl Tool for FetchUrlTool {
     fn name(&self) -> &'static str {
         "fetch_url"
@@ -158,101 +157,129 @@ impl Tool for FetchUrlTool {
         }
     }
 
-    async fn execute(&self, params: serde_json::Value) -> Result<ToolResult> {
-        let params: FetchUrlParams = serde_json::from_value(params)?;
-        let max_length = params.max_length.unwrap_or(50000);
+    fn execute(&self, params: serde_json::Value) -> BoxStream<'static, ToolOutput> {
+        let client = self.client.clone();
+        let timeout_secs = self.timeout_secs;
 
-        // Validate URL
-        let url = match url::Url::parse(&params.url) {
-            Ok(u) => u,
-            Err(e) => {
-                return Ok(ToolResult::error(format!("Invalid URL: {}", e)));
+        Box::pin(stream! {
+            let params: FetchUrlParams = match serde_json::from_value(params) {
+                Ok(p) => p,
+                Err(e) => {
+                    yield ToolOutput::Done(ToolResult::error(format!("Invalid params: {}", e)));
+                    return;
+                }
+            };
+            let max_length = params.max_length.unwrap_or(50000);
+
+            // Validate URL
+            let url = match url::Url::parse(&params.url) {
+                Ok(u) => u,
+                Err(e) => {
+                    yield ToolOutput::Done(ToolResult::error(format!("Invalid URL: {}", e)));
+                    return;
+                }
+            };
+
+            // Only allow http/https
+            if url.scheme() != "http" && url.scheme() != "https" {
+                yield ToolOutput::Done(ToolResult::error(format!(
+                    "Unsupported URL scheme: {}. Only http and https are allowed.",
+                    url.scheme()
+                )));
+                return;
             }
-        };
 
-        // Only allow http/https
-        if url.scheme() != "http" && url.scheme() != "https" {
-            return Ok(ToolResult::error(format!(
-                "Unsupported URL scheme: {}. Only http and https are allowed.",
-                url.scheme()
-            )));
-        }
+            // Fetch with timeout
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs),
+                client.get(url.as_str()).send(),
+            )
+            .await;
 
-        // Fetch with timeout
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(self.timeout_secs),
-            self.client.get(url.as_str()).send(),
-        )
-        .await;
+            match result {
+                Ok(Ok(response)) => {
+                    let status = response.status();
+                    let content_type = response
+                        .headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("unknown")
+                        .to_string();
 
-        match result {
-            Ok(Ok(response)) => {
-                let status = response.status();
-                let content_type = response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("unknown")
-                    .to_string();
+                    if !status.is_success() {
+                        yield ToolOutput::Done(ToolResult::error(format!(
+                            "HTTP error: {} {}",
+                            status.as_u16(),
+                            status.canonical_reason().unwrap_or("Unknown")
+                        )));
+                        return;
+                    }
 
-                if !status.is_success() {
-                    return Ok(ToolResult::error(format!(
-                        "HTTP error: {} {}",
-                        status.as_u16(),
-                        status.canonical_reason().unwrap_or("Unknown")
+                    // Get response body
+                    match response.text().await {
+                        Ok(mut text) => {
+                            let original_len = text.len();
+
+                            // Truncate if needed
+                            if text.len() > max_length {
+                                text = text[..max_length].to_string();
+                                text.push_str(&format!(
+                                    "\n\n[... truncated, {} of {} bytes shown]",
+                                    max_length, original_len
+                                ));
+                            }
+
+                            // Add metadata header
+                            let header = format!(
+                                "[URL: {}]\n[Content-Type: {}]\n[Size: {} bytes]\n\n",
+                                params.url, content_type, original_len
+                            );
+
+                            yield ToolOutput::Done(ToolResult::success(header + &text));
+                        }
+                        Err(e) => {
+                            yield ToolOutput::Done(ToolResult::error(format!(
+                                "Failed to read response body: {}",
+                                e
+                            )));
+                        }
+                    }
+                }
+                Ok(Err(e)) => {
+                    yield ToolOutput::Done(ToolResult::error(format!("Request failed: {}", e)));
+                }
+                Err(_) => {
+                    yield ToolOutput::Done(ToolResult::error(format!(
+                        "Request timed out after {} seconds",
+                        timeout_secs
                     )));
                 }
-
-                // Get response body
-                match response.text().await {
-                    Ok(mut text) => {
-                        let original_len = text.len();
-
-                        // Truncate if needed
-                        if text.len() > max_length {
-                            text = text[..max_length].to_string();
-                            text.push_str(&format!(
-                                "\n\n[... truncated, {} of {} bytes shown]",
-                                max_length, original_len
-                            ));
-                        }
-
-                        // Add metadata header
-                        let header = format!(
-                            "[URL: {}]\n[Content-Type: {}]\n[Size: {} bytes]\n\n",
-                            params.url, content_type, original_len
-                        );
-
-                        Ok(ToolResult::success(header + &text))
-                    }
-                    Err(e) => Ok(ToolResult::error(format!(
-                        "Failed to read response body: {}",
-                        e
-                    ))),
-                }
             }
-            Ok(Err(e)) => Ok(ToolResult::error(format!("Request failed: {}", e))),
-            Err(_) => Ok(ToolResult::error(format!(
-                "Request timed out after {} seconds",
-                self.timeout_secs
-            ))),
-        }
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
+
+    async fn run_tool(tool: &FetchUrlTool, params: serde_json::Value) -> ToolResult {
+        let mut stream = tool.execute(params);
+        while let Some(output) = stream.next().await {
+            if let ToolOutput::Done(r) = output {
+                return r;
+            }
+        }
+        panic!("Tool should return Done");
+    }
 
     #[tokio::test]
     async fn test_fetch_invalid_url() {
         let tool = FetchUrlTool::new();
-        let result = tool
-            .execute(json!({
-                "url": "not a valid url"
-            }))
-            .await
-            .unwrap();
+        let result = run_tool(&tool, json!({
+            "url": "not a valid url"
+        })).await;
 
         assert!(result.is_error);
         assert!(result.content.contains("Invalid URL"));
@@ -261,12 +288,9 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_unsupported_scheme() {
         let tool = FetchUrlTool::new();
-        let result = tool
-            .execute(json!({
-                "url": "ftp://example.com/file"
-            }))
-            .await
-            .unwrap();
+        let result = run_tool(&tool, json!({
+            "url": "ftp://example.com/file"
+        })).await;
 
         assert!(result.is_error);
         assert!(result.content.contains("Unsupported URL scheme"));

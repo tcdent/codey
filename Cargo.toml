@@ -10,7 +10,7 @@ repository = "https://github.com/tcdent/codey"
 [dependencies]
 # TUI
 ratatui = { version = "0.30.0-beta.0", features = ["scrolling-regions"] }
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -56,6 +56,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Async utilities
 async-trait = "0.1"
+async-stream = "0.3"
 dotenvy = "0.15.7"
 ratskin = "0.3"
 typetag = "0.2.21"

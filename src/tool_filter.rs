@@ -33,7 +33,7 @@ use fancy_regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::permission::ToolDecision;
+use crate::tools::ToolDecision;
 
 /// Filter configuration with allow and deny pattern lists
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

@@ -55,7 +55,7 @@ pub trait CommandImpl: Send + Sync {
     fn description(&self) -> &'static str;
 
     /// Execute the command, optionally returning text to display
-    fn execute(&self, app: &mut crate::app::App, agent: &mut crate::llm::Agent) -> Result<Option<String>>;
+    fn execute(&self, app: &mut crate::app::App) -> Result<Option<String>>;
 }
 
 
@@ -70,7 +70,7 @@ impl CommandImpl for Help {
         "Show available commands"
     }
 
-    fn execute(&self, _app: &mut crate::app::App, _agent: &mut crate::llm::Agent) -> Result<Option<String>> {
+    fn execute(&self, _app: &mut crate::app::App) -> Result<Option<String>> {
         let mut help_text = String::from("Available commands:");
         for cmd in ALL_COMMANDS {
             help_text.push_str(&format!("\n  /{} - {}", cmd.name(), cmd.description()));
@@ -91,7 +91,7 @@ impl CommandImpl for Compact {
         "Compact conversation history to reduce context size"
     }
 
-    fn execute(&self, app: &mut crate::app::App, _agent: &mut crate::llm::Agent) -> Result<Option<String>> {
+    fn execute(&self, app: &mut crate::app::App) -> Result<Option<String>> {
         app.queue_compaction();
         Ok(None)
     }

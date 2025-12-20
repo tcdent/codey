@@ -1,11 +1,10 @@
 //! Edit file tool with search/replace
 
-use super::{Tool, ToolResult};
+use super::{once_ready, Tool, ToolOutput, ToolResult};
 use crate::ide::{IdeAction, ToolPreview};
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
-use anyhow::Result;
-use async_trait::async_trait;
+use futures::stream::BoxStream;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -108,7 +107,6 @@ struct SearchReplace {
     new_string: String,
 }
 
-#[async_trait]
 impl Tool for EditFileTool {
     fn name(&self) -> &'static str {
         "edit_file"
@@ -159,109 +157,8 @@ impl Tool for EditFileTool {
         }
     }
 
-    async fn execute(&self, params: serde_json::Value) -> Result<ToolResult> {
-        let params: EditFileParams = serde_json::from_value(params)?;
-        let path = Path::new(&params.path);
-
-        // Check if file exists
-        if !path.exists() {
-            return Ok(ToolResult::error(format!(
-                "File not found: {}. Use write_file to create new files.",
-                params.path
-            )));
-        }
-
-        // Check if it's a file
-        if !path.is_file() {
-            return Ok(ToolResult::error(format!(
-                "Not a file: {}",
-                params.path
-            )));
-        }
-
-        // Read current content
-        let mut content = match fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                return Ok(ToolResult::error(format!(
-                    "Failed to read file: {}",
-                    e
-                )));
-            }
-        };
-
-        // Validate edits before applying
-        for (i, edit) in params.edits.iter().enumerate() {
-            if edit.old_string == edit.new_string {
-                return Ok(ToolResult::error(format!(
-                    "Edit {}: old_string and new_string are identical",
-                    i + 1
-                )));
-            }
-
-            if edit.old_string.is_empty() {
-                return Ok(ToolResult::error(format!(
-                    "Edit {}: old_string cannot be empty",
-                    i + 1
-                )));
-            }
-        }
-
-        // Apply edits sequentially
-        let mut applied_edits = Vec::new();
-
-        for (i, edit) in params.edits.iter().enumerate() {
-            let matches: Vec<_> = content.match_indices(&edit.old_string).collect();
-
-            match matches.len() {
-                0 => {
-                    // Provide helpful context for debugging
-                    let preview = if edit.old_string.len() > 50 {
-                        format!("{}...", &edit.old_string[..50])
-                    } else {
-                        edit.old_string.clone()
-                    };
-                    return Ok(ToolResult::error(format!(
-                        "Edit {}: old_string not found in file.\n\nSearching for:\n{}\n\n\
-                         Tip: Make sure the string matches exactly, including whitespace and indentation.",
-                        i + 1,
-                        preview
-                    )));
-                }
-                1 => {
-                    // Unique match - apply the edit
-                    content = content.replacen(&edit.old_string, &edit.new_string, 1);
-                    applied_edits.push(format!(
-                        "Edit {}: Replaced {} chars with {} chars",
-                        i + 1,
-                        edit.old_string.len(),
-                        edit.new_string.len()
-                    ));
-                }
-                n => {
-                    return Ok(ToolResult::error(format!(
-                        "Edit {}: old_string found {} times (must be unique). \
-                         Include more surrounding context to make the match unique.",
-                        i + 1,
-                        n
-                    )));
-                }
-            }
-        }
-
-        // Write the modified content
-        match fs::write(path, &content) {
-            Ok(()) => {
-                let summary = applied_edits.join("\n");
-                Ok(ToolResult::success(format!(
-                    "Successfully applied {} edit(s) to {}\n\n{}",
-                    params.edits.len(),
-                    params.path,
-                    summary
-                )))
-            }
-            Err(e) => Ok(ToolResult::error(format!("Failed to write file: {}", e))),
-        }
+    fn execute(&self, params: serde_json::Value) -> BoxStream<'static, ToolOutput> {
+        once_ready(Ok(Self::execute_inner(params)))
     }
 
     fn preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
@@ -295,6 +192,101 @@ impl Tool for EditFileTool {
 }
 
 impl EditFileTool {
+    fn execute_inner(params: serde_json::Value) -> ToolResult {
+        let params: EditFileParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => return ToolResult::error(format!("Invalid params: {}", e)),
+        };
+        let path = Path::new(&params.path);
+
+        // Check if file exists
+        if !path.exists() {
+            return ToolResult::error(format!(
+                "File not found: {}. Use write_file to create new files.",
+                params.path
+            ));
+        }
+
+        // Check if it's a file
+        if !path.is_file() {
+            return ToolResult::error(format!("Not a file: {}", params.path));
+        }
+
+        // Read current content
+        let mut content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => return ToolResult::error(format!("Failed to read file: {}", e)),
+        };
+
+        // Validate edits before applying
+        for (i, edit) in params.edits.iter().enumerate() {
+            if edit.old_string == edit.new_string {
+                return ToolResult::error(format!(
+                    "Edit {}: old_string and new_string are identical",
+                    i + 1
+                ));
+            }
+
+            if edit.old_string.is_empty() {
+                return ToolResult::error(format!("Edit {}: old_string cannot be empty", i + 1));
+            }
+        }
+
+        // Apply edits sequentially
+        let mut applied_edits = Vec::new();
+
+        for (i, edit) in params.edits.iter().enumerate() {
+            let matches: Vec<_> = content.match_indices(&edit.old_string).collect();
+
+            match matches.len() {
+                0 => {
+                    let preview = if edit.old_string.len() > 50 {
+                        format!("{}...", &edit.old_string[..50])
+                    } else {
+                        edit.old_string.clone()
+                    };
+                    return ToolResult::error(format!(
+                        "Edit {}: old_string not found in file.\n\nSearching for:\n{}\n\n\
+                         Tip: Make sure the string matches exactly, including whitespace and indentation.",
+                        i + 1,
+                        preview
+                    ));
+                }
+                1 => {
+                    content = content.replacen(&edit.old_string, &edit.new_string, 1);
+                    applied_edits.push(format!(
+                        "Edit {}: Replaced {} chars with {} chars",
+                        i + 1,
+                        edit.old_string.len(),
+                        edit.new_string.len()
+                    ));
+                }
+                n => {
+                    return ToolResult::error(format!(
+                        "Edit {}: old_string found {} times (must be unique). \
+                         Include more surrounding context to make the match unique.",
+                        i + 1,
+                        n
+                    ));
+                }
+            }
+        }
+
+        // Write the modified content
+        match fs::write(path, &content) {
+            Ok(()) => {
+                let summary = applied_edits.join("\n");
+                ToolResult::success(format!(
+                    "Successfully applied {} edit(s) to {}\n\n{}",
+                    params.edits.len(),
+                    params.path,
+                    summary
+                ))
+            }
+            Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
+        }
+    }
+
     /// Apply edits to content, returning the modified version
     /// Returns None if any edit fails (not found or ambiguous)
     fn apply_edits(content: &str, edits: &[serde_json::Value]) -> Option<String> {
@@ -320,7 +312,18 @@ impl EditFileTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use tempfile::tempdir;
+
+    async fn run_tool(tool: &EditFileTool, params: serde_json::Value) -> ToolResult {
+        let mut stream = tool.execute(params);
+        while let Some(output) = stream.next().await {
+            if let ToolOutput::Done(r) = output {
+                return r;
+            }
+        }
+        panic!("Tool should return Done");
+    }
 
     #[tokio::test]
     async fn test_edit_file_single() {
@@ -329,18 +332,15 @@ mod tests {
         fs::write(&file_path, "fn main() {\n    println!(\"hello\");\n}").unwrap();
 
         let tool = EditFileTool;
-        let result = tool
-            .execute(json!({
-                "path": file_path.to_str().unwrap(),
-                "edits": [
-                    {
-                        "old_string": "println!(\"hello\")",
-                        "new_string": "println!(\"hello, world!\")"
-                    }
-                ]
-            }))
-            .await
-            .unwrap();
+        let result = run_tool(&tool, json!({
+            "path": file_path.to_str().unwrap(),
+            "edits": [
+                {
+                    "old_string": "println!(\"hello\")",
+                    "new_string": "println!(\"hello, world!\")"
+                }
+            ]
+        })).await;
 
         assert!(!result.is_error, "Error: {}", result.content);
 
@@ -359,22 +359,19 @@ mod tests {
         .unwrap();
 
         let tool = EditFileTool;
-        let result = tool
-            .execute(json!({
-                "path": file_path.to_str().unwrap(),
-                "edits": [
-                    {
-                        "old_string": "fn foo() {}",
-                        "new_string": "fn foo() -> i32 { 1 }"
-                    },
-                    {
-                        "old_string": "fn bar() {}",
-                        "new_string": "fn bar() -> i32 { 2 }"
-                    }
-                ]
-            }))
-            .await
-            .unwrap();
+        let result = run_tool(&tool, json!({
+            "path": file_path.to_str().unwrap(),
+            "edits": [
+                {
+                    "old_string": "fn foo() {}",
+                    "new_string": "fn foo() -> i32 { 1 }"
+                },
+                {
+                    "old_string": "fn bar() {}",
+                    "new_string": "fn bar() -> i32 { 2 }"
+                }
+            ]
+        })).await;
 
         assert!(!result.is_error);
 
@@ -386,18 +383,15 @@ mod tests {
     #[tokio::test]
     async fn test_edit_file_not_found() {
         let tool = EditFileTool;
-        let result = tool
-            .execute(json!({
-                "path": "/nonexistent/file.rs",
-                "edits": [
-                    {
-                        "old_string": "foo",
-                        "new_string": "bar"
-                    }
-                ]
-            }))
-            .await
-            .unwrap();
+        let result = run_tool(&tool, json!({
+            "path": "/nonexistent/file.rs",
+            "edits": [
+                {
+                    "old_string": "foo",
+                    "new_string": "bar"
+                }
+            ]
+        })).await;
 
         assert!(result.is_error);
         assert!(result.content.contains("not found"));
@@ -410,18 +404,15 @@ mod tests {
         fs::write(&file_path, "foo foo foo").unwrap();
 
         let tool = EditFileTool;
-        let result = tool
-            .execute(json!({
-                "path": file_path.to_str().unwrap(),
-                "edits": [
-                    {
-                        "old_string": "foo",
-                        "new_string": "bar"
-                    }
-                ]
-            }))
-            .await
-            .unwrap();
+        let result = run_tool(&tool, json!({
+            "path": file_path.to_str().unwrap(),
+            "edits": [
+                {
+                    "old_string": "foo",
+                    "new_string": "bar"
+                }
+            ]
+        })).await;
 
         assert!(result.is_error);
         assert!(result.content.contains("3 times"));
@@ -434,18 +425,15 @@ mod tests {
         fs::write(&file_path, "hello world").unwrap();
 
         let tool = EditFileTool;
-        let result = tool
-            .execute(json!({
-                "path": file_path.to_str().unwrap(),
-                "edits": [
-                    {
-                        "old_string": "goodbye",
-                        "new_string": "farewell"
-                    }
-                ]
-            }))
-            .await
-            .unwrap();
+        let result = run_tool(&tool, json!({
+            "path": file_path.to_str().unwrap(),
+            "edits": [
+                {
+                    "old_string": "goodbye",
+                    "new_string": "farewell"
+                }
+            ]
+        })).await;
 
         assert!(result.is_error);
         assert!(result.content.contains("not found"));

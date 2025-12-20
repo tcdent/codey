@@ -1,11 +1,10 @@
 //! Write file tool
 
-use super::{Tool, ToolResult};
+use super::{once_ready, Tool, ToolOutput, ToolResult};
 use crate::ide::{IdeAction, ToolPreview};
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
-use anyhow::Result;
-use async_trait::async_trait;
+use futures::stream::BoxStream;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -102,7 +101,49 @@ struct WriteFileParams {
     content: String,
 }
 
-#[async_trait]
+impl WriteFileTool {
+    fn execute_inner(&self, params: serde_json::Value) -> ToolResult {
+        let params: WriteFileParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => return ToolResult::error(format!("Invalid params: {}", e)),
+        };
+        let path = Path::new(&params.path);
+
+        // Check if file already exists
+        if path.exists() {
+            return ToolResult::error(format!(
+                "File already exists: {}. Use edit_file to modify existing files.",
+                params.path
+            ));
+        }
+
+        // Create parent directories if needed
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    return ToolResult::error(format!(
+                        "Failed to create parent directories: {}",
+                        e
+                    ));
+                }
+            }
+        }
+
+        // Write file
+        match fs::write(path, &params.content) {
+            Ok(()) => {
+                let line_count = params.content.lines().count();
+                let byte_count = params.content.len();
+                ToolResult::success(format!(
+                    "Created file: {} ({} lines, {} bytes)",
+                    params.path, line_count, byte_count
+                ))
+            }
+            Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
+        }
+    }
+}
+
 impl Tool for WriteFileTool {
     fn name(&self) -> &'static str {
         "write_file"
@@ -138,42 +179,8 @@ impl Tool for WriteFileTool {
         }
     }
 
-    async fn execute(&self, params: serde_json::Value) -> Result<ToolResult> {
-        let params: WriteFileParams = serde_json::from_value(params)?;
-        let path = Path::new(&params.path);
-
-        // Check if file already exists
-        if path.exists() {
-            return Ok(ToolResult::error(format!(
-                "File already exists: {}. Use edit_file to modify existing files.",
-                params.path
-            )));
-        }
-
-        // Create parent directories if needed
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    return Ok(ToolResult::error(format!(
-                        "Failed to create parent directories: {}",
-                        e
-                    )));
-                }
-            }
-        }
-
-        // Write file
-        match fs::write(path, &params.content) {
-            Ok(()) => {
-                let line_count = params.content.lines().count();
-                let byte_count = params.content.len();
-                Ok(ToolResult::success(format!(
-                    "Created file: {} ({} lines, {} bytes)",
-                    params.path, line_count, byte_count
-                )))
-            }
-            Err(e) => Ok(ToolResult::error(format!("Failed to write file: {}", e))),
-        }
+    fn execute(&self, params: serde_json::Value) -> BoxStream<'static, ToolOutput> {
+        once_ready(Ok(self.execute_inner(params)))
     }
 
     fn preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
@@ -198,7 +205,18 @@ impl Tool for WriteFileTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
     use tempfile::tempdir;
+
+    async fn run_tool(tool: &WriteFileTool, params: serde_json::Value) -> ToolResult {
+        let mut stream = tool.execute(params);
+        while let Some(output) = stream.next().await {
+            if let ToolOutput::Done(r) = output {
+                return r;
+            }
+        }
+        panic!("Tool should return Done");
+    }
 
     #[tokio::test]
     async fn test_write_file() {
@@ -206,13 +224,10 @@ mod tests {
         let file_path = dir.path().join("new_file.txt");
 
         let tool = WriteFileTool;
-        let result = tool
-            .execute(json!({
-                "path": file_path.to_str().unwrap(),
-                "content": "Hello, World!\nLine 2"
-            }))
-            .await
-            .unwrap();
+        let result = run_tool(&tool, json!({
+            "path": file_path.to_str().unwrap(),
+            "content": "Hello, World!\nLine 2"
+        })).await;
 
         assert!(!result.is_error);
         assert!(result.content.contains("Created file"));
@@ -228,13 +243,10 @@ mod tests {
         fs::write(&file_path, "existing content").unwrap();
 
         let tool = WriteFileTool;
-        let result = tool
-            .execute(json!({
-                "path": file_path.to_str().unwrap(),
-                "content": "new content"
-            }))
-            .await
-            .unwrap();
+        let result = run_tool(&tool, json!({
+            "path": file_path.to_str().unwrap(),
+            "content": "new content"
+        })).await;
 
         assert!(result.is_error);
         assert!(result.content.contains("already exists"));
@@ -246,13 +258,10 @@ mod tests {
         let file_path = dir.path().join("subdir").join("nested").join("file.txt");
 
         let tool = WriteFileTool;
-        let result = tool
-            .execute(json!({
-                "path": file_path.to_str().unwrap(),
-                "content": "nested content"
-            }))
-            .await
-            .unwrap();
+        let result = run_tool(&tool, json!({
+            "path": file_path.to_str().unwrap(),
+            "content": "nested content"
+        })).await;
 
         assert!(!result.is_error);
         assert!(file_path.exists());

@@ -4,10 +4,11 @@ use std::collections::VecDeque;
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
+use futures::StreamExt;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -16,7 +17,8 @@ use ratatui::{
 
 use crate::commands::Command;
 use crate::config::Config;
-use crate::llm::{Agent, AgentStep, RequestMode, ToolDecision, Usage};
+use crate::llm::{Agent, AgentStep, RequestMode, Usage};
+use crate::tools::{ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
 use crate::tool_filter::ToolFilters;
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
 use crate::compaction::COMPACTION_PROMPT;
@@ -75,11 +77,11 @@ You have access to the following tools:
 - Always get confirmation before making destructive changes (this includes building a release)
 "#;
 
-/// Result of polling for events during streaming
-enum PollResult {
-    NoEvent,
-    Handled,
-    Interrupted,
+/// Result of handling an action
+enum ActionResult {
+    NoOp,
+    Continue,
+    Interrupt,
 }
 
 /// Input modes determine which keybindings are active
@@ -101,26 +103,43 @@ enum MessageRequest {
     Command(String, usize),
 }
 
-/// Actions that can be triggered by key events
+/// Actions that can be triggered by terminal events
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
+    // Text input
     InsertChar(char),
     InsertNewline,
     DeleteBack,
+    Paste(String),
+    // Cursor movement
     CursorLeft,
     CursorRight,
     CursorHome,
     CursorEnd,
+    // Input control
     Submit,
     ClearInput,
     HistoryPrev,
     HistoryNext,
+    TabComplete,
+    // Application control
     Interrupt,
     Quit,
+    Resize(u16, u16),
+    // Tool approval
     ApproveTool,
     DenyTool,
     ApproveToolSession,
-    TabComplete,
+}
+
+/// Map a terminal event to an action based on the current input mode
+fn map_event(mode: InputMode, event: Event) -> Option<Action> {
+    match event {
+        Event::Key(key) => map_key(mode, key),
+        Event::Paste(content) => Some(Action::Paste(content)),
+        Event::Resize(w, h) => Some(Action::Resize(w, h)),
+        _ => None,
+    }
 }
 
 /// Map a key event to an action based on the current input mode
@@ -205,6 +224,14 @@ pub struct App {
     tool_filters: ToolFilters,
     /// IDE connection for editor integration (e.g., Neovim)
     ide: Option<Box<dyn Ide>>,
+    /// Terminal event stream
+    events: EventStream,
+    /// Current input mode
+    input_mode: InputMode,
+    /// LLM agent for conversation
+    agent: Option<Agent>,
+    /// Tool executor for managing tool approval and execution
+    tool_executor: ToolExecutor,
 }
 
 impl App {
@@ -290,6 +317,10 @@ impl App {
             alert: None,
             tool_filters,
             ide,
+            events: EventStream::new(),
+            input_mode: InputMode::Normal,
+            agent: None,
+            tool_executor: ToolExecutor::new(ToolRegistry::new()),
         })
     }
 
@@ -312,6 +343,7 @@ impl App {
         } else {
             self.transcript.add_turn(Role::Assistant, TextBlock::pending(WELCOME_MESSAGE));
         }
+        self.agent = Some(agent);
         self.status = ConnectionStatus::Connected;
 
         self.draw()?;
@@ -322,39 +354,44 @@ impl App {
         self.draw()?;
         
         loop {
+            // Start any queued messages (non-blocking)
             if let Some(request) = self.message_queue.pop_front() {
-                self.process_message(&mut agent, request).await?;
-                continue;
+                self.start_message(request).await?;
             }
 
-            // Block until we get an event - no polling when idle
-            if event::poll(std::time::Duration::from_secs(60))? {
-                let needs_redraw = match event::read()? {
-                    Event::Key(key) => {
-                        if let Some(action) = map_key(InputMode::Normal, key) {
-                            self.handle_action(action);
-                        }
-                        true
-                    }
-                    Event::Paste(content) => {
-                        // Large pastes become attachments, small ones inline
-                        if content.len() > 200 {
-                            self.input.add_attachment(Attachment::pasted(content));
-                        } else {
-                            for c in content.chars() {
-                                self.input.insert_char(c);
+            tokio::select! {
+                biased;  // Check events first for responsive interrupts
+                
+                Some(term_event) = self.events.next() => {
+                    match term_event {
+                        Ok(event) => {
+                            if let Some(action) = map_event(self.input_mode, event) {
+                                match self.handle_action(action).await {
+                                    ActionResult::Interrupt => {
+                                        if let Some(agent) = self.agent.as_mut() {
+                                            agent.cancel();
+                                        }
+                                        self.transcript.finish_turn();
+                                        self.input_mode = InputMode::Normal;
+                                        //self.tool_executor.clear();
+                                    }
+                                    ActionResult::Continue => { self.draw_throttled()?; }
+                                    ActionResult::NoOp => {}
+                                }
                             }
                         }
-                        true
+                        Err(e) => {
+                            tracing::warn!("Event stream error: {}", e);
+                        }
                     }
-                    Event::Resize(_width, height) => {
-                        true
-                    }
-                    _ => false,
-                };
+                }
+                
+                Some(agent_step) = async { self.agent.as_mut()?.next().await } => {
+                    self.handle_agent_step(agent_step).await?;
+                }
 
-                if needs_redraw {
-                    self.draw_throttled()?;
+                Some(tool_event) = self.tool_executor.next() => {
+                    self.handle_tool_event(tool_event).await?;
                 }
             }
 
@@ -422,20 +459,43 @@ impl App {
         Ok(true)
     }
 
-    /// Handle an action. Returns true if the action should interrupt/break the current loop.
-    fn handle_action(&mut self, action: Action) -> PollResult {
+    /// Handle an action. Returns the result indicating what the main loop should do.
+    async fn handle_action(&mut self, action: Action) -> ActionResult {
         // Clear alert on any input action
         self.alert = None;
         
+        if !matches!(action, Action::InsertChar(_)) {
+            tracing::debug!("Current input content: {}", self.input.content());
+        }
         match action {
-            Action::Interrupt => return PollResult::Interrupted,
+            Action::Interrupt => return ActionResult::Interrupt,
             Action::Quit => {
                 self.should_quit = true;
-                return PollResult::Interrupted;
+                return ActionResult::Interrupt;
+            }
+            Action::ApproveTool => {
+                self.execute_tool_decision(ToolDecision::Approve).await;
+            }
+            Action::DenyTool => {
+                self.execute_tool_decision(ToolDecision::Deny).await;
+            }
+            Action::ApproveToolSession => {
+                // TODO: implement allow for session
+                self.execute_tool_decision(ToolDecision::Approve).await;
             }
             Action::InsertChar(c) => self.input.insert_char(c),
             Action::InsertNewline => self.input.insert_newline(),
             Action::DeleteBack => self.input.delete_char(),
+            Action::Paste(content) => {
+                // Large pastes become attachments, small ones inline
+                if content.len() > 200 {
+                    self.input.add_attachment(Attachment::pasted(content));
+                } else {
+                    for c in content.chars() {
+                        self.input.insert_char(c);
+                    }
+                }
+            }
             Action::CursorLeft => self.input.move_cursor_left(),
             Action::CursorRight => self.input.move_cursor_right(),
             Action::CursorHome => self.input.move_cursor_start(),
@@ -458,60 +518,12 @@ impl App {
                     self.input.set_content(&completed);
                 }
             }
-            // These are handled in specific contexts or already matched above
-            Action::ApproveTool | Action::DenyTool | Action::ApproveToolSession => {}
-        }
-
-        PollResult::Handled
-    }
-
-    /// Wait for user to approve or deny a tool request
-    async fn wait_for_tool_approval(&mut self) -> Result<ToolDecision> {
-        // Drain any buffered key events first to prevent accidental approvals
-        while event::poll(std::time::Duration::from_millis(0))? {
-            let _ = event::read()?;
-        }
-
-        loop {
-            if !event::poll(std::time::Duration::from_millis(50))? {
-                continue;
-            }
-            let Event::Key(key) = event::read()? else {
-                continue;
-            };
-
-            match map_key(InputMode::ToolApproval, key) {
-                Some(Action::ApproveTool) => return Ok(ToolDecision::Approve),
-                Some(Action::DenyTool) => return Ok(ToolDecision::Deny),
-                Some(Action::ApproveToolSession) => {
-                    // TODO: implement allow for session
-                    return Ok(ToolDecision::Approve);
-                }
-    Some(Action::Quit) => {
-                    self.should_quit = true;
-                    return Ok(ToolDecision::Deny);
-                }
-                _ => {}
+            Action::Resize(_w, _h) => {
+                // Terminal resized - just trigger a redraw
             }
         }
-    }
 
-    /// Poll for events without blocking.
-    fn poll_events(&mut self, mode: InputMode) -> PollResult {
-        if !event::poll(Duration::from_millis(0)).unwrap_or(false) {
-            return PollResult::NoEvent;
-        }
-
-        match event::read() {
-            Ok(Event::Key(key)) => match map_key(mode, key) {
-                Some(action) => self.handle_action(action),
-                None => PollResult::NoEvent,
-            }
-            Ok(Event::Resize(_, height)) => {
-                PollResult::Handled
-            }
-            _ => PollResult::NoEvent,
-        }
+        ActionResult::Continue
     }
 
     fn queue_message(&mut self, content: String) {
@@ -547,28 +559,27 @@ impl App {
         // TODO push_front?
         self.message_queue.push_back(MessageRequest::Compaction);
     }
-
-    /// Process a message request (user message or compaction)
-    async fn process_message(&mut self, agent: &mut Agent, request: MessageRequest) -> Result<()> {
-        if let Err(e) = agent.refresh_oauth_if_needed().await {
-            tracing::warn!("Failed to refresh OAuth token: {}", e);
+    
+    /// Start processing a message (non-blocking)
+    /// Sets up the agent to stream and changes input mode
+    async fn start_message(&mut self, request: MessageRequest) -> Result<()> {
+        if let Some(agent) = self.agent.as_mut() {
+            if let Err(e) = agent.refresh_oauth_if_needed().await {
+                tracing::warn!("Failed to refresh OAuth token: {}", e);
+            }
         }
 
         match request {
-             MessageRequest::Command(name, turn_id) => {
-                // Mark the command turn as complete (it was created as Pending in queue_message)
+            MessageRequest::Command(name, turn_id) => {
+                // Commands are handled synchronously (no streaming)
                 self.transcript.get_mut(turn_id)
                     .and_then(|turn| turn.content.first_mut())
                     .map(|block| block.set_status(Status::Complete));
 
                 if let Some(command) = Command::get(&name) {
-                    match command.execute(self, agent) {
+                    match command.execute(self) {
                         Ok(None) => {}
                         Ok(Some(output)) => {
-                            // Show command output in a new assistant turn
-                            // TODO this could be a special block type, and we should
-                            // decide if it gets sent to the agent or not
-                            
                             let idx = self.transcript.add_empty(Role::Assistant);
                             if let Some(turn) = self.transcript.get_mut(idx) {
                                 turn.start_block(Box::new(TextBlock::complete(&output)));
@@ -580,192 +591,225 @@ impl App {
                         }
                     }
                 }
-            },
+            }
             MessageRequest::User(content, turn_id) => {
-                // Mark the user turn as complete (it was created as Pending in queue_message)
+                // Mark user turn complete
                 self.transcript.get_mut(turn_id)
                     .and_then(|turn| turn.content.first_mut())
                     .map(|block| block.set_status(Status::Complete));
 
-                // Show user message immediately
+                // Render user message
                 let size = self.terminal.size()?;
                 self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
                 self.draw()?;
 
-                self.stream_response(agent, &content, RequestMode::Normal).await?;
-
-                // TODO the agent should track it's context not the app so we can support parallel
-                // agents in the future; not sure how compaction works on a background agent yet
-                if self.usage.context_tokens >= self.config.general.compaction_threshold {
-                    self.queue_compaction();
+                // Start streaming (non-blocking)
+                if let Some(agent) = self.agent.as_mut() {
+                    agent.start_response(&content, RequestMode::Normal);
                 }
-            },
+                self.transcript.begin_turn(Role::Assistant);
+                self.input_mode = InputMode::Streaming;
+            }
             MessageRequest::Compaction => {
-                // Stream assistant's compaction summary
-                self.stream_response(agent, COMPACTION_PROMPT, RequestMode::Compaction).await?;
+                if let Some(agent) = self.agent.as_mut() {
+                    agent.start_response(COMPACTION_PROMPT, RequestMode::Compaction);
+                }
+                self.transcript.begin_turn(Role::Assistant);
+                self.input_mode = InputMode::Streaming;
             }
         }
 
         Ok(())
     }
 
-    /// Stream a response from the agent with a specific request mode
-    async fn stream_response(
-        &mut self,
-        agent: &mut Agent,
-        prompt: &str,
-        mode: RequestMode,
-    ) -> Result<()> {
-        let mut stream = agent.process_message(prompt, mode);
+    /// Handle a single agent step during streaming
+    async fn handle_agent_step(&mut self, step: AgentStep) -> Result<()> {
+        match step {
+            AgentStep::TextDelta(text) => {
+                self.transcript.stream_delta(BlockType::Text, &text);
+            }
+            AgentStep::CompactionDelta(text) => {
+                self.transcript.stream_delta(BlockType::Compaction, &text);
+            }
+            AgentStep::ThinkingDelta(text) => {
+                self.transcript.stream_delta(BlockType::Thinking, &text);
+            }
+            AgentStep::ToolRequest(tool_calls) => {
+                // Just enqueue - the select loop will poll tool_executor.next()
+                tracing::debug!("Agent requested tool calls: {:?}", tool_calls);
+                self.tool_executor.enqueue(tool_calls);
+            }
+            AgentStep::Retrying { attempt, error } => {
+                self.status = ConnectionStatus::Error(format!("Retry {} - {}", attempt, error));
+            }
+            AgentStep::Finished { usage, thinking_signatures: _ } => {
+                tracing::debug!("AgentStep::Finished received");
+                self.usage = usage;
+                self.status = ConnectionStatus::Connected;
+                self.input_mode = InputMode::Normal;
 
-        // Begin the assistant turn for streaming
-        self.transcript.begin_turn(Role::Assistant);
+                // Handle compaction completion
+                if self.transcript.is_streaming_block_type(BlockType::Compaction) {
+                    tracing::debug!("Finishing compaction turn");
+                    self.transcript.finish_turn();
+                    if let Err(e) = self.transcript.save() {
+                        tracing::error!("Failed to save transcript before compaction: {}", e);
+                    }
+                    match self.transcript.rotate() {
+                        Ok(new_transcript) => {
+                            self.transcript = new_transcript;
+                            tracing::info!("Compaction complete, rotated to {:?}", self.transcript.path());
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to rotate transcript: {}", e);
+                        }
+                    }
+                } else {
+                    // Normal completion
+                    tracing::debug!("Finishing normal turn");
+                    self.transcript.finish_turn();
+                    if let Err(e) = self.transcript.save() {
+                        tracing::error!("Failed to save transcript: {}", e);
+                    }
 
-        loop {
-            // Poll for user input on every iteration (non-blocking)
-            match self.poll_events(InputMode::Streaming) {
-                PollResult::Interrupted => break,
-                PollResult::Handled => { self.draw_throttled()?; }
-                PollResult::NoEvent => {}
+                    // Check if compaction is needed
+                    if self.usage.context_tokens >= self.config.general.compaction_threshold {
+                        self.queue_compaction();
+                    }
+                }
+            }
+            AgentStep::Error(msg) => {
+                self.transcript.mark_active_block(Status::Error);
+                self.input_mode = InputMode::Normal;
+
+                let alert_msg = if let Some(start) = msg.find('{') {
+                    serde_json::from_str::<serde_json::Value>(&msg[start..])
+                        .ok()
+                        .and_then(|json| json["error"]["message"].as_str().map(String::from))
+                        .unwrap_or_else(|| msg.clone())
+                } else {
+                    msg.clone()
+                };
+                self.alert = Some(alert_msg);
+                self.status = ConnectionStatus::Error(msg);
+            }
+        }
+
+        // Update display
+        let size = self.terminal.size()?;
+        self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+        self.draw_throttled()?;
+
+        Ok(())
+    }
+
+    /// Execute a tool decision (approve/deny) for the current tool
+    ///
+    /// This starts execution; the result will come via handle_tool_event.
+    async fn execute_tool_decision(&mut self, decision: ToolDecision) {
+        // Get current tool call_id
+        tracing::debug!("Executing tool decision: {:?}", decision);
+        let call_id = match self.tool_executor.front() {
+            Some(tc) => tc.call_id.clone(),
+            None => {
+                tracing::warn!("No current tool to execute decision for");
+                return;
+            }
+        };
+
+        // Close IDE preview
+        if let Some(ide) = &self.ide {
+            if let Err(e) = ide.close_preview().await {
+                tracing::warn!("Failed to close IDE preview: {}", e);
+            }
+        }
+
+        // Update block status to Running/Denied
+        self.transcript.mark_active_block(match decision {
+            ToolDecision::Approve => Status::Running,
+            ToolDecision::Deny => Status::Denied,
+            _ => unreachable!(),
+        });
+        if let Ok(size) = self.terminal.size() {
+            let _ = self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal);
+        }
+        let _ = self.draw();
+
+        // Mark decision on the tool - next poll will execute it
+        self.tool_executor.decide(&call_id, decision);
+    }
+
+    /// Handle events from the tool executor
+    async fn handle_tool_event(&mut self, event: ToolEvent) -> Result<()> {
+        tracing::debug!("Handling ToolEvent: {:?}", event);
+        match event {
+            ToolEvent::AwaitingApproval(tool_call) => {
+                // Display tool in transcript
+                let tool = self.tool_executor.tools().get(&tool_call.name);
+                self.transcript.start_block(
+                    tool.create_block(&tool_call.call_id, tool_call.params.clone()));
+
+                // Show preview in IDE if the tool provides one
+                if let Some(preview) = tool.preview(&tool_call.params) {
+                    if let Some(ide) = &self.ide {
+                        if let Err(e) = ide.show_preview(&preview).await {
+                            tracing::warn!("Failed to show IDE preview: {}", e);
+                        }
+                    }
+                }
+
+                let size = self.terminal.size()?;
+                self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+                self.draw()?;
+
+                // Check if tool filter auto-approves/denies
+                if let Some(decision) = self.tool_filters.evaluate(&tool_call.name, &tool_call.params) {
+                    self.execute_tool_decision(decision).await;
+                } else {
+                    self.input_mode = InputMode::ToolApproval;
+                }
             }
 
-            let step = match tokio::time::timeout(Duration::from_millis(100), stream.next()).await {
-                Ok(Some(s)) => s,
-                Ok(None) => break,
-                Err(_) => continue,
-            };
-
-            match step {
-                AgentStep::TextDelta(text) => {
-                    self.transcript.stream_delta(BlockType::Text, &text);
-                }
-                AgentStep::CompactionDelta(text) => {
-                    self.transcript.stream_delta(BlockType::Compaction, &text);
-                }
-                AgentStep::ThinkingDelta(text) => {
-                    self.transcript.stream_delta(BlockType::Thinking, &text);
-                }
-                AgentStep::ToolRequest { call_id, name, params } => {
-                    // Get tool info via stream.agent (stream holds mutable borrow)
-                    let tool = stream.agent.get_tool(&name);
-                    let post_actions = tool.post_actions(&params);
-
-                    self.transcript.start_block(tool.create_block(&call_id, params.clone()));
+            ToolEvent::OutputDelta { call_id, delta } => {
+                // Stream output to the active tool block
+                if let Some(block) = self.transcript.find_tool_block_mut(&call_id) {
+                    tracing::debug!("Found block, appending text");
+                    block.append_text(&delta);
+                    // Re-render to show the delta
                     let size = self.terminal.size()?;
                     self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
                     self.draw()?;
-
-                    // Show preview in IDE if the tool provides one
-                    if let Some(preview) = tool.preview(&params) {
-                        if let Some(ide) = &self.ide {
-                            if let Err(e) = ide.show_preview(&preview).await {
-                                tracing::warn!("Failed to show IDE preview: {}", e);
-                            }
-                        }
-                    }
-
-                    // Determine decision based on filter result or user approval
-                    let decision = match self.tool_filters.evaluate(&name, &params) {
-                        Some(decision) => decision,
-                        None => self.wait_for_tool_approval().await?,
-                    };
-
-                    // Close preview after decision is made
-                    if let Some(ide) = &self.ide {
-                        if let Err(e) = ide.close_preview().await {
-                            tracing::warn!("Failed to close IDE preview: {}", e);
-                        }
-                    }
-
-                    self.transcript.mark_active_block(match decision {
-                        ToolDecision::Approve => Status::Running,
-                        ToolDecision::Deny => Status::Denied,
-                    });
-                    // let size = self.terminal.size()?;
-                    self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
-                    self.draw()?;
-
-                    let tool_result = stream.decide_tool(decision).await;
-                    if let Some(AgentStep::ToolResult { result, is_error, .. }) = tool_result {
-                        self.transcript.mark_active_block(if is_error { Status::Error } else { Status::Complete });
-                        if let Some(block) = self.transcript.active_block_mut() {
-                            block.append_text(&result);
-                        }
-                        self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
-                        self.draw()?;
-
-                        // Execute post-actions from the tool (e.g., reload buffer)
-                        if !is_error {
-                            for action in post_actions {
-                                if let Some(ide) = &self.ide {
-                                    if let Err(e) = ide.execute(&action).await {
-                                        tracing::warn!("Failed to execute IDE action: {}", e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                AgentStep::ToolResult { .. } => {}
-                AgentStep::Retrying { attempt, error } => {
-                    self.status = ConnectionStatus::Error(format!("Retry {} - {}", attempt, error));
-                }
-                AgentStep::Finished { usage, thinking_signatures: _ } => {
-                    self.usage = usage;
-                    self.status = ConnectionStatus::Connected;
-
-                    // Save and rotate transcript for compaction (agent handles its own reset)
-                    // TODO we should explicitly mark this state somewhere other than the transcript
-                    if self.transcript.is_streaming_block_type(BlockType::Compaction) {
-                        // finish_turn before save so block is marked complete
-                        self.transcript.finish_turn();
-                        if let Err(e) = self.transcript.save() {
-                            tracing::error!("Failed to save transcript before compaction: {}", e);
-                        }
-                        match self.transcript.rotate() {
-                            Ok(new_transcript) => {
-                                self.transcript = new_transcript;
-                                tracing::info!("Compaction complete, rotated to {:?}", self.transcript.path());
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to rotate transcript: {}", e);
-                            }
-                        }
-                    }
-                }
-                AgentStep::Error(msg) => {
-                    self.transcript.mark_active_block(Status::Error);
-
-                    let alert_msg = if let Some(start) = msg.find('{') {
-                        serde_json::from_str::<serde_json::Value>(&msg[start..])
-                            .ok()
-                            .and_then(|json| json["error"]["message"].as_str().map(String::from))
-                            .unwrap_or_else(|| msg.clone())
-                    } else {
-                        msg.clone()
-                    };
-                    self.alert = Some(alert_msg);
-                    self.status = ConnectionStatus::Error(msg);
+                } else {
+                    tracing::warn!("No block found for call_id: {}", call_id);
                 }
             }
-            
-            // Update hot zone with new content and commit overflow to scrollback
-            let size = self.terminal.size()?;
-            self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
-            
-            // Throttled draw at end of loop to show streaming updates
-            self.draw_throttled()?;
+
+            ToolEvent::Completed { call_id, content, is_error, post_actions } => {
+                // Update transcript status (content was already streamed via OutputDelta)
+                self.transcript.mark_active_block(
+                    if is_error { Status::Error } else { Status::Complete }
+                );
+
+                // Execute post-actions from the tool
+                for action in post_actions {
+                    if let Some(ide) = &self.ide {
+                        if let Err(e) = ide.execute(&action).await {
+                            tracing::warn!("Failed to execute IDE action: {}", e);
+                        }
+                    }
+                }
+
+                // Tell agent about the result (for message history)
+                if let Some(agent) = self.agent.as_mut() {
+                    agent.submit_tool_result(&call_id, content);
+                }
+
+                // Render update
+                let size = self.terminal.size()?;
+                self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+                self.draw()?;
+            }
         }
-
-        self.draw()?;
-
-        // Finish the turn (marks block complete, clears current turn)
-        self.transcript.finish_turn();
-
-        if let Err(e) = self.transcript.save() {
-            tracing::error!("Failed to save transcript: {}", e);
-        }
-
         Ok(())
     }
 

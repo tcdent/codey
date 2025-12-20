@@ -580,6 +580,18 @@ impl Transcript {
         self.get_mut(turn_id)?.get_active_block_mut()
     }
 
+    /// Find a tool block by its call_id.
+    pub fn find_tool_block_mut(&mut self, call_id: &str) -> Option<&mut (dyn Block + 'static)> {
+        for turn in &mut self.turns {
+            for block in &mut turn.content {
+                if block.call_id() == Some(call_id) {
+                    return Some(block.as_mut());
+                }
+            }
+        }
+        None
+    }
+
     /// Set status on the active block.
     pub fn mark_active_block(&mut self, status: Status) {
         if let Some(block) = self.active_block_mut() {

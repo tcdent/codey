@@ -5,7 +5,6 @@ mod compaction;
 mod config;
 mod ide;
 mod llm;
-mod permission;
 mod tool_filter;
 mod tools;
 mod transcript;
@@ -78,7 +77,7 @@ async fn main() -> Result<()> {
     // Set up file-based logging
     let log_file = std::fs::File::create("/tmp/codey.log")?;
     tracing_subscriber::registry()
-        .with(EnvFilter::new("debug,nvim_rs=off"))
+        .with(EnvFilter::new("debug,reqwest=off,hyper_util=off,genai=off,nvim_rs=off"))
         .with(fmt::layer().with_writer(log_file).with_ansi(false))
         .init();
 
