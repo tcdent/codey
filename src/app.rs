@@ -487,14 +487,7 @@ impl App {
             Action::InsertNewline => self.input.insert_newline(),
             Action::DeleteBack => self.input.delete_char(),
             Action::Paste(content) => {
-                // Large pastes become attachments, small ones inline
-                if content.len() > 200 {
-                    self.input.add_attachment(Attachment::pasted(content));
-                } else {
-                    for c in content.chars() {
-                        self.input.insert_char(c);
-                    }
-                }
+                self.input.add_attachment(Attachment::pasted(content));
             }
             Action::CursorLeft => self.input.move_cursor_left(),
             Action::CursorRight => self.input.move_cursor_right(),
