@@ -152,7 +152,7 @@ impl ToolExecutor {
                             content: result.content,
                             is_error: result.is_error,
                             ide_post_actions: active.ide_post_actions,
-                            effects: vec![], // TODO: extract from ToolResult
+                            effects: result.effects,
                         });
                     }
                     None => {

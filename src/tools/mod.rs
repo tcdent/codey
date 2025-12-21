@@ -2,7 +2,7 @@ mod exec;
 mod impls;
 
 pub use exec::{ToolCall, ToolDecision, ToolEffect, ToolEvent, ToolExecutor};
-pub use impls::{EditFileTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, WebSearchTool, WriteFileTool};
+pub use impls::{EditFileTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, TaskTool, WebSearchTool, WriteFileTool};
 
 use crate::ide::{IdeAction, ToolPreview};
 use crate::transcript::Block;
@@ -16,6 +16,8 @@ use std::sync::Arc;
 pub struct ToolResult {
     pub content: String,
     pub is_error: bool,
+    /// Effects to apply after tool completion (spawn agents, IDE commands, etc.)
+    pub effects: Vec<ToolEffect>,
 }
 
 impl ToolResult {
@@ -23,6 +25,7 @@ impl ToolResult {
         Self {
             content: content.into(),
             is_error: false,
+            effects: vec![],
         }
     }
 
@@ -30,7 +33,14 @@ impl ToolResult {
         Self {
             content: message.into(),
             is_error: true,
+            effects: vec![],
         }
+    }
+
+    /// Add effects to a result
+    pub fn with_effects(mut self, effects: Vec<ToolEffect>) -> Self {
+        self.effects = effects;
+        self
     }
 }
 
@@ -94,6 +104,9 @@ pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
 }
 
+/// Read-only tool names (safe for sub-agents)
+const READ_ONLY_TOOLS: &[&str] = &["read_file", "shell", "fetch_url", "web_search", "open_file"];
+
 impl ToolRegistry {
     /// Create a new tool registry with all default tools
     pub fn new() -> Self {
@@ -108,8 +121,37 @@ impl ToolRegistry {
         registry.register(Arc::new(FetchUrlTool::new()));
         registry.register(Arc::new(WebSearchTool::new()));
         registry.register(Arc::new(OpenFileTool));
+        registry.register(Arc::new(TaskTool));
 
         registry
+    }
+
+    /// Create a tool registry with only read-only tools (for sub-agents)
+    /// Does not include the task tool to prevent infinite agent spawning
+    pub fn read_only() -> Self {
+        let mut registry = Self {
+            tools: HashMap::new(),
+        };
+
+        registry.register(Arc::new(ReadFileTool));
+        registry.register(Arc::new(ShellTool::new()));
+        registry.register(Arc::new(FetchUrlTool::new()));
+        registry.register(Arc::new(WebSearchTool::new()));
+        registry.register(Arc::new(OpenFileTool));
+
+        registry
+    }
+
+    /// Create an empty tool registry (no tools)
+    pub fn empty() -> Self {
+        Self {
+            tools: HashMap::new(),
+        }
+    }
+
+    /// Check if a tool name is read-only
+    pub fn is_read_only(name: &str) -> bool {
+        READ_ONLY_TOOLS.contains(&name)
     }
 
     /// Register a tool

@@ -42,6 +42,46 @@ pub struct GeneralConfig {
     pub thinking_budget: u32,
     /// Thinking budget for compaction requests (default: 8,000)
     pub compaction_thinking_budget: u32,
+    /// Sub-agent configuration for background tasks
+    pub sub_agent: SubAgentConfig,
+}
+
+/// Configuration for sub-agents spawned by the task tool
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SubAgentConfig {
+    /// Model to use for sub-agents (defaults to same as primary)
+    pub model: Option<String>,
+    /// Max tokens for sub-agent responses
+    pub max_tokens: u32,
+    /// Thinking budget for sub-agents
+    pub thinking_budget: u32,
+    /// Tool access level for sub-agents
+    pub tool_access: ToolAccess,
+}
+
+impl Default for SubAgentConfig {
+    fn default() -> Self {
+        Self {
+            model: None, // Use primary agent's model
+            max_tokens: 4096,
+            thinking_budget: 1_000,
+            tool_access: ToolAccess::ReadOnly,
+        }
+    }
+}
+
+/// Tool access level for agents
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAccess {
+    /// Full access to all tools
+    Full,
+    /// Read-only tools: read_file, shell, fetch_url, web_search, open_file
+    #[default]
+    ReadOnly,
+    /// No tools
+    None,
 }
 
 impl Default for GeneralConfig {
@@ -54,6 +94,7 @@ impl Default for GeneralConfig {
             compaction_threshold: 192_000,
             thinking_budget: 2_000,
             compaction_thinking_budget: 8_000,
+            sub_agent: SubAgentConfig::default(),
         }
     }
 }
