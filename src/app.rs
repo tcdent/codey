@@ -856,18 +856,50 @@ impl App {
                     if is_error { Status::Error } else { Status::Complete }
                 );
 
-                // Execute post-actions from the tool
+                // Execute post-actions from the tool, collecting diagnostics
+                let mut final_content = content;
                 for action in ide_post_actions {
                     if let Some(ide) = &self.ide {
-                        if let Err(e) = ide.execute(&action).await {
-                            tracing::warn!("Failed to execute IDE action: {}", e);
+                        match &action {
+                            crate::ide::IdeAction::ReloadBuffer(path) => {
+                                // Reload and get LSP diagnostics
+                                match ide.reload_and_get_diagnostics(path).await {
+                                    Ok(diagnostics) => {
+                                        // Filter to errors and warnings only
+                                        let important: Vec<_> = diagnostics.iter()
+                                            .filter(|d| matches!(d.severity,
+                                                crate::ide::DiagnosticSeverity::Error |
+                                                crate::ide::DiagnosticSeverity::Warning))
+                                            .collect();
+
+                                        if !important.is_empty() {
+                                            final_content.push_str("\n\nLSP Diagnostics:\n");
+                                            for d in important {
+                                                let source = d.source.as_deref().unwrap_or("lsp");
+                                                final_content.push_str(&format!(
+                                                    "  line {}: [{}] {}: {}\n",
+                                                    d.line, source, d.severity, d.message
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!("Failed to get diagnostics: {}", e);
+                                    }
+                                }
+                            }
+                            _ => {
+                                if let Err(e) = ide.execute(&action).await {
+                                    tracing::warn!("Failed to execute IDE action: {}", e);
+                                }
+                            }
                         }
                     }
                 }
 
-                // Tell agent about the result
+                // Tell agent about the result (with diagnostics appended if any)
                 if let Some(agent) = self.agent.as_mut() {
-                    agent.submit_tool_result(&call_id, content);
+                    agent.submit_tool_result(&call_id, final_content);
                 }
 
                 // Tool is done - go back to streaming mode.

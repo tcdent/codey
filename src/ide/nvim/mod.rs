@@ -459,6 +459,50 @@ impl Ide for Nvim {
         Ok(result.as_bool().unwrap_or(false))
     }
 
+    async fn reload_and_get_diagnostics(&self, path: &str) -> Result<Vec<Diagnostic>> {
+        let args = vec![
+            Value::from(path),
+            Value::from(500i64), // timeout_ms
+        ];
+        let result = self.exec_lua(include_str!("lua/get_diagnostics.lua"), args).await?;
+
+        // Parse the array of diagnostics
+        let diagnostics: Vec<Diagnostic> = result
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| {
+                        let map = d.as_map()?;
+                        let get_str = |key: &str| -> Option<String> {
+                            map.iter()
+                                .find(|(k, _)| k.as_str() == Some(key))
+                                .and_then(|(_, v)| v.as_str().map(|s| s.to_string()))
+                        };
+                        let get_u32 = |key: &str| -> Option<u32> {
+                            map.iter()
+                                .find(|(k, _)| k.as_str() == Some(key))
+                                .and_then(|(_, v)| v.as_u64().map(|n| n as u32))
+                        };
+
+                        Some(Diagnostic {
+                            path: path.to_string(),
+                            line: get_u32("line")?,
+                            col: get_u32("col").unwrap_or(1),
+                            end_line: get_u32("end_line"),
+                            end_col: get_u32("end_col"),
+                            severity: DiagnosticSeverity::from_lsp(get_u32("severity").unwrap_or(3)),
+                            message: get_str("message").unwrap_or_default(),
+                            source: get_str("source"),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        debug!("Got {} diagnostics for {}", diagnostics.len(), path);
+        Ok(diagnostics)
+    }
+
     async fn next(&mut self) -> Option<IdeEvent> {
         self.event_rx.recv().await
     }

@@ -164,6 +164,12 @@ pub trait Ide: Send + Sync {
     /// Check if a file has unsaved changes
     async fn has_unsaved_changes(&self, path: &str) -> Result<bool>;
 
+    /// Reload a buffer and wait for LSP diagnostics
+    ///
+    /// This reloads the buffer, waits for the LSP to analyze it (via DiagnosticChanged),
+    /// and returns any diagnostics. Used after file edits to get immediate feedback.
+    async fn reload_and_get_diagnostics(&self, path: &str) -> Result<Vec<Diagnostic>>;
+
     // === Events: IDE → App (streaming) ===
 
     /// Poll for the next event from the IDE
