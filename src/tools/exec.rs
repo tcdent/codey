@@ -311,9 +311,6 @@ pub struct PipelineExecution {
 
     /// Whether an error occurred
     is_error: bool,
-
-    /// Post-effects to emit on completion (converted to ToolEffect)
-    post_tool_effects: Vec<ToolEffect>,
 }
 
 impl PipelineExecution {
@@ -326,8 +323,36 @@ impl PipelineExecution {
             context: EffectContext::new(params),
             output: String::new(),
             is_error: false,
-            post_tool_effects: vec![],
         }
+    }
+
+    /// Convert pipeline post effects to ToolEffects for app.rs compatibility
+    fn collect_post_tool_effects(&self) -> Vec<ToolEffect> {
+        self.pipeline.post.iter().filter_map(|effect| {
+            match effect {
+                Effect::IdeReloadBuffer { path } => {
+                    Some(ToolEffect::IdeReloadBuffer { path: path.clone() })
+                }
+                Effect::IdeOpen { path, line, column } => {
+                    Some(ToolEffect::IdeOpen {
+                        path: path.clone(),
+                        line: *line,
+                        column: *column,
+                    })
+                }
+                Effect::SpawnAgent { task, context } => {
+                    Some(ToolEffect::SpawnAgent {
+                        task: task.clone(),
+                        context: context.clone(),
+                    })
+                }
+                Effect::Notify { message } => {
+                    Some(ToolEffect::Notify { message: message.clone() })
+                }
+                // Other effects don't map to ToolEffect
+                _ => None,
+            }
+        }).collect()
     }
 
     /// Get the current phase
@@ -391,12 +416,13 @@ impl PipelineExecution {
                     if let Some(event) = self.run_post_effects() {
                         return Some(event);
                     }
-                    // All done
+                    // All done - collect post effects from pipeline
                     self.phase = PipelinePhase::Done;
+                    let post_effects = self.collect_post_tool_effects();
                     return Some(PipelineEvent::Completed {
                         content: std::mem::take(&mut self.output),
                         is_error: self.is_error,
-                        post_effects: std::mem::take(&mut self.post_tool_effects),
+                        post_effects,
                     });
                 }
 
@@ -536,8 +562,6 @@ impl PipelineExecution {
             }
 
             Effect::IdeReloadBuffer { path } => {
-                // Convert to post tool effect
-                self.post_tool_effects.push(ToolEffect::IdeReloadBuffer { path: path.clone() });
                 EffectInterpretation::Emit(PipelineEvent::IdeEffect(IdeEffect::ReloadBuffer {
                     path,
                 }))
@@ -593,14 +617,12 @@ impl PipelineExecution {
                 }
             }
 
-            // Agent effects
-            Effect::SpawnAgent { task, context } => {
-                self.post_tool_effects.push(ToolEffect::SpawnAgent { task, context });
+            // Agent effects - these are collected from pipeline.post at completion
+            Effect::SpawnAgent { .. } => {
                 EffectInterpretation::Continue
             }
 
-            Effect::Notify { message } => {
-                self.post_tool_effects.push(ToolEffect::Notify { message });
+            Effect::Notify { .. } => {
                 EffectInterpretation::Continue
             }
         }
