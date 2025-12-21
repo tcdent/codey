@@ -1,8 +1,7 @@
 //! Open file tool - opens a file in the IDE at a specific line
 
-use super::{once_ready, Effect, Tool, ToolOutput, ToolResult};
+use super::{ComposableTool, Effect, ToolPipeline};
 use crate::transcript::{render_approval_prompt, Block, BlockType, Status};
-use futures::stream::BoxStream;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -20,42 +19,7 @@ struct OpenFileParams {
     line: Option<u32>,
 }
 
-impl OpenFileTool {
-    fn execute_inner(&self, params: serde_json::Value) -> ToolResult {
-        let params: OpenFileParams = match serde_json::from_value(params) {
-            Ok(p) => p,
-            Err(e) => return ToolResult::error(format!("Invalid params: {}", e)),
-        };
-
-        let path = Path::new(&params.path);
-
-        // Check if file exists
-        if !path.exists() {
-            return ToolResult::error(format!("File not found: {}", params.path));
-        }
-
-        // Check if it's a file (not a directory)
-        if !path.is_file() {
-            return ToolResult::error(format!("Not a file: {}", params.path));
-        }
-
-        // Canonicalize to absolute path for the IDE
-        let abs_path = path.canonicalize().unwrap_or_else(|_| PathBuf::from(&params.path));
-
-        let message = match params.line {
-            Some(line) => format!("Opening {} at line {}", params.path, line),
-            None => format!("Opening {}", params.path),
-        };
-
-        ToolResult::success(message).with_effect(Effect::IdeOpen {
-            path: abs_path,
-            line: params.line,
-            column: None,
-        })
-    }
-}
-
-impl Tool for OpenFileTool {
+impl ComposableTool for OpenFileTool {
     fn name(&self) -> &'static str {
         "open_file"
     }
@@ -82,12 +46,44 @@ impl Tool for OpenFileTool {
         })
     }
 
-    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
-        Box::new(OpenFileBlock::new(call_id, self.name(), params))
+    fn compose(&self, params: serde_json::Value) -> ToolPipeline {
+        let parsed: OpenFileParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => return ToolPipeline::error(format!("Invalid params: {}", e)),
+        };
+
+        let path = Path::new(&parsed.path);
+
+        // Check if file exists
+        if !path.exists() {
+            return ToolPipeline::error(format!("File not found: {}", parsed.path));
+        }
+
+        // Check if it's a file (not a directory)
+        if !path.is_file() {
+            return ToolPipeline::error(format!("Not a file: {}", parsed.path));
+        }
+
+        // Canonicalize to absolute path for the IDE
+        let abs_path = path.canonicalize().unwrap_or_else(|_| PathBuf::from(&parsed.path));
+
+        let message = match parsed.line {
+            Some(line) => format!("Opening {} at line {}", parsed.path, line),
+            None => format!("Opening {}", parsed.path),
+        };
+
+        ToolPipeline::new()
+            .await_approval()
+            .then(Effect::IdeOpen {
+                path: abs_path,
+                line: parsed.line,
+                column: None,
+            })
+            .then(Effect::Output { content: message })
     }
 
-    fn execute(&self, params: serde_json::Value) -> BoxStream<'static, ToolOutput> {
-        once_ready(Ok(self.execute_inner(params)))
+    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
+        Box::new(OpenFileBlock::new(call_id, self.name(), params))
     }
 }
 

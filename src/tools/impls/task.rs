@@ -1,9 +1,8 @@
 //! Task tool for spawning background agents
 
-use super::{once_ready, Effect, Tool, ToolOutput, ToolResult};
+use super::{ComposableTool, Effect, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, Block, BlockType, ToolBlock, Status};
-use futures::stream::BoxStream;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -106,7 +105,7 @@ struct TaskParams {
     context: Option<String>,
 }
 
-impl Tool for TaskTool {
+impl ComposableTool for TaskTool {
     fn name(&self) -> &'static str {
         "task"
     }
@@ -134,27 +133,28 @@ impl Tool for TaskTool {
         })
     }
 
+    fn compose(&self, params: serde_json::Value) -> ToolPipeline {
+        let parsed: TaskParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => return ToolPipeline::error(format!("Invalid params: {}", e)),
+        };
+
+        let message = format!("Spawning background agent for task: {}", parsed.task);
+
+        ToolPipeline::new()
+            .await_approval()
+            .then(Effect::SpawnAgent {
+                task: parsed.task,
+                context: parsed.context,
+            })
+            .then(Effect::Output { content: message })
+    }
+
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
         if let Some(block) = TaskBlock::from_params(call_id, self.name(), params.clone()) {
             Box::new(block)
         } else {
             Box::new(ToolBlock::new(call_id, self.name(), params))
         }
-    }
-
-    fn execute(&self, params: serde_json::Value) -> BoxStream<'static, ToolOutput> {
-        let params: TaskParams = match serde_json::from_value(params) {
-            Ok(p) => p,
-            Err(e) => return once_ready(Ok(ToolResult::error(format!("Invalid params: {}", e)))),
-        };
-
-        // Return result with the spawn effect
-        let result = ToolResult::success(format!("Spawning background agent for task: {}", params.task))
-            .with_effect(Effect::SpawnAgent {
-                task: params.task,
-                context: params.context,
-            });
-
-        once_ready(Ok(result))
     }
 }

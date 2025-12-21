@@ -1,10 +1,8 @@
 //! Brave Web Search tool
 
-use super::{Tool, ToolOutput, ToolResult};
+use super::{ComposableTool, Effect, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, Status, ToolBlock};
-use async_stream::stream;
-use futures::stream::BoxStream;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -90,35 +88,7 @@ impl Block for WebSearchBlock {
 }
 
 /// Tool for performing web searches using Brave Search API
-pub struct WebSearchTool {
-    client: reqwest::Client,
-    timeout_secs: u64,
-}
-
-impl WebSearchTool {
-    pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .expect("Failed to create HTTP client");
-
-        Self {
-            client,
-            timeout_secs: 30,
-        }
-    }
-
-    fn get_api_key() -> Option<String> {
-        std::env::var("BRAVE_API_KEY").ok()
-    }
-}
-
-impl Default for WebSearchTool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+pub struct WebSearchTool;
 
 #[derive(Debug, Deserialize)]
 struct WebSearchParams {
@@ -131,39 +101,7 @@ fn default_count() -> u32 {
     10
 }
 
-/// Brave Search API response structures
-#[allow(dead_code)] // Fields used for JSON deserialization
-#[derive(Debug, Deserialize)]
-struct BraveSearchResponse {
-    #[serde(default)]
-    web: Option<WebResults>,
-    #[serde(default)]
-    query: Option<QueryInfo>,
-}
-
-#[allow(dead_code)] // Fields used for JSON deserialization
-#[derive(Debug, Deserialize)]
-struct QueryInfo {
-    #[serde(default)]
-    original: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WebResults {
-    #[serde(default)]
-    results: Vec<WebResult>,
-}
-
-#[allow(dead_code)] // Fields used for JSON deserialization
-#[derive(Debug, Deserialize)]
-struct WebResult {
-    title: String,
-    url: String,
-    #[serde(default)]
-    description: String,
-}
-
-impl Tool for WebSearchTool {
+impl ComposableTool for WebSearchTool {
     fn name(&self) -> &'static str {
         "web_search"
     }
@@ -189,6 +127,20 @@ impl Tool for WebSearchTool {
         })
     }
 
+    fn compose(&self, params: serde_json::Value) -> ToolPipeline {
+        let parsed: WebSearchParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => return ToolPipeline::error(format!("Invalid params: {}", e)),
+        };
+
+        ToolPipeline::new()
+            .await_approval()
+            .then(Effect::WebSearch {
+                query: parsed.query,
+                count: parsed.count,
+            })
+    }
+
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
         if let Some(block) = WebSearchBlock::from_params(call_id, self.name(), params.clone()) {
             Box::new(block)
@@ -196,106 +148,4 @@ impl Tool for WebSearchTool {
             Box::new(ToolBlock::new(call_id, self.name(), params))
         }
     }
-
-    fn execute(&self, params: serde_json::Value) -> BoxStream<'static, ToolOutput> {
-        let client = self.client.clone();
-        let timeout_secs = self.timeout_secs;
-
-        Box::pin(stream! {
-            let params: WebSearchParams = match serde_json::from_value(params) {
-                Ok(p) => p,
-                Err(e) => {
-                    yield ToolOutput::Done(ToolResult::error(format!("Invalid params: {}", e)));
-                    return;
-                }
-            };
-            let count = params.count.min(20);
-
-            // Get API key
-            let api_key = match WebSearchTool::get_api_key() {
-                Some(key) => key,
-                None => {
-                    yield ToolOutput::Done(ToolResult::error(
-                        "BRAVE_API_KEY environment variable not set. \
-                         Get an API key from https://brave.com/search/api/",
-                    ));
-                    return;
-                }
-            };
-
-            // Build request URL
-            let url = format!(
-                "https://api.search.brave.com/res/v1/web/search?q={}&count={}",
-                urlencoding::encode(&params.query),
-                count
-            );
-
-            // Make request with timeout
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_secs),
-                client
-                    .get(&url)
-                    .header("Accept", "application/json")
-                    .header("X-Subscription-Token", &api_key)
-                    .send(),
-            )
-            .await;
-
-            match result {
-                Ok(Ok(response)) => {
-                    let status = response.status();
-
-                    if !status.is_success() {
-                        let error_text = response.text().await.unwrap_or_default();
-                        yield ToolOutput::Done(ToolResult::error(format!(
-                            "Brave Search API error: {} {} - {}",
-                            status.as_u16(),
-                            status.canonical_reason().unwrap_or("Unknown"),
-                            error_text
-                        )));
-                        return;
-                    }
-
-                    // Parse response
-                    match response.json::<BraveSearchResponse>().await {
-                        Ok(search_response) => {
-                            let mut output = String::new();
-
-                            // Format results
-                            if let Some(web) = search_response.web {
-                                if web.results.is_empty() {
-                                    output.push_str("No results found.");
-                                } else {
-                                    for (i, result) in web.results.iter().enumerate() {
-                                        output.push_str(&format!(
-                                            "{}. [{}]({})\n", i + 1, result.title, result.url));
-                                    }
-                                }
-                            } else {
-                                output.push_str("No web results found.");
-                            }
-
-                            yield ToolOutput::Done(ToolResult::success(output));
-                        }
-                        Err(e) => {
-                            yield ToolOutput::Done(ToolResult::error(format!(
-                                "Failed to parse Brave Search response: {}",
-                                e
-                            )));
-                        }
-                    }
-                }
-                Ok(Err(e)) => {
-                    yield ToolOutput::Done(ToolResult::error(format!("Request failed: {}", e)));
-                }
-                Err(_) => {
-                    yield ToolOutput::Done(ToolResult::error(format!(
-                        "Request timed out after {} seconds",
-                        timeout_secs
-                    )));
-                }
-            }
-        })
-    }
 }
-

@@ -38,8 +38,15 @@ pub enum Effect {
     Error { message: String },
 
     // === File System ===
-    ReadFile { path: PathBuf, context_key: String },
+    ReadFile { path: PathBuf },
     WriteFile { path: PathBuf, content: String },
+
+    // === Shell ===
+    Shell { command: String, working_dir: Option<String>, timeout_secs: u64 },
+
+    // === Network ===
+    FetchUrl { url: String, max_length: Option<usize> },
+    WebSearch { query: String, count: u32 },
 
     // === Agents ===
     SpawnAgent { task: String, context: Option<String> },

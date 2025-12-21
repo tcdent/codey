@@ -1,19 +1,14 @@
 //! Shell command execution tool
 
-use super::{Tool, ToolOutput, ToolResult};
+use super::{ComposableTool, Effect, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
-use async_stream::stream;
-use futures::stream::BoxStream;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 
 /// Shell command block - shows the command cleanly
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,7 +118,7 @@ struct ShellParams {
     working_dir: Option<String>,
 }
 
-impl Tool for ShellTool {
+impl ComposableTool for ShellTool {
     fn name(&self) -> &'static str {
         "shell"
     }
@@ -152,6 +147,21 @@ impl Tool for ShellTool {
         })
     }
 
+    fn compose(&self, params: serde_json::Value) -> ToolPipeline {
+        let parsed: ShellParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => return ToolPipeline::error(format!("Invalid params: {}", e)),
+        };
+
+        ToolPipeline::new()
+            .await_approval()
+            .then(Effect::Shell {
+                command: parsed.command,
+                working_dir: parsed.working_dir,
+                timeout_secs: self.timeout_secs,
+            })
+    }
+
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
         if let Some(block) = ShellBlock::from_params(call_id, self.name(), params.clone()) {
             Box::new(block)
@@ -159,206 +169,126 @@ impl Tool for ShellTool {
             Box::new(ToolBlock::new(call_id, self.name(), params))
         }
     }
-
-    fn execute(&self, params: serde_json::Value) -> BoxStream<'static, ToolOutput> {
-        let timeout_secs = self.timeout_secs;
-        
-        Box::pin(stream! {
-            // Parse params
-            let params: ShellParams = match serde_json::from_value(params) {
-                Ok(p) => p,
-                Err(e) => {
-                    yield ToolOutput::Done(ToolResult::error(format!("Invalid params: {}", e)));
-                    return;
-                }
-            };
-
-            // Build command
-            let mut cmd = Command::new("bash");
-            cmd.arg("-c").arg(&params.command);
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            // Set working directory if specified
-            if let Some(ref working_dir) = params.working_dir {
-                let path = std::path::Path::new(working_dir);
-                if !path.exists() {
-                    yield ToolOutput::Done(ToolResult::error(format!(
-                        "Working directory does not exist: {}", working_dir
-                    )));
-                    return;
-                }
-                if !path.is_dir() {
-                    yield ToolOutput::Done(ToolResult::error(format!(
-                        "Not a directory: {}", working_dir
-                    )));
-                    return;
-                }
-                cmd.current_dir(working_dir);
-            }
-
-            // Spawn the process
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    yield ToolOutput::Done(ToolResult::error(format!("Failed to spawn: {}", e)));
-                    return;
-                }
-            };
-
-            let stdout = child.stdout.take();
-            let stderr = child.stderr.take();
-
-            let mut collected = String::new();
-
-            // Stream stdout line by line
-            if let Some(stdout) = stdout {
-                let mut reader = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let line_with_newline = format!("{}\n", line);
-                    collected.push_str(&line_with_newline);
-                    yield ToolOutput::Delta(line_with_newline);
-                }
-            }
-
-            // Collect stderr (could also stream this separately)
-            let mut stderr_output = String::new();
-            if let Some(stderr) = stderr {
-                let mut reader = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    stderr_output.push_str(&line);
-                    stderr_output.push('\n');
-                }
-            }
-
-            // Wait for process with timeout
-            let status = match tokio::time::timeout(
-                std::time::Duration::from_secs(timeout_secs),
-                child.wait(),
-            ).await {
-                Ok(Ok(status)) => status,
-                Ok(Err(e)) => {
-                    yield ToolOutput::Done(ToolResult::error(format!("Wait failed: {}", e)));
-                    return;
-                }
-                Err(_) => {
-                    let _ = child.kill().await;
-                    yield ToolOutput::Done(ToolResult::error(format!(
-                        "Command timed out after {} seconds", timeout_secs
-                    )));
-                    return;
-                }
-            };
-
-            // Build final result
-            let exit_code = status.code().unwrap_or(-1);
-            let mut result_text = collected;
-
-            if !stderr_output.is_empty() {
-                if !result_text.is_empty() {
-                    result_text.push('\n');
-                }
-                result_text.push_str("[stderr]\n");
-                result_text.push_str(&stderr_output);
-            }
-
-            if result_text.is_empty() {
-                result_text = "(no output)".to_string();
-            }
-
-            if exit_code != 0 {
-                result_text.push_str(&format!("\n[exit code: {}]", exit_code));
-            }
-
-            // Truncate if too long
-            const MAX_OUTPUT: usize = 50000;
-            if result_text.len() > MAX_OUTPUT {
-                result_text = format!(
-                    "{}\n\n[... output truncated ({} bytes total)]",
-                    &result_text[..MAX_OUTPUT],
-                    result_text.len()
-                );
-            }
-
-            if status.success() {
-                yield ToolOutput::Done(ToolResult::success(result_text));
-            } else {
-                yield ToolOutput::Done(ToolResult::error(result_text));
-            }
-        })
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
-
-    async fn run_tool(tool: &ShellTool, params: serde_json::Value) -> ToolResult {
-        let mut stream = tool.execute(params);
-        let mut result = None;
-        while let Some(output) = stream.next().await {
-            if let ToolOutput::Done(r) = output {
-                result = Some(r);
-            }
-        }
-        result.expect("Tool should return Done")
-    }
+    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
 
     #[tokio::test]
     async fn test_shell_echo() {
-        let tool = ShellTool::new();
-        let result = run_tool(&tool, json!({
-            "command": "echo 'hello world'"
-        })).await;
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
 
-        assert!(!result.is_error);
-        assert!(result.content.contains("hello world"));
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "test".to_string(),
+            name: "shell".to_string(),
+            params: json!({ "command": "echo 'hello world'" }),
+            decision: ToolDecision::Approve,
+        }]);
+
+        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
+            assert!(!is_error);
+            assert!(content.contains("hello world"));
+        } else {
+            panic!("Expected Completed event");
+        }
     }
 
     #[tokio::test]
     async fn test_shell_with_working_dir() {
-        let tool = ShellTool::new();
-        let result = run_tool(&tool, json!({
-            "command": "pwd",
-            "working_dir": "/tmp"
-        })).await;
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
 
-        assert!(!result.is_error);
-        assert!(result.content.contains("/tmp"));
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "test".to_string(),
+            name: "shell".to_string(),
+            params: json!({
+                "command": "pwd",
+                "working_dir": "/tmp"
+            }),
+            decision: ToolDecision::Approve,
+        }]);
+
+        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
+            assert!(!is_error);
+            assert!(content.contains("/tmp"));
+        } else {
+            panic!("Expected Completed event");
+        }
     }
 
     #[tokio::test]
     async fn test_shell_error() {
-        let tool = ShellTool::new();
-        let result = run_tool(&tool, json!({
-            "command": "exit 1"
-        })).await;
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
 
-        assert!(result.is_error);
-        assert!(result.content.contains("exit code: 1"));
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "test".to_string(),
+            name: "shell".to_string(),
+            params: json!({ "command": "exit 1" }),
+            decision: ToolDecision::Approve,
+        }]);
+
+        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
+            assert!(is_error);
+            assert!(content.contains("exit code: 1"));
+        } else {
+            panic!("Expected Completed event");
+        }
     }
 
     #[tokio::test]
     async fn test_shell_stderr() {
-        let tool = ShellTool::new();
-        let result = run_tool(&tool, json!({
-            "command": "echo 'error message' >&2"
-        })).await;
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
 
-        assert!(result.content.contains("[stderr]"));
-        assert!(result.content.contains("error message"));
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "test".to_string(),
+            name: "shell".to_string(),
+            params: json!({ "command": "echo 'error message' >&2" }),
+            decision: ToolDecision::Approve,
+        }]);
+
+        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
+            assert!(content.contains("[stderr]"));
+            assert!(content.contains("error message"));
+        } else {
+            panic!("Expected Completed event");
+        }
     }
 
     #[tokio::test]
     async fn test_shell_invalid_working_dir() {
-        let tool = ShellTool::new();
-        let result = run_tool(&tool, json!({
-            "command": "ls",
-            "working_dir": "/nonexistent/directory"
-        })).await;
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
 
-        assert!(result.is_error);
-        assert!(result.content.contains("does not exist"));
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "test".to_string(),
+            name: "shell".to_string(),
+            params: json!({
+                "command": "ls",
+                "working_dir": "/nonexistent/directory"
+            }),
+            decision: ToolDecision::Approve,
+        }]);
+
+        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
+            assert!(is_error);
+            assert!(content.contains("does not exist"));
+        } else {
+            panic!("Expected Completed event");
+        }
     }
 }

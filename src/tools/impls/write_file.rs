@@ -11,22 +11,17 @@
 //! ]
 //! ```
 
-use super::{once_ready, ComposableTool, Effect, Tool, ToolOutput, ToolPipeline, ToolResult};
+use super::{ComposableTool, Effect, ToolPipeline};
 use crate::ide::ToolPreview;
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
-use futures::stream::BoxStream;
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::fs;
-use std::path::{Path, PathBuf};
-
-/// Tool name constant to avoid ambiguity between trait implementations
-const TOOL_NAME: &str = "write_file";
+use std::path::PathBuf;
 
 /// Write file display block
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,109 +110,9 @@ struct WriteFileParams {
     content: String,
 }
 
-impl WriteFileTool {
-    fn execute_inner(&self, params: serde_json::Value) -> ToolResult {
-        let params: WriteFileParams = match serde_json::from_value(params) {
-            Ok(p) => p,
-            Err(e) => return ToolResult::error(format!("Invalid params: {}", e)),
-        };
-        let path = Path::new(&params.path);
-
-        // Check if file already exists
-        if path.exists() {
-            return ToolResult::error(format!(
-                "File already exists: {}. Use edit_file to modify existing files.",
-                params.path
-            ));
-        }
-
-        // Create parent directories if needed
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    return ToolResult::error(format!(
-                        "Failed to create parent directories: {}",
-                        e
-                    ));
-                }
-            }
-        }
-
-        // Write file
-        match fs::write(path, &params.content) {
-            Ok(()) => {
-                let line_count = params.content.lines().count();
-                let byte_count = params.content.len();
-                let abs_path = path.canonicalize().unwrap_or_else(|_| PathBuf::from(&params.path));
-                ToolResult::success(format!(
-                    "Created file: {} ({} lines, {} bytes)",
-                    params.path, line_count, byte_count
-                )).with_effect(Effect::IdeReloadBuffer { path: abs_path })
-            }
-            Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
-        }
-    }
-}
-
-impl Tool for WriteFileTool {
-    fn name(&self) -> &'static str {
-        TOOL_NAME
-    }
-
-    fn description(&self) -> &'static str {
-        "Create a new file with the specified content. Fails if the file already exists. \
-         Use edit_file to modify existing files."
-    }
-
-    fn schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path where the file will be created"
-                },
-                "content": {
-                    "type": "string",
-                    "description": "Content to write to the file"
-                }
-            },
-            "required": ["path", "content"]
-        })
-    }
-
-    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
-        if let Some(block) = WriteFileBlock::from_params(call_id, TOOL_NAME, params.clone()) {
-            Box::new(block)
-        } else {
-            Box::new(ToolBlock::new(call_id, TOOL_NAME, params))
-        }
-    }
-
-    fn execute(&self, params: serde_json::Value) -> BoxStream<'static, ToolOutput> {
-        once_ready(Ok(self.execute_inner(params)))
-    }
-
-    fn ide_preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
-        // Delegate to the effect pipeline
-        let pipeline = ComposableTool::compose(self, params.clone());
-        pipeline.effects.into_iter().find_map(|effect| {
-            if let Effect::IdeShowPreview { preview } = effect {
-                Some(preview)
-            } else {
-                None
-            }
-        })
-    }
-}
-
-// ============================================================================
-// ComposableTool Implementation
-// ============================================================================
-
 impl ComposableTool for WriteFileTool {
     fn name(&self) -> &'static str {
-        TOOL_NAME
+        "write_file"
     }
 
     fn description(&self) -> &'static str {
@@ -243,7 +138,6 @@ impl ComposableTool for WriteFileTool {
     }
 
     fn compose(&self, params: serde_json::Value) -> ToolPipeline {
-        // Parse parameters
         let parsed: Result<WriteFileParams, _> = serde_json::from_value(params.clone());
         let params = match parsed {
             Ok(p) => p,
@@ -285,10 +179,10 @@ impl ComposableTool for WriteFileTool {
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
-        if let Some(block) = WriteFileBlock::from_params(call_id, TOOL_NAME, params.clone()) {
+        if let Some(block) = WriteFileBlock::from_params(call_id, self.name(), params.clone()) {
             Box::new(block)
         } else {
-            Box::new(ToolBlock::new(call_id, TOOL_NAME, params))
+            Box::new(ToolBlock::new(call_id, self.name(), params))
         }
     }
 }
@@ -296,35 +190,37 @@ impl ComposableTool for WriteFileTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
+    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
+    use std::fs;
     use tempfile::tempdir;
-
-    async fn run_tool(tool: &WriteFileTool, params: serde_json::Value) -> ToolResult {
-        let mut stream = tool.execute(params);
-        while let Some(output) = stream.next().await {
-            if let ToolOutput::Done(r) = output {
-                return r;
-            }
-        }
-        panic!("Tool should return Done");
-    }
 
     #[tokio::test]
     async fn test_write_file() {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("new_file.txt");
 
-        let tool = WriteFileTool;
-        let result = run_tool(&tool, json!({
-            "path": file_path.to_str().unwrap(),
-            "content": "Hello, World!\nLine 2"
-        })).await;
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(WriteFileTool));
+        let mut executor = ToolExecutor::new(registry);
 
-        assert!(!result.is_error);
-        assert!(result.content.contains("Created file"));
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "test".to_string(),
+            name: "write_file".to_string(),
+            params: json!({
+                "path": file_path.to_str().unwrap(),
+                "content": "Hello, World!\nLine 2"
+            }),
+            decision: ToolDecision::Approve,
+        }]);
 
-        let content = fs::read_to_string(&file_path).unwrap();
-        assert_eq!(content, "Hello, World!\nLine 2");
+        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
+            assert!(!is_error, "Error: {}", content);
+            let file_content = fs::read_to_string(&file_path).unwrap();
+            assert_eq!(file_content, "Hello, World!\nLine 2");
+        } else {
+            panic!("Expected Completed event");
+        }
     }
 
     #[tokio::test]
@@ -333,14 +229,27 @@ mod tests {
         let file_path = dir.path().join("existing.txt");
         fs::write(&file_path, "existing content").unwrap();
 
-        let tool = WriteFileTool;
-        let result = run_tool(&tool, json!({
-            "path": file_path.to_str().unwrap(),
-            "content": "new content"
-        })).await;
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(WriteFileTool));
+        let mut executor = ToolExecutor::new(registry);
 
-        assert!(result.is_error);
-        assert!(result.content.contains("already exists"));
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "test".to_string(),
+            name: "write_file".to_string(),
+            params: json!({
+                "path": file_path.to_str().unwrap(),
+                "content": "new content"
+            }),
+            decision: ToolDecision::Approve,
+        }]);
+
+        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
+            assert!(is_error);
+            assert!(content.contains("already exists"));
+        } else {
+            panic!("Expected Completed event");
+        }
     }
 
     #[tokio::test]
@@ -348,13 +257,26 @@ mod tests {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("subdir").join("nested").join("file.txt");
 
-        let tool = WriteFileTool;
-        let result = run_tool(&tool, json!({
-            "path": file_path.to_str().unwrap(),
-            "content": "nested content"
-        })).await;
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(WriteFileTool));
+        let mut executor = ToolExecutor::new(registry);
 
-        assert!(!result.is_error);
-        assert!(file_path.exists());
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "test".to_string(),
+            name: "write_file".to_string(),
+            params: json!({
+                "path": file_path.to_str().unwrap(),
+                "content": "nested content"
+            }),
+            decision: ToolDecision::Approve,
+        }]);
+
+        if let Some(crate::tools::ToolEvent::Completed { is_error, .. }) = executor.next().await {
+            assert!(!is_error);
+            assert!(file_path.exists());
+        } else {
+            panic!("Expected Completed event");
+        }
     }
 }
