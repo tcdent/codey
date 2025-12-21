@@ -9,6 +9,7 @@ mod write_file;
 
 // Re-export from parent so tool impls can use `super::Tool`
 pub use super::{once_ready, Tool, ToolEffect, ToolOutput, ToolResult};
+pub use super::pipeline::{ComposableTool, Effect, ToolPipeline};
 
 pub use edit_file::EditFileTool;
 pub use fetch_url::FetchUrlTool;

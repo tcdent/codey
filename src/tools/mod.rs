@@ -1,8 +1,16 @@
 mod exec;
 mod impls;
+mod pipeline;
 
-pub use exec::{ToolCall, ToolDecision, ToolEffect, ToolEvent, ToolExecutor};
+pub use exec::{
+    IdeEffect, PipelineEvent, PipelineExecution, PipelinePhase,
+    ToolCall, ToolDecision, ToolEffect, ToolEvent, ToolExecutor,
+};
 pub use impls::{EditFileTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, TaskTool, WebSearchTool, WriteFileTool};
+pub use pipeline::{
+    ComposableTool, Effect, EffectContext, EffectResult, PipelineBuilder,
+    SuspendReason, ToolPipeline,
+};
 
 use crate::ide::ToolPreview;
 use crate::transcript::Block;
