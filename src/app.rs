@@ -21,7 +21,7 @@ use crate::llm::{Agent, AgentStep, RequestMode};
 use crate::tools::{ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
 use crate::tool_filter::ToolFilters;
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
-use crate::ide::{Ide, IdeEvent, Nvim};
+use crate::ide::{Diagnostic, Ide, IdeEvent, Nvim};
 use crate::ui::{Attachment, ChatView, InputBox};
 
 
@@ -230,6 +230,8 @@ pub struct App {
     tool_filters: ToolFilters,
     /// IDE connection for editor integration (e.g., Neovim)
     ide: Option<Box<dyn Ide>>,
+    /// LSP diagnostics from the IDE, keyed by file path
+    diagnostics: std::collections::HashMap<String, Vec<Diagnostic>>,
     /// Terminal event stream
     events: EventStream,
     /// Current input mode
@@ -341,6 +343,7 @@ impl App {
             alert: None,
             tool_filters,
             ide,
+            diagnostics: std::collections::HashMap::new(),
             events: EventStream::new(),
             input_mode: InputMode::Normal,
             agent: None,
@@ -594,7 +597,7 @@ impl App {
         Ok(())
     }
 
-    /// Handle an IDE event (selection changes, etc.)
+    /// Handle an IDE event (selection changes, diagnostics, etc.)
     fn handle_ide_event(&mut self, event: IdeEvent) {
         match event {
             IdeEvent::SelectionChanged(selection) => {
@@ -604,11 +607,33 @@ impl App {
                         .and_then(|cwd| std::path::Path::new(&sel.path).strip_prefix(cwd).ok())
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or(sel.path);
-                    
+
                     Attachment::ide_selection(path, sel.content, sel.start_line, sel.end_line)
                 });
                 self.input.set_ide_selection(attachment);
                 let _ = self.draw_throttled();
+            }
+            IdeEvent::Diagnostics(diagnostics) => {
+                // Group diagnostics by path and store them
+                if let Some(first) = diagnostics.first() {
+                    let path = first.path.clone();
+                    let rel_path = std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| std::path::Path::new(&path).strip_prefix(cwd).ok())
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or(path);
+
+                    if diagnostics.is_empty() {
+                        self.diagnostics.remove(&rel_path);
+                    } else {
+                        tracing::debug!(
+                            "Received {} diagnostics for {}",
+                            diagnostics.len(),
+                            rel_path
+                        );
+                        self.diagnostics.insert(rel_path, diagnostics);
+                    }
+                }
             }
         }
     }

@@ -10,7 +10,7 @@
 //! 2. Auto-discovered from tmux session name: `/tmp/nvim-{session}.sock`
 //! 3. Set via `$NVIM_LISTEN_ADDRESS` environment variable
 
-use super::{Ide, IdeEvent, Selection, ToolPreview};
+use super::{Diagnostic, DiagnosticSeverity, Ide, IdeEvent, Selection, ToolPreview};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use nvim_rs::{compat::tokio::Compat, create::tokio as create, Handler, Neovim, Value};
@@ -93,15 +93,18 @@ impl Handler for NvimHandler {
         args: Vec<Value>,
         _neovim: Neovim<Self::Writer>,
     ) {
-        match name.as_str() {
-            "codey_selection" => {
-                let event = parse_selection_event(&args);
-                if let Err(e) = self.event_tx.send(event).await {
-                    warn!("Failed to send IDE event: {}", e);
-                }
-            }
+        let event = match name.as_str() {
+            "codey_selection" => Some(parse_selection_event(&args)),
+            "codey_diagnostics" => parse_diagnostics_event(&args),
             other => {
                 debug!("Ignoring nvim notification: {}", other);
+                None
+            }
+        };
+
+        if let Some(event) = event {
+            if let Err(e) = self.event_tx.send(event).await {
+                warn!("Failed to send IDE event: {}", e);
             }
         }
     }
@@ -136,6 +139,53 @@ fn parse_selection_event(args: &[Value]) -> IdeEvent {
     });
 
     IdeEvent::SelectionChanged(selection)
+}
+
+/// Parse a diagnostics event from nvim notification args
+fn parse_diagnostics_event(args: &[Value]) -> Option<IdeEvent> {
+    // Expected format: [{ path, diagnostics: [{ line, col, severity, message, source? }] }]
+    let v = args.first()?;
+    let map = v.as_map()?;
+
+    let get_str = |m: &[(Value, Value)], key: &str| -> Option<String> {
+        m.iter()
+            .find(|(k, _)| k.as_str() == Some(key))
+            .and_then(|(_, v)| v.as_str().map(|s| s.to_string()))
+    };
+
+    let get_u32 = |m: &[(Value, Value)], key: &str| -> Option<u32> {
+        m.iter()
+            .find(|(k, _)| k.as_str() == Some(key))
+            .and_then(|(_, v)| v.as_u64().map(|n| n as u32))
+    };
+
+    let path = get_str(map, "path")?;
+
+    let diagnostics_val = map
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("diagnostics"))
+        .map(|(_, v)| v)?;
+
+    let diagnostics_arr = diagnostics_val.as_array()?;
+
+    let diagnostics: Vec<Diagnostic> = diagnostics_arr
+        .iter()
+        .filter_map(|d| {
+            let dm = d.as_map()?;
+            Some(Diagnostic {
+                path: path.clone(),
+                line: get_u32(dm, "line")?,
+                col: get_u32(dm, "col").unwrap_or(1),
+                end_line: get_u32(dm, "end_line"),
+                end_col: get_u32(dm, "end_col"),
+                severity: DiagnosticSeverity::from_lsp(get_u32(dm, "severity").unwrap_or(3)),
+                message: get_str(dm, "message").unwrap_or_default(),
+                source: get_str(dm, "source"),
+            })
+        })
+        .collect();
+
+    Some(IdeEvent::Diagnostics(diagnostics))
 }
 
 /// Connection to a Neovim instance
@@ -184,8 +234,8 @@ impl Nvim {
             event_rx,
         };
 
-        // Set up autocommands for selection tracking
-        nvim.setup_selection_tracking().await?;
+        // Set up autocommands for selection and diagnostics tracking
+        nvim.setup_event_tracking().await?;
 
         Ok(nvim)
     }
@@ -248,29 +298,30 @@ impl Nvim {
         &self.socket_path
     }
 
-    /// Set up autocommands to track visual mode selection changes
-    async fn setup_selection_tracking(&self) -> Result<()> {
+    /// Set up autocommands to track visual mode selection changes and LSP diagnostics
+    async fn setup_event_tracking(&self) -> Result<()> {
         // First, store our channel ID in a global variable
         let channel_info = self.exec_lua("return vim.api.nvim_get_chan_info(0)", vec![]).await?;
-        
+
         let channel_id = channel_info
             .as_map()
             .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("id")))
             .and_then(|(_, v)| v.as_i64())
             .unwrap_or(0);
-        
+
         debug!("Neovim assigned channel ID: {}", channel_id);
-        
-        // Set the channel ID then load the selection tracking script
+
+        // Set the channel ID then load tracking scripts
         let setup_lua = format!(
-            "vim.g.codey_channel_id = {}\n{}",
+            "vim.g.codey_channel_id = {}\n{}\n{}",
             channel_id,
-            include_str!("lua/selection_tracking.lua")
+            include_str!("lua/selection_tracking.lua"),
+            include_str!("lua/diagnostics_tracking.lua")
         );
-        
+
         self.exec_lua(&setup_lua, vec![]).await?;
-        info!("Set up neovim selection tracking");
-        
+        info!("Set up neovim event tracking (selection + diagnostics)");
+
         Ok(())
     }
 

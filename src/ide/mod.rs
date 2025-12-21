@@ -18,7 +18,6 @@ pub mod nvim;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 
 pub use nvim::Nvim;
 
@@ -65,11 +64,59 @@ pub struct Selection {
     pub end_line: u32,
 }
 
+/// Severity level for LSP diagnostics
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+    Info,
+    Hint,
+}
+
+impl DiagnosticSeverity {
+    /// Parse from LSP severity number (1=Error, 2=Warning, 3=Info, 4=Hint)
+    pub fn from_lsp(severity: u32) -> Self {
+        match severity {
+            1 => Self::Error,
+            2 => Self::Warning,
+            3 => Self::Info,
+            4 => Self::Hint,
+            _ => Self::Info,
+        }
+    }
+}
+
+impl std::fmt::Display for DiagnosticSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Error => write!(f, "error"),
+            Self::Warning => write!(f, "warning"),
+            Self::Info => write!(f, "info"),
+            Self::Hint => write!(f, "hint"),
+        }
+    }
+}
+
+/// A single LSP diagnostic from the IDE
+#[derive(Debug, Clone)]
+pub struct Diagnostic {
+    pub path: String,
+    pub line: u32,
+    pub col: u32,
+    pub end_line: Option<u32>,
+    pub end_col: Option<u32>,
+    pub severity: DiagnosticSeverity,
+    pub message: String,
+    pub source: Option<String>,
+}
+
 /// Events streamed from the IDE to the app
 #[derive(Debug, Clone)]
 pub enum IdeEvent {
     /// Selection changed (or cleared if None)
     SelectionChanged(Option<Selection>),
+    /// LSP diagnostics updated for a file (after save)
+    Diagnostics(Vec<Diagnostic>),
 }
 
 // ============================================================================
