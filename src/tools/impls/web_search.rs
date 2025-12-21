@@ -132,6 +132,7 @@ fn default_count() -> u32 {
 }
 
 /// Brave Search API response structures
+#[allow(dead_code)] // Fields used for JSON deserialization
 #[derive(Debug, Deserialize)]
 struct BraveSearchResponse {
     #[serde(default)]
@@ -140,6 +141,7 @@ struct BraveSearchResponse {
     query: Option<QueryInfo>,
 }
 
+#[allow(dead_code)] // Fields used for JSON deserialization
 #[derive(Debug, Deserialize)]
 struct QueryInfo {
     #[serde(default)]
@@ -152,6 +154,7 @@ struct WebResults {
     results: Vec<WebResult>,
 }
 
+#[allow(dead_code)] // Fields used for JSON deserialization
 #[derive(Debug, Deserialize)]
 struct WebResult {
     title: String,

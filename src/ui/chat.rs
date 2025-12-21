@@ -27,7 +27,7 @@ use ratatui::{
     Terminal,
 };
 
-use crate::transcript::{BlockType, Role, Status, Transcript, Turn, Block};
+use crate::transcript::{Role, Status, Transcript, Turn, Block};
 
 /// Chat view with native scrollback support.
 ///
@@ -62,9 +62,17 @@ impl ChatView {
         }
     }
 
-    /// Update the terminal width (call on resize)
-    pub fn set_width(&mut self, width: u16) {
-        self.width = width;
+    // ==================== Transcript mutation helpers ====================
+
+    /// Mark the first block of a turn as complete
+    // TODO: Confusing - name says "last" but accesses first_mut(). Review whether
+    // this should be first or last, and rename accordingly.
+    pub fn mark_last_block_complete(&mut self, turn_id: usize) {
+        if let Some(turn) = self.transcript.get_mut(turn_id) {
+            if let Some(block) = turn.content.first_mut() {
+                block.set_status(Status::Complete);
+            }
+        }
     }
 
     // ==================== Transcript mutation + render ====================
@@ -88,27 +96,6 @@ impl ChatView {
         self.render(terminal)
     }
 
-    /// Stream a delta to the current block and render
-    pub fn stream_delta(
-        &mut self,
-        block_type: BlockType,
-        text: &str,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> anyhow::Result<()> {
-        self.transcript.stream_delta(block_type, text);
-        self.render(terminal)
-    }
-
-    /// Mark the active block with a status and render
-    pub fn mark_active_block(
-        &mut self,
-        status: Status,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> anyhow::Result<()> {
-        self.transcript.mark_active_block(status);
-        self.render(terminal)
-    }
-
     /// Start a new block in the current turn and render
     pub fn start_block(
         &mut self,
@@ -122,6 +109,21 @@ impl ChatView {
     /// Add a complete turn (for initial setup, doesn't auto-render)
     pub fn add_turn(&mut self, role: Role, block: impl Block + 'static) -> usize {
         self.transcript.add_turn(role, block)
+    }
+
+    /// Replace the transcript and reset view state (used after compaction rotation)
+    /// Renders the new transcript fully to scrollback
+    pub fn reset_transcript(
+        &mut self,
+        transcript: Transcript,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> anyhow::Result<()> {
+        self.transcript = transcript;
+        self.lines.clear();
+        self.committed_count = 0;
+        self.frozen_turn_ids.clear();
+        self.turn_line_counts.clear();
+        self.render(terminal)
     }
 
     /// Render active (non-frozen) turns into the hot zone.

@@ -1,8 +1,6 @@
 //! Agent loop for handling conversations with tool execution
 
-use crate::auth::OAuthCredentials;
-use crate::transcript::{BlockType, Role, Transcript};
-use crate::tools::{ToolCall, ToolDecision, ToolRegistry};
+use tracing::{debug, error, info};
 use anyhow::Result;
 use futures::StreamExt;
 use genai::chat::{
@@ -10,7 +8,12 @@ use genai::chat::{
     ContentPart, MessageContent, ReasoningEffort, Thinking, Tool, ToolCall as GenaiToolCall, ToolResponse,
 };
 use genai::{Client, Headers};
-use tracing::{debug, error, info};
+
+use crate::auth::OAuthCredentials;
+use crate::config::GeneralConfig;
+use crate::transcript::{BlockType, Role, Transcript};
+use crate::tools::{ToolCall, ToolDecision, ToolRegistry};
+
 
 const ANTHROPIC_BETA_HEADER: &str = concat!(
     "oauth-2025-04-20,",
@@ -19,9 +22,18 @@ const ANTHROPIC_BETA_HEADER: &str = concat!(
     "fine-grained-tool-streaming-2025-05-14",
 );
 const ANTHROPIC_USER_AGENT: &str = "ai-sdk/anthropic/2.0.50 ai-sdk/provider-utils/3.0.18 runtime/bun/1.3.4";
-/// Default thinking budget in tokens
-const DEFAULT_THINKING_BUDGET: u32 = 2000;
 
+// Only expose internal ToolCall
+impl From<&GenaiToolCall> for ToolCall {
+    fn from(tc: &GenaiToolCall) -> Self {
+        Self {
+            call_id: tc.call_id.clone(),
+            name: tc.fn_name.clone(),
+            params: tc.fn_arguments.clone(),
+            decision: ToolDecision::Pending,
+        }
+    }
+}
 
 /// Token usage tracking
 #[derive(Debug, Clone, Copy, Default)]
@@ -98,17 +110,6 @@ enum StreamState {
     AwaitingToolDecision,
 }
 
-impl From<&GenaiToolCall> for ToolCall {
-    fn from(tc: &GenaiToolCall) -> Self {
-        Self {
-            call_id: tc.call_id.clone(),
-            name: tc.fn_name.clone(),
-            params: tc.fn_arguments.clone(),
-            decision: ToolDecision::Pending,
-        }
-    }
-}
-
 /// Request mode controlling agent behavior for a single request
 #[derive(Debug, Clone, Copy, Default)]
 pub enum RequestMode {
@@ -122,21 +123,21 @@ pub enum RequestMode {
 /// Options derived from a RequestMode
 pub struct RequestOptions {
     pub tools_enabled: bool,
-    pub thinking_budget: Option<u32>,
+    pub thinking_budget: u32,
     pub capture_tool_calls: bool,
 }
 
 impl RequestMode {
-    pub fn options(&self) -> RequestOptions {
+    pub fn options(&self, config: &GeneralConfig) -> RequestOptions {
         match self {
             Self::Normal => RequestOptions {
                 tools_enabled: true,
-                thinking_budget: None,
+                thinking_budget: config.thinking_budget,
                 capture_tool_calls: true,
             },
             Self::Compaction => RequestOptions {
                 tools_enabled: false,
-                thinking_budget: Some(8000),
+                thinking_budget: config.compaction_thinking_budget,
                 capture_tool_calls: false,
             },
         }
@@ -146,9 +147,7 @@ impl RequestMode {
 /// Agent for handling conversations
 pub struct Agent {
     client: Client,
-    model: String,
-    max_tokens: u32,
-    max_retries: u32,
+    config: GeneralConfig,
     tools: ToolRegistry,
     messages: Vec<ChatMessage>,
     system_prompt: String,
@@ -172,20 +171,16 @@ pub struct Agent {
 impl Agent {
     /// Create a new agent with initial messages
     pub fn new(
-        model: impl Into<String>,
+        config: GeneralConfig,
         system_prompt: &str,
-        max_tokens: u32,
-        max_retries: u32,
         oauth: Option<OAuthCredentials>,
     ) -> Self {
         Self {
             client: Client::default(),
-            model: model.into(),
-            system_prompt: system_prompt.to_string(),
-            max_tokens,
-            max_retries,
+            config,
             tools: ToolRegistry::new(),
             messages: vec![ChatMessage::system(system_prompt)],
+            system_prompt: system_prompt.to_string(),
             total_usage: Usage::default(),
             oauth,
             
@@ -398,7 +393,8 @@ impl Agent {
         }
         
         let mut request = ChatRequest::new(messages);
-        if self.mode.options().tools_enabled {
+        let mode_opts = self.mode.options(&self.config);
+        if mode_opts.tools_enabled {
             request = request.with_tools(self.get_tools());
         }
 
@@ -416,15 +412,12 @@ impl Agent {
             )])
         };
 
-        let mode_opts = self.mode.options();
-        let thinking_budget = mode_opts.thinking_budget.unwrap_or(DEFAULT_THINKING_BUDGET);
-        
         let chat_options = ChatOptions::default()
-            .with_max_tokens(self.max_tokens)
+            .with_max_tokens(self.config.max_tokens)
             .with_capture_usage(true)
             .with_capture_tool_calls(mode_opts.capture_tool_calls)
             .with_capture_reasoning_content(true)
-            .with_reasoning_effort(ReasoningEffort::Budget(thinking_budget))
+            .with_reasoning_effort(ReasoningEffort::Budget(mode_opts.thinking_budget))
             .with_extra_headers(headers);
 
         let mut attempt = 0u32;
@@ -433,7 +426,7 @@ impl Agent {
             attempt += 1;
             match self
                 .client
-                .exec_chat_stream(&self.model, request.clone(), Some(&chat_options))
+                .exec_chat_stream(&self.config.model, request.clone(), Some(&chat_options))
                 .await
             {
                 Ok(resp) => {
@@ -443,10 +436,10 @@ impl Agent {
                 Err(e) => {
                     let err = format!("{:#}", e);
                     error!("Chat request failed: {}", err);
-                    if attempt >= self.max_retries {
+                    if attempt >= self.config.max_retries {
                         return Err(AgentStep::Error(format!(
                             "API error ({}): {}",
-                            self.model, err
+                            self.config.model, err
                         )));
                     }
                     // Return retry step, caller should call next() again
@@ -551,7 +544,6 @@ impl Agent {
                             );
 
                             if self.streaming_tool_calls.is_empty() {
-                                debug!("Agent: no tool calls, finishing (messages={})", self.messages.len());
                                 match self.mode {
                                     RequestMode::Compaction => self.reset_with_summary(&self.streaming_text.clone()),
                                     RequestMode::Normal => {
@@ -659,7 +651,6 @@ impl Agent {
             });
 
             // Add tool responses
-            let response_count = self.tool_responses.len();
             for response in std::mem::take(&mut self.tool_responses) {
                 self.messages.push(ChatMessage::from(response));
             }

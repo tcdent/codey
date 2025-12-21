@@ -2,4 +2,4 @@
 
 mod agent;
 
-pub use agent::{Agent, AgentStep, RequestMode, Usage};
+pub use agent::{Agent, AgentStep, RequestMode};

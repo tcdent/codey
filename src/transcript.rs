@@ -466,15 +466,6 @@ pub struct Transcript {
 }
 
 impl Transcript {
-    pub fn new() -> Self {
-        Self {
-            turns: Vec::new(),
-            next_id: 0,
-            path: None,
-            current_turn_id: None,
-        }
-    }
-
     /// Create a new transcript with a specific path
     pub fn with_path(path: PathBuf) -> Self {
         Self {
@@ -516,12 +507,6 @@ impl Transcript {
 
     pub fn turns(&self) -> &[Turn] {
         &self.turns
-    }
-
-    pub fn clear(&mut self) {
-        self.turns.clear();
-        self.next_id = 0;
-        self.current_turn_id = None;
     }
 
     // =========================================================================

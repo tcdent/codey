@@ -38,6 +38,10 @@ pub struct GeneralConfig {
     pub max_retries: u32,
     /// Token threshold at which to trigger context compaction (default: 100,000)
     pub compaction_threshold: u32,
+    /// Thinking budget in tokens (default: 2,000)
+    pub thinking_budget: u32,
+    /// Thinking budget for compaction requests (default: 8,000)
+    pub compaction_thinking_budget: u32,
 }
 
 impl Default for GeneralConfig {
@@ -47,7 +51,9 @@ impl Default for GeneralConfig {
             working_dir: None,
             max_tokens: 8192,
             max_retries: 5,
-            compaction_threshold: 100_000,
+            compaction_threshold: 192_000,
+            thinking_budget: 2_000,
+            compaction_thinking_budget: 8_000,
         }
     }
 }

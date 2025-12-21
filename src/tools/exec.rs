@@ -172,10 +172,4 @@ impl ToolExecutor {
             }
         }
     }
-
-    /// Clear any pending tools (e.g., on interrupt)
-    pub fn clear(&mut self) {
-        self.pending.clear();
-        self.active = None;
-    }
 }

@@ -7,7 +7,7 @@ pub use impls::{EditFileTool, FetchUrlTool, ReadFileTool, ShellTool, WebSearchTo
 use crate::ide::{IdeAction, ToolPreview};
 use crate::transcript::Block;
 use anyhow::Result;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::BoxStream;
 use std::collections::HashMap;
 use std::sync::Arc;
 

@@ -4,6 +4,9 @@ version = "0.1.0-beta.0"
 edition = "2021"
 license = "MIT"
 
+[lints.rust]
+unexpected_cfgs = "allow"
+
 [features]
 default = []
 no-simd = []

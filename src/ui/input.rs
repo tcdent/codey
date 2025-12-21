@@ -131,14 +131,6 @@ impl Segment {
         }
     }
 
-    /// Get as mutable text, if this is a Text segment
-    fn as_text_mut(&mut self) -> Option<&mut String> {
-        match self {
-            Segment::Text(s) => Some(s),
-            Segment::Attachment(_) => None,
-        }
-    }
-
     /// Check if this is a text segment
     fn is_text(&self) -> bool {
         matches!(self, Segment::Text(_))
@@ -552,7 +544,7 @@ impl Widget for InputBoxWidget<'_> {
                     ),
                 };
                 
-                for ch in text.chars() {
+                for _ch in text.chars() {
                     // Check if we've moved to next wrapped line
                     while line_idx < wrapped_lines.len() {
                         let line_len = wrapped_lines[line_idx].chars().count();
