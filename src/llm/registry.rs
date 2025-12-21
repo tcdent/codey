@@ -44,6 +44,7 @@ impl AgentRegistry {
     }
 
     /// Remove an agent by ID
+    #[allow(dead_code)]
     pub fn remove(&mut self, id: AgentId) -> Option<Agent> {
         let agent = self.agents.remove(&id)?;
 
@@ -69,26 +70,6 @@ impl AgentRegistry {
     /// Get a reference to the primary agent's mutex
     pub fn primary(&self) -> Option<&Mutex<Agent>> {
         self.primary.and_then(|id| self.agents.get(&id))
-    }
-
-    /// Set the primary agent
-    pub fn set_primary(&mut self, id: AgentId) -> bool {
-        if self.agents.contains_key(&id) {
-            self.primary = Some(id);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Check if the registry is empty
-    pub fn is_empty(&self) -> bool {
-        self.agents.is_empty()
-    }
-
-    /// Get the number of agents
-    pub fn len(&self) -> usize {
-        self.agents.len()
     }
 
     /// Poll all agents for the next step

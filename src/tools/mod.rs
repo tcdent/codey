@@ -104,9 +104,6 @@ pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
 }
 
-/// Read-only tool names (safe for sub-agents)
-const READ_ONLY_TOOLS: &[&str] = &["read_file", "shell", "fetch_url", "web_search", "open_file"];
-
 impl ToolRegistry {
     /// Create a new tool registry with all default tools
     pub fn new() -> Self {
@@ -147,11 +144,6 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
         }
-    }
-
-    /// Check if a tool name is read-only
-    pub fn is_read_only(name: &str) -> bool {
-        READ_ONLY_TOOLS.contains(&name)
     }
 
     /// Register a tool

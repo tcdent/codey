@@ -50,11 +50,13 @@ pub enum ToolEffect {
         context: Option<String>,
     },
     /// Open a file in the IDE
+    #[allow(dead_code)]
     IdeOpen {
         path: PathBuf,
         line: Option<u32>,
     },
     /// Show a notification to the user
+    #[allow(dead_code)]
     Notify {
         message: String,
     },
