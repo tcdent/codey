@@ -1,6 +1,6 @@
 //! Open file tool - opens a file in the IDE at a specific line
 
-use super::{once_ready, Tool, ToolEffect, ToolOutput, ToolResult};
+use super::{once_ready, Effect, Tool, ToolOutput, ToolResult};
 use crate::transcript::{render_approval_prompt, Block, BlockType, Status};
 use futures::stream::BoxStream;
 use ratatui::{
@@ -47,11 +47,11 @@ impl OpenFileTool {
             None => format!("Opening {}", params.path),
         };
 
-        ToolResult::success(message).with_effects(vec![ToolEffect::IdeOpen {
+        ToolResult::success(message).with_effect(Effect::IdeOpen {
             path: abs_path,
             line: params.line,
             column: None,
-        }])
+        })
     }
 }
 

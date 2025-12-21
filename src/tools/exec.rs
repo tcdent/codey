@@ -1,10 +1,8 @@
-//! Streamable tool executor
+//! Tool execution engine
 //!
-//! This module provides two execution models:
-//! 1. ToolExecutor - for traditional streaming tools
-//! 2. PipelineExecutor - for effect-composed tools
+//! Provides the ToolExecutor for running tools and handling the
+//! approval -> execute -> effects lifecycle.
 
-use crate::ide::ToolPreview;
 use crate::llm::AgentId;
 use crate::tools::pipeline::{Effect, EffectContext, ToolPipeline};
 use crate::tools::ToolOutput;
@@ -12,7 +10,6 @@ use futures::stream::BoxStream;
 use futures::StreamExt;
 use std::collections::VecDeque;
 use std::fs;
-use std::path::PathBuf;
 
 /// A tool call pending execution
 #[derive(Debug, Clone)]
@@ -25,7 +22,6 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    /// Set the agent_id for this tool call
     pub fn with_agent_id(mut self, agent_id: AgentId) -> Self {
         self.agent_id = agent_id;
         self
@@ -35,49 +31,19 @@ impl ToolCall {
 /// Decision state for a pending tool
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolDecision {
-    /// Initial state, not yet requested
     #[default]
     Pending,
-    /// Approval has been requested from the user
     Requested,
-    /// User approved execution
     Approve,
-    /// User denied execution
     Deny,
-}
-
-/// Effects that tools can request
-/// These are processed by App after tool completion
-#[derive(Debug, Clone)]
-pub enum ToolEffect {
-    /// Spawn a background agent with a task
-    SpawnAgent {
-        task: String,
-        context: Option<String>,
-    },
-    /// Reload a buffer in the IDE (after file modification)
-    IdeReloadBuffer {
-        path: PathBuf,
-    },
-    /// Open/navigate to a file in the IDE
-    IdeOpen {
-        path: PathBuf,
-        line: Option<u32>,
-        column: Option<u32>,
-    },
-    /// Show a notification to the user
-    #[allow(dead_code)]
-    Notify {
-        message: String,
-    },
 }
 
 /// Events emitted by the tool executor
 #[derive(Debug)]
 pub enum ToolEvent {
-    /// A tool needs user approval
+    /// Tool needs user approval
     AwaitingApproval(ToolCall),
-    /// Streaming output from tool execution
+    /// Streaming output from execution
     OutputDelta {
         agent_id: AgentId,
         call_id: String,
@@ -89,7 +55,7 @@ pub enum ToolEvent {
         call_id: String,
         content: String,
         is_error: bool,
-        effects: Vec<ToolEffect>,
+        effects: Vec<Effect>,
     },
 }
 
@@ -101,7 +67,7 @@ struct ActiveExecution {
     collected_output: String,
 }
 
-/// Streamable tool executor
+/// Executes tools with approval flow and streaming output
 pub struct ToolExecutor {
     tools: crate::tools::ToolRegistry,
     pending: VecDeque<ToolCall>,
@@ -117,33 +83,26 @@ impl ToolExecutor {
         }
     }
 
-    /// Get a reference to the tool registry
     pub fn tools(&self) -> &crate::tools::ToolRegistry {
         &self.tools
     }
 
-    /// Add tool calls to the pending queue
     pub fn enqueue(&mut self, tool_calls: Vec<ToolCall>) {
         self.pending.extend(tool_calls);
     }
 
-    /// Get front pending tool
     pub fn front(&self) -> Option<&ToolCall> {
         self.pending.front()
     }
 
-    /// Mark a pending tool with a decision
     pub fn decide(&mut self, call_id: &str, decision: ToolDecision) {
-        tracing::debug!("ToolExecutor decision for {}: {:?}", call_id, decision);
         if let Some(tool) = self.pending.iter_mut().find(|t| t.call_id == call_id) {
             tool.decision = decision;
         }
     }
 
-    /// Poll for the next event
     pub async fn next(&mut self) -> Option<ToolEvent> {
         loop {
-            // If executing, poll the stream
             if let Some(active) = &mut self.active {
                 match active.stream.next().await {
                     Some(ToolOutput::Delta(delta)) => {
@@ -165,8 +124,6 @@ impl ToolExecutor {
                         });
                     }
                     None => {
-                        // Stream ended without Done - use collected output
-                        // TODO this should be unreachable
                         let active = self.active.take().unwrap();
                         return Some(ToolEvent::Completed {
                             agent_id: active.agent_id,
@@ -179,19 +136,13 @@ impl ToolExecutor {
                 }
             }
 
-            // Check front of pending queue
             let tool_call = self.pending.front_mut()?;
             match tool_call.decision {
                 ToolDecision::Pending => {
-                    // Send approval request
-                    tracing::debug!("ToolExecutor requesting approval for {}", tool_call.call_id);
                     tool_call.decision = ToolDecision::Requested;
                     return Some(ToolEvent::AwaitingApproval(tool_call.clone()));
                 }
-                ToolDecision::Requested => {
-                    // Already sent approval request, waiting for decide()
-                    return None;
-                }
+                ToolDecision::Requested => return None,
                 ToolDecision::Deny => {
                     let tool_call = self.pending.pop_front().unwrap();
                     return Some(ToolEvent::Completed {
@@ -203,18 +154,15 @@ impl ToolExecutor {
                     });
                 }
                 ToolDecision::Approve => {
-                    tracing::debug!("ToolExecutor executing approved tool {}", tool_call.call_id);
                     let tool_call = self.pending.pop_front().unwrap();
                     let tool = self.tools.get_arc(&tool_call.name);
                     let stream = tool.execute(tool_call.params.clone());
-
                     self.active = Some(ActiveExecution {
                         agent_id: tool_call.agent_id,
                         call_id: tool_call.call_id,
                         stream,
                         collected_output: String::new(),
                     });
-                    // Loop back to poll the new stream
                     continue;
                 }
             }
@@ -223,418 +171,178 @@ impl ToolExecutor {
 }
 
 // ============================================================================
-// Effect Pipeline Executor
+// Pipeline Execution
 // ============================================================================
 
 /// Execution phase for a pipeline
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelinePhase {
-    /// Running pre-effects (validation, preview)
-    Pre,
-    /// Awaiting user approval
+    Running,
     AwaitingApproval,
-    /// Running execution effects
-    Execute,
-    /// Running post-effects (cleanup)
-    Post,
-    /// Pipeline completed
     Done,
 }
 
-/// Events emitted by the pipeline executor
+/// Events emitted during pipeline execution
 #[derive(Debug)]
 pub enum PipelineEvent {
-    /// Pre-effects are running (IDE should show preview)
-    PreEffectsStarted {
-        preview: Option<ToolPreview>,
-    },
-
-    /// An IDE effect needs to be applied
-    IdeEffect(IdeEffect),
-
-    /// Pipeline needs user approval to continue
+    /// An effect needs to be applied
+    Effect(Effect),
+    /// Pipeline needs user approval
     AwaitingApproval,
-
-    /// Streaming output from pipeline execution
-    OutputDelta {
-        content: String,
-    },
-
-    /// Pipeline completed (success or error)
+    /// Streaming output
+    OutputDelta { content: String },
+    /// Pipeline completed
     Completed {
         content: String,
         is_error: bool,
-        post_effects: Vec<ToolEffect>,
+        /// Effects that follow the last executed effect (for post-completion handling)
+        remaining_effects: Vec<Effect>,
     },
 }
 
-/// IDE-specific effects that need to be applied by the app
-#[derive(Debug, Clone)]
-pub enum IdeEffect {
-    /// Open a file in the IDE
-    Open {
-        path: PathBuf,
-        line: Option<u32>,
-        column: Option<u32>,
-    },
-
-    /// Show a preview (diff, content)
-    ShowPreview {
-        preview: ToolPreview,
-    },
-
-    /// Reload a buffer
-    ReloadBuffer {
-        path: PathBuf,
-    },
-
-    /// Close/dismiss preview
-    ClosePreview,
-}
-
-/// State of an executing pipeline
+/// Executes a pipeline of effects
 pub struct PipelineExecution {
-    /// The pipeline being executed
-    pipeline: ToolPipeline,
-
-    /// Current execution phase
+    effects: Vec<Effect>,
+    index: usize,
     phase: PipelinePhase,
-
-    /// Index into the current phase's effects
-    effect_index: usize,
-
-    /// Context for the execution
     context: EffectContext,
-
-    /// Collected output
     output: String,
-
-    /// Whether an error occurred
     is_error: bool,
 }
 
 impl PipelineExecution {
-    /// Create a new pipeline execution
     pub fn new(pipeline: ToolPipeline, params: serde_json::Value) -> Self {
         Self {
-            pipeline,
-            phase: PipelinePhase::Pre,
-            effect_index: 0,
+            effects: pipeline.effects,
+            index: 0,
+            phase: PipelinePhase::Running,
             context: EffectContext::new(params),
             output: String::new(),
             is_error: false,
         }
     }
 
-    /// Convert pipeline post effects to ToolEffects for app.rs compatibility
-    fn collect_post_tool_effects(&self) -> Vec<ToolEffect> {
-        self.pipeline.post.iter().filter_map(|effect| {
-            match effect {
-                Effect::IdeReloadBuffer { path } => {
-                    Some(ToolEffect::IdeReloadBuffer { path: path.clone() })
-                }
-                Effect::IdeOpen { path, line, column } => {
-                    Some(ToolEffect::IdeOpen {
-                        path: path.clone(),
-                        line: *line,
-                        column: *column,
-                    })
-                }
-                Effect::SpawnAgent { task, context } => {
-                    Some(ToolEffect::SpawnAgent {
-                        task: task.clone(),
-                        context: context.clone(),
-                    })
-                }
-                Effect::Notify { message } => {
-                    Some(ToolEffect::Notify { message: message.clone() })
-                }
-                // Other effects don't map to ToolEffect
-                _ => None,
-            }
-        }).collect()
-    }
-
-    /// Get the current phase
     pub fn phase(&self) -> PipelinePhase {
         self.phase
     }
 
-    /// Resume execution after approval
     pub fn approve(&mut self) {
         if self.phase == PipelinePhase::AwaitingApproval {
-            self.phase = PipelinePhase::Execute;
-            self.effect_index = 0;
+            self.phase = PipelinePhase::Running;
         }
     }
 
-    /// Deny execution
     pub fn deny(&mut self) {
         self.output = "Denied by user".to_string();
         self.is_error = true;
         self.phase = PipelinePhase::Done;
     }
 
-    /// Execute the next step in the pipeline
-    ///
-    /// Returns the next event, or None if the pipeline needs to wait
-    /// (e.g., for approval) or is complete.
     pub fn step(&mut self) -> Option<PipelineEvent> {
-        loop {
-            match self.phase {
-                PipelinePhase::Pre => {
-                    if let Some(event) = self.run_pre_effects() {
-                        return Some(event);
-                    }
-                    // Pre-effects done, move to approval
-                    if self.pipeline.requires_approval {
-                        self.phase = PipelinePhase::AwaitingApproval;
-                        return Some(PipelineEvent::AwaitingApproval);
-                    } else {
-                        self.phase = PipelinePhase::Execute;
-                        self.effect_index = 0;
-                        continue;
-                    }
-                }
-
-                PipelinePhase::AwaitingApproval => {
-                    // Waiting for approve() or deny() to be called
-                    return None;
-                }
-
-                PipelinePhase::Execute => {
-                    if let Some(event) = self.run_execute_effects() {
-                        return Some(event);
-                    }
-                    // Execute effects done, move to post
-                    self.phase = PipelinePhase::Post;
-                    self.effect_index = 0;
-                    continue;
-                }
-
-                PipelinePhase::Post => {
-                    if let Some(event) = self.run_post_effects() {
-                        return Some(event);
-                    }
-                    // All done - collect post effects from pipeline
-                    self.phase = PipelinePhase::Done;
-                    let post_effects = self.collect_post_tool_effects();
-                    return Some(PipelineEvent::Completed {
-                        content: std::mem::take(&mut self.output),
-                        is_error: self.is_error,
-                        post_effects,
-                    });
-                }
-
-                PipelinePhase::Done => {
-                    return None;
-                }
-            }
+        if self.phase == PipelinePhase::AwaitingApproval {
+            return None;
         }
-    }
+        if self.phase == PipelinePhase::Done {
+            return None;
+        }
 
-    /// Run pre-effects, returning an event if one should be emitted
-    fn run_pre_effects(&mut self) -> Option<PipelineEvent> {
-        while self.effect_index < self.pipeline.pre.len() {
-            let effect = &self.pipeline.pre[self.effect_index];
-            self.effect_index += 1;
+        while self.index < self.effects.len() {
+            let effect = self.effects[self.index].clone();
+            self.index += 1;
 
-            match self.interpret_effect(effect.clone()) {
-                EffectInterpretation::Continue => continue,
-                EffectInterpretation::Emit(event) => return Some(event),
-                EffectInterpretation::Error(msg) => {
+            match self.interpret(effect) {
+                Interpretation::Continue => continue,
+                Interpretation::Emit(event) => return Some(event),
+                Interpretation::Suspend => {
+                    self.phase = PipelinePhase::AwaitingApproval;
+                    return Some(PipelineEvent::AwaitingApproval);
+                }
+                Interpretation::Error(msg) => {
                     self.output = msg;
                     self.is_error = true;
                     self.phase = PipelinePhase::Done;
                     return Some(PipelineEvent::Completed {
                         content: std::mem::take(&mut self.output),
                         is_error: true,
-                        post_effects: vec![],
+                        remaining_effects: vec![],
                     });
                 }
             }
         }
-        None
+
+        // All effects processed
+        self.phase = PipelinePhase::Done;
+        Some(PipelineEvent::Completed {
+            content: std::mem::take(&mut self.output),
+            is_error: self.is_error,
+            remaining_effects: vec![], // Could collect remaining if we want
+        })
     }
 
-    /// Run execute effects, returning an event if one should be emitted
-    fn run_execute_effects(&mut self) -> Option<PipelineEvent> {
-        while self.effect_index < self.pipeline.execute.len() {
-            let effect = &self.pipeline.execute[self.effect_index];
-            self.effect_index += 1;
-
-            match self.interpret_effect(effect.clone()) {
-                EffectInterpretation::Continue => continue,
-                EffectInterpretation::Emit(event) => return Some(event),
-                EffectInterpretation::Error(msg) => {
-                    self.output = msg;
-                    self.is_error = true;
-                    self.phase = PipelinePhase::Done;
-                    return Some(PipelineEvent::Completed {
-                        content: std::mem::take(&mut self.output),
-                        is_error: true,
-                        post_effects: vec![],
-                    });
-                }
-            }
-        }
-        None
-    }
-
-    /// Run post effects, returning an event if one should be emitted
-    fn run_post_effects(&mut self) -> Option<PipelineEvent> {
-        while self.effect_index < self.pipeline.post.len() {
-            let effect = &self.pipeline.post[self.effect_index];
-            self.effect_index += 1;
-
-            match self.interpret_effect(effect.clone()) {
-                EffectInterpretation::Continue => continue,
-                EffectInterpretation::Emit(event) => return Some(event),
-                EffectInterpretation::Error(msg) => {
-                    // Errors in post-effects are logged but don't fail the tool
-                    tracing::warn!("Post-effect error: {}", msg);
-                    continue;
-                }
-            }
-        }
-        None
-    }
-
-    /// Interpret a single effect
-    fn interpret_effect(&mut self, effect: Effect) -> EffectInterpretation {
+    fn interpret(&mut self, effect: Effect) -> Interpretation {
         match effect {
-            // Validation effects
+            // Validation
             Effect::ValidateParams { error } => {
-                if let Some(msg) = error {
-                    EffectInterpretation::Error(msg)
-                } else {
-                    EffectInterpretation::Continue
-                }
+                error.map_or(Interpretation::Continue, Interpretation::Error)
             }
-
-            Effect::ValidateFileExists { path } => {
+            Effect::ValidateFileExists { ref path } => {
                 if path.exists() {
-                    EffectInterpretation::Continue
+                    Interpretation::Continue
                 } else {
-                    EffectInterpretation::Error(format!(
-                        "File not found: {}",
-                        path.display()
-                    ))
+                    Interpretation::Error(format!("File not found: {}", path.display()))
                 }
             }
-
-            Effect::ValidateFileReadable { path } => {
-                match fs::metadata(&path) {
-                    Ok(m) if m.is_file() => EffectInterpretation::Continue,
-                    Ok(_) => EffectInterpretation::Error(format!(
-                        "Not a file: {}",
-                        path.display()
-                    )),
-                    Err(e) => EffectInterpretation::Error(format!(
-                        "Cannot read file {}: {}",
-                        path.display(),
-                        e
-                    )),
-                }
-            }
-
+            Effect::ValidateFileReadable { ref path } => match fs::metadata(path) {
+                Ok(m) if m.is_file() => Interpretation::Continue,
+                Ok(_) => Interpretation::Error(format!("Not a file: {}", path.display())),
+                Err(e) => Interpretation::Error(format!("Cannot read {}: {}", path.display(), e)),
+            },
             Effect::Validate { ok, error } => {
-                if ok {
-                    EffectInterpretation::Continue
-                } else {
-                    EffectInterpretation::Error(error)
-                }
+                if ok { Interpretation::Continue } else { Interpretation::Error(error) }
             }
 
-            // IDE effects
-            Effect::IdeOpen { path, line, column } => {
-                EffectInterpretation::Emit(PipelineEvent::IdeEffect(IdeEffect::Open {
-                    path,
-                    line,
-                    column,
-                }))
-            }
-
-            Effect::IdeShowPreview { preview } => {
-                EffectInterpretation::Emit(PipelineEvent::IdeEffect(IdeEffect::ShowPreview {
-                    preview,
-                }))
-            }
-
-            Effect::IdeReloadBuffer { path } => {
-                EffectInterpretation::Emit(PipelineEvent::IdeEffect(IdeEffect::ReloadBuffer {
-                    path,
-                }))
-            }
-
-            Effect::IdeClosePreview => {
-                EffectInterpretation::Emit(PipelineEvent::IdeEffect(IdeEffect::ClosePreview))
-            }
+            // IDE effects - emit for app to handle
+            Effect::IdeOpen { .. }
+            | Effect::IdeShowPreview { .. }
+            | Effect::IdeReloadBuffer { .. }
+            | Effect::IdeClosePreview => Interpretation::Emit(PipelineEvent::Effect(effect)),
 
             // Control flow
-            Effect::AwaitApproval => {
-                // This shouldn't happen in interpret - it's handled at the phase level
-                EffectInterpretation::Continue
-            }
-
+            Effect::AwaitApproval => Interpretation::Suspend,
             Effect::StreamDelta { content } => {
                 self.output.push_str(&content);
-                EffectInterpretation::Emit(PipelineEvent::OutputDelta { content })
+                Interpretation::Emit(PipelineEvent::OutputDelta { content })
             }
-
             Effect::Output { content } => {
                 self.output = content;
-                EffectInterpretation::Continue
+                Interpretation::Continue
             }
+            Effect::Error { message } => Interpretation::Error(message),
 
-            Effect::Error { message } => {
-                EffectInterpretation::Error(message)
-            }
-
-            // File system effects
-            Effect::ReadFile { path, context_key } => {
-                match fs::read_to_string(&path) {
-                    Ok(content) => {
-                        self.context.store(context_key, content);
-                        EffectInterpretation::Continue
-                    }
-                    Err(e) => EffectInterpretation::Error(format!(
-                        "Failed to read {}: {}",
-                        path.display(),
-                        e
-                    )),
+            // File system
+            Effect::ReadFile { ref path, ref context_key } => match fs::read_to_string(path) {
+                Ok(content) => {
+                    self.context.store(context_key.clone(), content);
+                    Interpretation::Continue
                 }
-            }
+                Err(e) => Interpretation::Error(format!("Failed to read {}: {}", path.display(), e)),
+            },
+            Effect::WriteFile { ref path, ref content } => match fs::write(path, content) {
+                Ok(()) => Interpretation::Continue,
+                Err(e) => Interpretation::Error(format!("Failed to write {}: {}", path.display(), e)),
+            },
 
-            Effect::WriteFile { path, content } => {
-                match fs::write(&path, &content) {
-                    Ok(()) => EffectInterpretation::Continue,
-                    Err(e) => EffectInterpretation::Error(format!(
-                        "Failed to write {}: {}",
-                        path.display(),
-                        e
-                    )),
-                }
-            }
-
-            // Agent effects - these are collected from pipeline.post at completion
-            Effect::SpawnAgent { .. } => {
-                EffectInterpretation::Continue
-            }
-
-            Effect::Notify { .. } => {
-                EffectInterpretation::Continue
+            // Agent/notification effects - emit for app to handle
+            Effect::SpawnAgent { .. } | Effect::Notify { .. } => {
+                Interpretation::Emit(PipelineEvent::Effect(effect))
             }
         }
     }
 }
 
-/// Result of interpreting an effect
-enum EffectInterpretation {
-    /// Continue to the next effect
+enum Interpretation {
     Continue,
-    /// Emit an event
     Emit(PipelineEvent),
-    /// Error - stop execution
+    Suspend,
     Error(String),
 }

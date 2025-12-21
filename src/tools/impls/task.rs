@@ -1,8 +1,7 @@
 //! Task tool for spawning background agents
 
-use super::{once_ready, Tool, ToolOutput, ToolResult};
+use super::{once_ready, Effect, Tool, ToolOutput, ToolResult};
 use crate::impl_base_block;
-use crate::tools::ToolEffect;
 use crate::transcript::{render_approval_prompt, Block, BlockType, ToolBlock, Status};
 use futures::stream::BoxStream;
 use ratatui::{
@@ -149,15 +148,12 @@ impl Tool for TaskTool {
             Err(e) => return once_ready(Ok(ToolResult::error(format!("Invalid params: {}", e)))),
         };
 
-        // Create the effect to spawn a background agent
-        let effect = ToolEffect::SpawnAgent {
-            task: params.task.clone(),
-            context: params.context,
-        };
-
         // Return result with the spawn effect
         let result = ToolResult::success(format!("Spawning background agent for task: {}", params.task))
-            .with_effects(vec![effect]);
+            .with_effect(Effect::SpawnAgent {
+                task: params.task,
+                context: params.context,
+            });
 
         once_ready(Ok(result))
     }

@@ -18,7 +18,7 @@ use ratatui::{
 use crate::commands::Command;
 use crate::config::{AgentRuntimeConfig, Config, ToolAccess};
 use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
-use crate::tools::{ToolDecision, ToolEffect, ToolEvent, ToolExecutor, ToolRegistry};
+use crate::tools::{Effect, ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
 use crate::tool_filter::ToolFilters;
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
 use crate::ide::{Ide, IdeEvent, Nvim};
@@ -901,57 +901,53 @@ impl App {
     }
 
     /// Apply a tool effect
-    /// Effects are side-effects requested by tools, processed after tool completion
-    async fn apply_effect(&mut self, _agent_id: AgentId, effect: ToolEffect) -> Result<()> {
+    async fn apply_effect(&mut self, _agent_id: AgentId, effect: Effect) -> Result<()> {
         match effect {
-            ToolEffect::SpawnAgent { task, context } => {
+            Effect::SpawnAgent { task, context } => {
                 tracing::info!("SpawnAgent effect: task={}, context={:?}", task, context);
 
-                // Choose tool registry based on background agent's access level
                 let tools = match self.config.agents.background.tool_access {
                     ToolAccess::Full => ToolRegistry::new(),
                     ToolAccess::ReadOnly => ToolRegistry::read_only(),
                     ToolAccess::None => ToolRegistry::empty(),
                 };
 
-                // Build system prompt with context
                 let system_prompt = if let Some(ctx) = &context {
                     format!("{}\n\n## Context\n{}", SUB_AGENT_PROMPT, ctx)
                 } else {
                     SUB_AGENT_PROMPT.to_string()
                 };
 
-                // Create and register the sub-agent
                 let mut sub_agent = Agent::with_tools(
                     AgentRuntimeConfig::background(&self.config),
                     &system_prompt,
                     self.oauth.clone(),
                     tools,
                 );
-
-                // Send the task to the sub-agent
                 sub_agent.send_request(&task, RequestMode::Normal);
 
                 let sub_agent_id = self.agents.register(sub_agent);
                 tracing::info!("Spawned sub-agent {} for task: {}", sub_agent_id, task);
             }
-            ToolEffect::IdeReloadBuffer { path } => {
+            Effect::IdeReloadBuffer { path } => {
                 if let Some(ide) = &self.ide {
                     if let Err(e) = ide.reload_buffer(&path.to_string_lossy()).await {
-                        tracing::warn!("Failed to reload buffer in IDE: {}", e);
+                        tracing::warn!("Failed to reload buffer: {}", e);
                     }
                 }
             }
-            ToolEffect::IdeOpen { path, line, column } => {
+            Effect::IdeOpen { path, line, column } => {
                 if let Some(ide) = &self.ide {
                     if let Err(e) = ide.navigate_to(&path.to_string_lossy(), line, column).await {
                         tracing::warn!("Failed to open file in IDE: {}", e);
                     }
                 }
             }
-            ToolEffect::Notify { message } => {
+            Effect::Notify { message } => {
                 self.alert = Some(message);
             }
+            // Other effects are handled during pipeline execution, not post-completion
+            _ => {}
         }
         Ok(())
     }

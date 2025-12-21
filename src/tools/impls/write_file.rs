@@ -1,19 +1,17 @@
 //! Write file tool
 //!
-//! The write_file tool as a composition of effects:
+//! The write_file tool as a chain of effects:
 //! ```text
 //! write_file = [
-//!     Pre:  ValidateParams       // Check params are well-formed
-//!           ValidateFileNotExists // Ensure file doesn't exist
-//!           IdeShowPreview       // Show the new file content
-//!     ---:  AwaitApproval        // Wait for user approval
-//!     Exec: WriteFile            // Create the file
-//!           Output               // Report success
-//!     Post: IdeReloadBuffer      // Reload buffer in IDE
+//!     IdeShowPreview,   // Show the new file content
+//!     AwaitApproval,    // Wait for user approval
+//!     WriteFile,        // Create the file
+//!     Output,           // Report success
+//!     IdeReloadBuffer,  // Reload buffer in IDE
 //! ]
 //! ```
 
-use super::{once_ready, ComposableTool, Effect, Tool, ToolEffect, ToolOutput, ToolPipeline, ToolResult};
+use super::{once_ready, ComposableTool, Effect, Tool, ToolOutput, ToolPipeline, ToolResult};
 use crate::ide::ToolPreview;
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
@@ -154,7 +152,7 @@ impl WriteFileTool {
                 ToolResult::success(format!(
                     "Created file: {} ({} lines, {} bytes)",
                     params.path, line_count, byte_count
-                )).with_effects(vec![ToolEffect::IdeReloadBuffer { path: abs_path }])
+                )).with_effect(Effect::IdeReloadBuffer { path: abs_path })
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
@@ -201,9 +199,9 @@ impl Tool for WriteFileTool {
     }
 
     fn ide_preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
-        // Delegate to the effect pipeline - extract preview from pre-effects
+        // Delegate to the effect pipeline
         let pipeline = ComposableTool::compose(self, params.clone());
-        pipeline.pre.into_iter().find_map(|effect| {
+        pipeline.effects.into_iter().find_map(|effect| {
             if let Effect::IdeShowPreview { preview } = effect {
                 Some(preview)
             } else {
@@ -264,23 +262,18 @@ impl ComposableTool for WriteFileTool {
             ));
         }
 
-        // Build the effect pipeline
+        // Build the effect chain
+        let abs_path = path.canonicalize().unwrap_or_else(|_| path.clone());
         ToolPipeline::new()
-            // Pre-approval: Show preview of file content
-            .pre(Effect::IdeShowPreview {
+            .then(Effect::IdeShowPreview {
                 preview: ToolPreview::FileContent {
                     path: params.path.clone(),
                     content: params.content.clone(),
                 },
             })
-            // Approval is required by default
-            .approval(true)
-            // Execute: Write the file
-            .exec(Effect::WriteFile {
-                path: path.clone(),
-                content: params.content.clone(),
-            })
-            .exec(Effect::Output {
+            .await_approval()
+            .then(Effect::WriteFile { path: path.clone(), content: params.content.clone() })
+            .then(Effect::Output {
                 content: format!(
                     "Created file: {} ({} lines, {} bytes)",
                     params.path,
@@ -288,10 +281,7 @@ impl ComposableTool for WriteFileTool {
                     params.content.len()
                 ),
             })
-            // Post: Reload buffer
-            .post(Effect::IdeReloadBuffer {
-                path: path.canonicalize().unwrap_or(path),
-            })
+            .then(Effect::IdeReloadBuffer { path: abs_path })
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {

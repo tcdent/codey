@@ -1,23 +1,18 @@
 //! Edit file tool with search/replace
 //!
-//! This tool demonstrates both the traditional `Tool` trait implementation
-//! and the new `ComposableTool` trait for effect-based composition.
-//!
-//! The edit_file tool as a composition of effects:
+//! The edit_file tool as a chain of effects:
 //! ```text
 //! edit_file = [
-//!     Pre: ValidateParams      // Check params are well-formed
-//!          ValidateFileExists  // Ensure file exists
-//!          IdeOpen             // Open file in IDE
-//!          IdeShowPreview      // Show the diff preview
-//!     ---: AwaitApproval       // Wait for user approval
-//!     Exec: WriteFile          // Apply the edits
-//!          Output              // Report success
-//!     Post: IdeReloadBuffer    // Reload the modified buffer
+//!     IdeOpen,          // Open file in IDE
+//!     IdeShowPreview,   // Show the diff preview
+//!     AwaitApproval,    // Wait for user approval
+//!     WriteFile,        // Apply the edits
+//!     Output,           // Report success
+//!     IdeReloadBuffer,  // Reload the modified buffer
 //! ]
 //! ```
 
-use super::{once_ready, ComposableTool, Effect, Tool, ToolEffect, ToolOutput, ToolPipeline, ToolResult};
+use super::{once_ready, ComposableTool, Effect, Tool, ToolOutput, ToolPipeline, ToolResult};
 use crate::ide::ToolPreview;
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
@@ -182,9 +177,9 @@ impl Tool for EditFileTool {
     }
 
     fn ide_preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
-        // Delegate to the effect pipeline - extract preview from pre-effects
+        // Delegate to the effect pipeline
         let pipeline = ComposableTool::compose(self, params.clone());
-        pipeline.pre.into_iter().find_map(|effect| {
+        pipeline.effects.into_iter().find_map(|effect| {
             if let Effect::IdeShowPreview { preview } = effect {
                 Some(preview)
             } else {
@@ -285,7 +280,7 @@ impl EditFileTool {
                     params.edits.len(),
                     params.path,
                     summary
-                )).with_effects(vec![ToolEffect::IdeReloadBuffer { path: abs_path }])
+                )).with_effect(Effect::IdeReloadBuffer { path: abs_path })
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
@@ -468,39 +463,23 @@ impl ComposableTool for EditFileTool {
         let edit_count = params.edits.len();
         let abs_path = path.canonicalize().unwrap_or_else(|_| path.clone());
 
-        // Build the effect pipeline
+        // Build the effect chain
         ToolPipeline::new()
-            // Pre-approval: Open IDE and show preview
-            .pre(Effect::IdeOpen {
-                path: abs_path.clone(),
-                line: None,
-                column: None,
-            })
-            .pre(Effect::IdeShowPreview {
+            .then(Effect::IdeOpen { path: abs_path.clone(), line: None, column: None })
+            .then(Effect::IdeShowPreview {
                 preview: ToolPreview::Diff {
                     path: params.path.clone(),
                     original,
                     modified: modified.clone(),
                 },
             })
-            // Approval is required by default
-            .approval(true)
-            // Execute: Write the file
-            .exec(Effect::WriteFile {
-                path: abs_path.clone(),
-                content: modified,
+            .await_approval()
+            .then(Effect::WriteFile { path: abs_path.clone(), content: modified })
+            .then(Effect::Output {
+                content: format!("Successfully applied {} edit(s) to {}", edit_count, params.path),
             })
-            .exec(Effect::Output {
-                content: format!(
-                    "Successfully applied {} edit(s) to {}",
-                    edit_count, params.path
-                ),
-            })
-            // Post: Reload buffer and close preview
-            .post(Effect::IdeReloadBuffer {
-                path: abs_path,
-            })
-            .post(Effect::IdeClosePreview)
+            .then(Effect::IdeReloadBuffer { path: abs_path })
+            .then(Effect::IdeClosePreview)
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
