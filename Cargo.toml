@@ -17,7 +17,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
 # LLM client (multi-provider)
-genai = "0.4"
+genai = "0.4.4"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
