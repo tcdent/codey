@@ -17,7 +17,7 @@ use ratatui::{
 
 use crate::commands::Command;
 use crate::config::Config;
-use crate::llm::{Agent, AgentStep, RequestMode, Usage};
+use crate::llm::{Agent, AgentStep, RequestMode};
 use crate::tools::{ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
 use crate::tool_filter::ToolFilters;
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
@@ -202,15 +202,11 @@ fn map_key_tool_approval(key: KeyEvent) -> Option<Action> {
 pub struct App {
     config: Config,
     terminal: Terminal<CrosstermBackend<Stdout>>,
-    /// Conversation history
-    transcript: Transcript,
-    /// UI views
+    /// Chat view (owns the transcript)
     chat: ChatView,
     input: InputBox,
     /// Connection status to the LLM service (TODO unused)
     status: ConnectionStatus,
-    /// LLM usage statistics (TODO: this should live on Agent)
-    usage: Usage,
     /// Flag to indicate a quit request
     should_quit: bool,
     continue_session: bool,
@@ -305,11 +301,9 @@ impl App {
         Ok(Self {
             config,
             terminal,
-            transcript,
-            chat: ChatView::new(chat_height),
+            chat: ChatView::new(transcript, terminal_size.0, chat_height),
             input: InputBox::new(),
             status: ConnectionStatus::Disconnected,
-            usage: Usage::default(),
             should_quit: false,
             continue_session,
             message_queue: VecDeque::new(),
@@ -322,6 +316,22 @@ impl App {
             agent: None,
             tool_executor: ToolExecutor::new(ToolRegistry::new()),
         })
+    }
+
+    /// Cleanup terminal
+    fn cleanup(&mut self) -> Result<()> {
+        disable_raw_mode().context("Failed to disable raw mode")?;
+        execute!(
+            self.terminal.backend_mut(),
+            crossterm::event::DisableBracketedPaste,
+            crossterm::event::PopKeyboardEnhancementFlags
+        )
+        .context("Failed to cleanup terminal")?;
+        self.terminal
+            .show_cursor()
+            .context("Failed to show cursor")?;
+
+        Ok(())
     }
 
     /// Run the main event loop - purely event-driven rendering
@@ -339,9 +349,9 @@ impl App {
         );
 
         if self.continue_session {
-            agent.restore_from_transcript(&self.transcript);
+            agent.restore_from_transcript(&self.chat.transcript);
         } else {
-            self.transcript.add_turn(Role::Assistant, TextBlock::pending(WELCOME_MESSAGE));
+            self.chat.add_turn(Role::Assistant, TextBlock::pending(WELCOME_MESSAGE));
         }
         self.agent = Some(agent);
         self.status = ConnectionStatus::Connected;
@@ -349,19 +359,17 @@ impl App {
         self.draw()?;
 
         // Initial render - populate hot zone from transcript
-        let size = self.terminal.size()?;
-        self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+        self.chat.render(&mut self.terminal)?;
         self.draw()?;
         
+        // CANCEL-SAFETY: When one branch of tokio::select! completes, all other
+        // futures are dropped (not paused). Any async fn polled here must store
+        // its state on `self`, not in local variables, so it can resume correctly
+        // when a new future is created on the next loop iteration.
         loop {
-            // Start any queued messages (non-blocking)
-            if let Some(request) = self.message_queue.pop_front() {
-                self.start_message(request).await?;
-            }
-
             tokio::select! {
-                biased;  // Check events first for responsive interrupts
-                
+                biased;
+
                 Some(term_event) = self.events.next() => {
                     match term_event {
                         Ok(event) => {
@@ -371,7 +379,7 @@ impl App {
                                         if let Some(agent) = self.agent.as_mut() {
                                             agent.cancel();
                                         }
-                                        self.transcript.finish_turn();
+                                        let _ = self.chat.finish_turn(&mut self.terminal);
                                         self.input_mode = InputMode::Normal;
                                         //self.tool_executor.clear();
                                     }
@@ -392,6 +400,10 @@ impl App {
 
                 Some(tool_event) = self.tool_executor.next() => {
                     self.handle_tool_event(tool_event).await?;
+                }
+
+                Some(request) = async { self.message_queue.pop_front() }, if self.input_mode == InputMode::Normal => {
+                    self.handle_message(request).await?;
                 }
             }
 
@@ -420,7 +432,7 @@ impl App {
         let chat_widget = self.chat.widget();
         let input_widget = self.input.widget(
             &self.config.general.model,
-            self.usage.context_tokens,
+            self.agent.as_ref().map_or(0, |a| a.total_usage().context_tokens),
         );
         let alert = self.alert.clone();
 
@@ -465,7 +477,7 @@ impl App {
         self.alert = None;
         
         if !matches!(action, Action::InsertChar(_)) {
-            tracing::debug!("Current input content: {}", self.input.content());
+            tracing::debug!("Action received: {:?}", action);
         }
         match action {
             Action::Interrupt => return ActionResult::Interrupt,
@@ -512,26 +524,27 @@ impl App {
                 }
             }
             Action::Resize(_w, _h) => {
-                // Terminal resized - just trigger a redraw
+                // TODO trigger redraw with new dimensions
             }
         }
 
         ActionResult::Continue
     }
 
+    /// Queue a user message or command for processing
     fn queue_message(&mut self, content: String) {
         let message = match Command::parse(&content) {
             Some(command) => {
                 // Slash command
                 let name = command.name().to_string();
-                let turn_id = self.transcript.add_turn(
+                let turn_id = self.chat.add_turn(
                     Role::User, 
                     TextBlock::pending(&format!("/{}", name)));
                 MessageRequest::Command(name, turn_id)
             },
             None => {
                 // Regular user message
-                let turn_id = self.transcript.add_turn(
+                let turn_id = self.chat.add_turn(
                     Role::User, 
                     TextBlock::pending(&content));
                 MessageRequest::User(content, turn_id)
@@ -539,23 +552,20 @@ impl App {
         };
         self.message_queue.push_back(message);
 
-        // TODO fix this when we clean up render calls. 
-        let size = self.terminal.size()
-            .expect("Failed to get terminal size");
-        self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)
-            .expect("Failed to render chat to scrollback");
+        self.chat.render(&mut self.terminal)
+            .expect("Failed to render chat");
         self.draw()
             .expect("Failed to draw terminal after queuing message");
     }
 
+    /// Queue a compaction request
     pub fn queue_compaction(&mut self) {
         // TODO push_front?
         self.message_queue.push_back(MessageRequest::Compaction);
     }
     
-    /// Start processing a message (non-blocking)
-    /// Sets up the agent to stream and changes input mode
-    async fn start_message(&mut self, request: MessageRequest) -> Result<()> {
+    /// Start processing a message request
+    async fn handle_message(&mut self, request: MessageRequest) -> Result<()> {
         if let Some(agent) = self.agent.as_mut() {
             if let Err(e) = agent.refresh_oauth_if_needed().await {
                 tracing::warn!("Failed to refresh OAuth token: {}", e);
@@ -564,50 +574,50 @@ impl App {
 
         match request {
             MessageRequest::Command(name, turn_id) => {
-                // Commands are handled synchronously (no streaming)
-                self.transcript.get_mut(turn_id)
+                self.chat.transcript.get_mut(turn_id)
                     .and_then(|turn| turn.content.first_mut())
                     .map(|block| block.set_status(Status::Complete));
 
                 if let Some(command) = Command::get(&name) {
                     match command.execute(self) {
-                        Ok(None) => {}
+                        Ok(None) => {
+                            // Command executed, no output - still need to render
+                            self.chat.render(&mut self.terminal)?;
+                            self.draw()?;
+                        }
                         Ok(Some(output)) => {
-                            let idx = self.transcript.add_empty(Role::Assistant);
-                            if let Some(turn) = self.transcript.get_mut(idx) {
+                            let idx = self.chat.transcript.add_empty(Role::Assistant);
+                            if let Some(turn) = self.chat.transcript.get_mut(idx) {
                                 turn.start_block(Box::new(TextBlock::complete(&output)));
                             }
+                            self.chat.render(&mut self.terminal)?;
                             self.draw()?;
                         }
                         Err(e) => {
+                            tracing::error!("Command execution error: {}", e);
                             self.alert = Some(format!("Command error: {}", e));
                         }
                     }
                 }
             }
             MessageRequest::User(content, turn_id) => {
-                // Mark user turn complete
-                self.transcript.get_mut(turn_id)
+                self.chat.transcript.get_mut(turn_id)
                     .and_then(|turn| turn.content.first_mut())
                     .map(|block| block.set_status(Status::Complete));
-
-                // Render user message
-                let size = self.terminal.size()?;
-                self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+                self.chat.render(&mut self.terminal)?;
                 self.draw()?;
 
-                // Start streaming (non-blocking)
                 if let Some(agent) = self.agent.as_mut() {
-                    agent.start_response(&content, RequestMode::Normal);
+                    agent.send_request(&content, RequestMode::Normal);
                 }
-                self.transcript.begin_turn(Role::Assistant);
+                self.chat.begin_turn(Role::Assistant, &mut self.terminal)?;
                 self.input_mode = InputMode::Streaming;
             }
             MessageRequest::Compaction => {
                 if let Some(agent) = self.agent.as_mut() {
-                    agent.start_response(COMPACTION_PROMPT, RequestMode::Compaction);
+                    agent.send_request(COMPACTION_PROMPT, RequestMode::Compaction);
                 }
-                self.transcript.begin_turn(Role::Assistant);
+                self.chat.begin_turn(Role::Assistant, &mut self.terminal)?;
                 self.input_mode = InputMode::Streaming;
             }
         }
@@ -619,13 +629,13 @@ impl App {
     async fn handle_agent_step(&mut self, step: AgentStep) -> Result<()> {
         match step {
             AgentStep::TextDelta(text) => {
-                self.transcript.stream_delta(BlockType::Text, &text);
+                self.chat.transcript.stream_delta(BlockType::Text, &text);
             }
             AgentStep::CompactionDelta(text) => {
-                self.transcript.stream_delta(BlockType::Compaction, &text);
+                self.chat.transcript.stream_delta(BlockType::Compaction, &text);
             }
             AgentStep::ThinkingDelta(text) => {
-                self.transcript.stream_delta(BlockType::Thinking, &text);
+                self.chat.transcript.stream_delta(BlockType::Thinking, &text);
             }
             AgentStep::ToolRequest(tool_calls) => {
                 // Just enqueue - the select loop will poll tool_executor.next()
@@ -635,23 +645,21 @@ impl App {
             AgentStep::Retrying { attempt, error } => {
                 self.status = ConnectionStatus::Error(format!("Retry {} - {}", attempt, error));
             }
-            AgentStep::Finished { usage, thinking_signatures: _ } => {
-                tracing::debug!("AgentStep::Finished received");
-                self.usage = usage;
+            AgentStep::Finished { usage } => {
                 self.status = ConnectionStatus::Connected;
                 self.input_mode = InputMode::Normal;
 
                 // Handle compaction completion
-                if self.transcript.is_streaming_block_type(BlockType::Compaction) {
-                    tracing::debug!("Finishing compaction turn");
-                    self.transcript.finish_turn();
-                    if let Err(e) = self.transcript.save() {
+                // TODO something more robust than checking active block type 
+                if self.chat.transcript.is_streaming_block_type(BlockType::Compaction) {
+                    self.chat.transcript.finish_turn();
+                    if let Err(e) = self.chat.transcript.save() {
                         tracing::error!("Failed to save transcript before compaction: {}", e);
                     }
-                    match self.transcript.rotate() {
+                    match self.chat.transcript.rotate() {
                         Ok(new_transcript) => {
-                            self.transcript = new_transcript;
-                            tracing::info!("Compaction complete, rotated to {:?}", self.transcript.path());
+                            self.chat.transcript = new_transcript;
+                            tracing::info!("Compaction complete, rotated to {:?}", self.chat.transcript.path());
                         }
                         Err(e) => {
                             tracing::error!("Failed to rotate transcript: {}", e);
@@ -659,20 +667,19 @@ impl App {
                     }
                 } else {
                     // Normal completion
-                    tracing::debug!("Finishing normal turn");
-                    self.transcript.finish_turn();
-                    if let Err(e) = self.transcript.save() {
+                    self.chat.transcript.finish_turn();
+                    if let Err(e) = self.chat.transcript.save() {
                         tracing::error!("Failed to save transcript: {}", e);
                     }
 
                     // Check if compaction is needed
-                    if self.usage.context_tokens >= self.config.general.compaction_threshold {
+                    if usage.context_tokens >= self.config.general.compaction_threshold {
                         self.queue_compaction();
                     }
                 }
             }
             AgentStep::Error(msg) => {
-                self.transcript.mark_active_block(Status::Error);
+                self.chat.transcript.mark_active_block(Status::Error);
                 self.input_mode = InputMode::Normal;
 
                 let alert_msg = if let Some(start) = msg.find('{') {
@@ -689,8 +696,7 @@ impl App {
         }
 
         // Update display
-        let size = self.terminal.size()?;
-        self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+        self.chat.render(&mut self.terminal)?;
         self.draw_throttled()?;
 
         Ok(())
@@ -701,7 +707,7 @@ impl App {
     /// This starts execution; the result will come via handle_tool_event.
     async fn execute_tool_decision(&mut self, decision: ToolDecision) {
         // Get current tool call_id
-        tracing::debug!("Executing tool decision: {:?}", decision);
+        // TODO I'd prefer to reference the call explictly
         let call_id = match self.tool_executor.front() {
             Some(tc) => tc.call_id.clone(),
             None => {
@@ -718,14 +724,12 @@ impl App {
         }
 
         // Update block status to Running/Denied
-        self.transcript.mark_active_block(match decision {
+        self.chat.transcript.mark_active_block(match decision {
             ToolDecision::Approve => Status::Running,
             ToolDecision::Deny => Status::Denied,
             _ => unreachable!(),
         });
-        if let Ok(size) = self.terminal.size() {
-            let _ = self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal);
-        }
+        let _ = self.chat.render(&mut self.terminal);
         let _ = self.draw();
 
         // Mark decision on the tool - next poll will execute it
@@ -734,16 +738,16 @@ impl App {
 
     /// Handle events from the tool executor
     async fn handle_tool_event(&mut self, event: ToolEvent) -> Result<()> {
-        tracing::debug!("Handling ToolEvent: {:?}", event);
         match event {
             ToolEvent::AwaitingApproval(tool_call) => {
                 // Display tool in transcript
                 let tool = self.tool_executor.tools().get(&tool_call.name);
-                self.transcript.start_block(
-                    tool.create_block(&tool_call.call_id, tool_call.params.clone()));
+                self.chat.start_block(
+                    tool.create_block(&tool_call.call_id, tool_call.params.clone()),
+                    &mut self.terminal)?;
 
                 // Show preview in IDE if the tool provides one
-                if let Some(preview) = tool.preview(&tool_call.params) {
+                if let Some(preview) = tool.ide_preview(&tool_call.params) {
                     if let Some(ide) = &self.ide {
                         if let Err(e) = ide.show_preview(&preview).await {
                             tracing::warn!("Failed to show IDE preview: {}", e);
@@ -751,8 +755,6 @@ impl App {
                     }
                 }
 
-                let size = self.terminal.size()?;
-                self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
                 self.draw()?;
 
                 // Check if tool filter auto-approves/denies
@@ -765,26 +767,24 @@ impl App {
 
             ToolEvent::OutputDelta { call_id, delta } => {
                 // Stream output to the active tool block
-                if let Some(block) = self.transcript.find_tool_block_mut(&call_id) {
-                    tracing::debug!("Found block, appending text");
+                if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
                     block.append_text(&delta);
                     // Re-render to show the delta
-                    let size = self.terminal.size()?;
-                    self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+                    self.chat.render(&mut self.terminal)?;
                     self.draw()?;
                 } else {
                     tracing::warn!("No block found for call_id: {}", call_id);
                 }
             }
 
-            ToolEvent::Completed { call_id, content, is_error, post_actions } => {
+            ToolEvent::Completed { call_id, content, is_error, ide_post_actions } => {
                 // Update transcript status (content was already streamed via OutputDelta)
-                self.transcript.mark_active_block(
+                self.chat.transcript.mark_active_block(
                     if is_error { Status::Error } else { Status::Complete }
                 );
 
                 // Execute post-actions from the tool
-                for action in post_actions {
+                for action in ide_post_actions {
                     if let Some(ide) = &self.ide {
                         if let Err(e) = ide.execute(&action).await {
                             tracing::warn!("Failed to execute IDE action: {}", e);
@@ -792,33 +792,20 @@ impl App {
                     }
                 }
 
-                // Tell agent about the result (for message history)
+                // Tell agent about the result
                 if let Some(agent) = self.agent.as_mut() {
                     agent.submit_tool_result(&call_id, content);
                 }
 
+                // Tool is done - go back to streaming mode.
+                // If there's another tool pending, AwaitingApproval will switch back.
+                self.input_mode = InputMode::Streaming;
+
                 // Render update
-                let size = self.terminal.size()?;
-                self.chat.render_to_scrollback(&self.transcript, size.width, &mut self.terminal)?;
+                self.chat.render(&mut self.terminal)?;
                 self.draw()?;
             }
         }
-        Ok(())
-    }
-
-    /// Cleanup terminal
-    fn cleanup(&mut self) -> Result<()> {
-        disable_raw_mode().context("Failed to disable raw mode")?;
-        execute!(
-            self.terminal.backend_mut(),
-            crossterm::event::DisableBracketedPaste,
-            crossterm::event::PopKeyboardEnhancementFlags
-        )
-        .context("Failed to cleanup terminal")?;
-        self.terminal
-            .show_cursor()
-            .context("Failed to show cursor")?;
-
         Ok(())
     }
 }

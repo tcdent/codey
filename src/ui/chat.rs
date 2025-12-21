@@ -27,11 +27,16 @@ use ratatui::{
     Terminal,
 };
 
-use crate::transcript::{Role, Transcript, Turn};
+use crate::transcript::{BlockType, Role, Status, Transcript, Turn, Block};
 
 /// Chat view with native scrollback support.
-#[derive(Debug)]
+///
+/// Owns the conversation transcript and handles rendering to terminal.
 pub struct ChatView {
+    /// The conversation transcript (owned)
+    pub transcript: Transcript,
+    /// Terminal width for text wrapping
+    width: u16,
     /// Lines currently in the hot zone (re-renderable)
     lines: VecDeque<Line<'static>>,
     /// Maximum lines before overflow commits to scrollback
@@ -42,45 +47,92 @@ pub struct ChatView {
     frozen_turn_ids: HashSet<usize>,
     /// Mapping of turn ID to line count (for frozen turns)
     turn_line_counts: HashMap<usize, usize>,
-
-    /// Width used for last render (to detect resize)
-    width: u16,
 }
 
 impl ChatView {
-    pub fn new(max_lines: usize) -> Self {
+    pub fn new(transcript: Transcript, width: u16, max_lines: usize) -> Self {
         Self {
-            lines: VecDeque::with_capacity(10000),  // TODO do we need to pre-size this?
+            transcript,
+            width,
+            lines: VecDeque::with_capacity(10000),
             max_lines,
             committed_count: 0,
             frozen_turn_ids: HashSet::new(),
             turn_line_counts: HashMap::new(),
-            width: 0,
         }
+    }
+
+    /// Update the terminal width (call on resize)
+    pub fn set_width(&mut self, width: u16) {
+        self.width = width;
+    }
+
+    // ==================== Transcript mutation + render ====================
+
+    /// Begin a new turn and render
+    pub fn begin_turn(
+        &mut self,
+        role: Role,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> anyhow::Result<()> {
+        self.transcript.begin_turn(role);
+        self.render(terminal)
+    }
+
+    /// Finish the current turn and render
+    pub fn finish_turn(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> anyhow::Result<()> {
+        self.transcript.finish_turn();
+        self.render(terminal)
+    }
+
+    /// Stream a delta to the current block and render
+    pub fn stream_delta(
+        &mut self,
+        block_type: BlockType,
+        text: &str,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> anyhow::Result<()> {
+        self.transcript.stream_delta(block_type, text);
+        self.render(terminal)
+    }
+
+    /// Mark the active block with a status and render
+    pub fn mark_active_block(
+        &mut self,
+        status: Status,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> anyhow::Result<()> {
+        self.transcript.mark_active_block(status);
+        self.render(terminal)
+    }
+
+    /// Start a new block in the current turn and render
+    pub fn start_block(
+        &mut self,
+        block: Box<dyn Block>,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> anyhow::Result<()> {
+        self.transcript.start_block(block);
+        self.render(terminal)
+    }
+
+    /// Add a complete turn (for initial setup, doesn't auto-render)
+    pub fn add_turn(&mut self, role: Role, block: impl Block + 'static) -> usize {
+        self.transcript.add_turn(role, block)
     }
 
     /// Render active (non-frozen) turns into the hot zone.
     /// Overflow lines are committed to native scrollback via `insert_before()`.
-    pub fn render_to_scrollback(
+    pub fn render(
         &mut self,
-        transcript: &Transcript,
-        width: u16,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> anyhow::Result<()> {
-        // Check for width change - if so, we need to re-render everything
-        // TODO disabling width change for now since it's not essential
-        // // but we can't fix already-committed content
-        // if width != self.last_width && self.last_width != 0 {
-        //     // Width changed - reset committed count since line counts may differ
-        //     // Note: already-committed content in scrollback may have wrong width
-        //     self.committed_count = 0;
-        //     self.frozen_turn_ids.clear();
-        // }
-        self.width = width;
-
         // Render non-frozen turns to lines
         let mut active_lines: Vec<Line<'static>> = Vec::new();
-        for turn in transcript.turns() {
+        for turn in self.transcript.turns() {
             if self.frozen_turn_ids.contains(&turn.id) {
                 continue;
             }
@@ -114,7 +166,7 @@ impl ChatView {
         // Check if any turns should be frozen
         let mut cumulative_lines = 0usize;
 
-        for turn in transcript.turns() {
+        for turn in self.transcript.turns() {
             if self.frozen_turn_ids.contains(&turn.id) {
                 continue;
             }

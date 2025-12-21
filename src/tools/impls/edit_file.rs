@@ -161,7 +161,7 @@ impl Tool for EditFileTool {
         once_ready(Ok(Self::execute_inner(params)))
     }
 
-    fn preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
+    fn ide_preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
         let file_path = params.get("path").and_then(|p| p.as_str())?;
         let edits = params.get("edits").and_then(|e| e.as_array())?;
 
@@ -182,7 +182,7 @@ impl Tool for EditFileTool {
         })
     }
 
-    fn post_actions(&self, params: &serde_json::Value) -> Vec<IdeAction> {
+    fn ide_post_actions(&self, params: &serde_json::Value) -> Vec<IdeAction> {
         params
             .get("path")
             .and_then(|p| p.as_str())

@@ -67,7 +67,7 @@ pub trait Tool: Send + Sync {
     ///
     /// Tools that modify files should return a preview (diff, file content, etc.)
     /// so the user can see what will change in their editor.
-    fn preview(&self, _params: &serde_json::Value) -> Option<ToolPreview> {
+    fn ide_preview(&self, _params: &serde_json::Value) -> Option<ToolPreview> {
         None
     }
 
@@ -75,7 +75,7 @@ pub trait Tool: Send + Sync {
     ///
     /// For example, file-modifying tools should return `ReloadBuffer` so the
     /// editor refreshes the changed file.
-    fn post_actions(&self, _params: &serde_json::Value) -> Vec<IdeAction> {
+    fn ide_post_actions(&self, _params: &serde_json::Value) -> Vec<IdeAction> {
         vec![]
     }
 }

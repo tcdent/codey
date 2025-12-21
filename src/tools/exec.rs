@@ -44,14 +44,14 @@ pub enum ToolEvent {
         call_id: String,
         content: String,
         is_error: bool,
-        post_actions: Vec<IdeAction>,
+        ide_post_actions: Vec<IdeAction>,
     },
 }
 
 /// Active tool execution state
 struct ActiveExecution {
     call_id: String,
-    post_actions: Vec<IdeAction>,
+    ide_post_actions: Vec<IdeAction>,
     stream: BoxStream<'static, ToolOutput>,
     collected_output: String,
 }
@@ -114,7 +114,7 @@ impl ToolExecutor {
                             call_id: active.call_id,
                             content: result.content,
                             is_error: result.is_error,
-                            post_actions: active.post_actions,
+                            ide_post_actions: active.ide_post_actions,
                         });
                     }
                     None => {
@@ -125,7 +125,7 @@ impl ToolExecutor {
                             call_id: active.call_id,
                             content: active.collected_output,
                             is_error: false,
-                            post_actions: active.post_actions,
+                            ide_post_actions: active.ide_post_actions,
                         });
                     }
                 }
@@ -150,19 +150,19 @@ impl ToolExecutor {
                         call_id: tool_call.call_id,
                         content: "Denied by user".to_string(),
                         is_error: true,
-                        post_actions: vec![],
+                        ide_post_actions: vec![],
                     });
                 }
                 ToolDecision::Approve => {
                     tracing::debug!("ToolExecutor executing approved tool {}", tool_call.call_id);
                     let tool_call = self.pending.pop_front().unwrap();
                     let tool = self.tools.get_arc(&tool_call.name);
-                    let post_actions = tool.post_actions(&tool_call.params);
+                    let ide_post_actions = tool.ide_post_actions(&tool_call.params);
                     let stream = tool.execute(tool_call.params);
 
                     self.active = Some(ActiveExecution {
                         call_id: tool_call.call_id,
-                        post_actions,
+                        ide_post_actions,
                         stream,
                         collected_output: String::new(),
                     });

@@ -183,7 +183,7 @@ impl Tool for WriteFileTool {
         once_ready(Ok(self.execute_inner(params)))
     }
 
-    fn preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
+    fn ide_preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
         let file_path = params.get("path").and_then(|p| p.as_str())?;
         let content = params.get("content").and_then(|c| c.as_str())?;
 
@@ -193,7 +193,7 @@ impl Tool for WriteFileTool {
         })
     }
 
-    fn post_actions(&self, params: &serde_json::Value) -> Vec<IdeAction> {
+    fn ide_post_actions(&self, params: &serde_json::Value) -> Vec<IdeAction> {
         params
             .get("path")
             .and_then(|p| p.as_str())
