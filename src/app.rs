@@ -16,7 +16,7 @@ use ratatui::{
 };
 
 use crate::commands::Command;
-use crate::config::Config;
+use crate::config::{Config, GeneralConfig, ToolAccess};
 use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
 use crate::tools::{ToolDecision, ToolEffect, ToolEvent, ToolExecutor, ToolRegistry};
 use crate::tool_filter::ToolFilters;
@@ -87,6 +87,24 @@ Please provide a comprehensive summary of our conversation so far in markdown fo
 6. **Quotes and log snippets** - Any important quotes or logs that th euser provided that we'll need later
 
 Be thorough but concise - this summary will seed a fresh conversation context."#;
+
+const SUB_AGENT_PROMPT: &str = r#"You are a background research agent. Your task is to investigate, explore, or analyze as directed.
+
+## Capabilities
+You have read-only access to:
+- `read_file`: Read file contents
+- `shell`: Execute commands (for searching, exploring)
+- `fetch_url`: Fetch web content
+- `web_search`: Search the web
+- `open_file`: Signal a file to open in the IDE
+
+## Guidelines
+- Focus on the specific task assigned to you
+- Be thorough but concise in your findings
+- Report back with structured, actionable information
+- You cannot modify files - only read and explore
+- If you need to suggest changes, describe them clearly for the primary agent to implement
+"#;
 
 
 /// Result of handling an action
@@ -238,6 +256,8 @@ pub struct App {
     agents: AgentRegistry,
     /// Tool executor for managing tool approval and execution
     tool_executor: ToolExecutor,
+    /// OAuth credentials for agent creation
+    oauth: Option<crate::auth::OAuthCredentials>,
 }
 
 impl App {
@@ -345,19 +365,20 @@ impl App {
             input_mode: InputMode::Normal,
             agents: AgentRegistry::new(),
             tool_executor: ToolExecutor::new(ToolRegistry::new()),
+            oauth: None,
         })
     }
 
     /// Run the main event loop - purely event-driven rendering
     pub async fn run(&mut self) -> Result<()> {
-        let oauth = crate::auth::OAuthCredentials::load()
+        self.oauth = crate::auth::OAuthCredentials::load()
             .ok()
             .flatten();
 
         let mut agent = Agent::new(
             self.config.general.clone(),
             SYSTEM_PROMPT,
-            oauth,
+            self.oauth.clone(),
         );
 
         if self.continue_session {
@@ -876,8 +897,50 @@ impl App {
     async fn apply_effect(&mut self, _agent_id: AgentId, effect: ToolEffect) -> Result<()> {
         match effect {
             ToolEffect::SpawnAgent { task, context } => {
-                // TODO: Implement background agent spawning once AgentRegistry is integrated
                 tracing::info!("SpawnAgent effect: task={}, context={:?}", task, context);
+
+                // Build sub-agent config from main config
+                let sub_config = &self.config.general.sub_agent;
+                let agent_config = GeneralConfig {
+                    model: sub_config.model.clone()
+                        .unwrap_or_else(|| self.config.general.model.clone()),
+                    max_tokens: sub_config.max_tokens,
+                    thinking_budget: sub_config.thinking_budget,
+                    // Inherit other settings from primary
+                    working_dir: self.config.general.working_dir.clone(),
+                    max_retries: self.config.general.max_retries,
+                    compaction_threshold: self.config.general.compaction_threshold,
+                    compaction_thinking_budget: self.config.general.compaction_thinking_budget,
+                    sub_agent: self.config.general.sub_agent.clone(),
+                };
+
+                // Choose tool registry based on access level
+                let tools = match sub_config.tool_access {
+                    ToolAccess::Full => ToolRegistry::new(),
+                    ToolAccess::ReadOnly => ToolRegistry::read_only(),
+                    ToolAccess::None => ToolRegistry::empty(),
+                };
+
+                // Build system prompt with context
+                let system_prompt = if let Some(ctx) = &context {
+                    format!("{}\n\n## Context\n{}", SUB_AGENT_PROMPT, ctx)
+                } else {
+                    SUB_AGENT_PROMPT.to_string()
+                };
+
+                // Create and register the sub-agent
+                let mut sub_agent = Agent::with_tools(
+                    agent_config,
+                    &system_prompt,
+                    self.oauth.clone(),
+                    tools,
+                );
+
+                // Send the task to the sub-agent
+                sub_agent.send_request(&task, RequestMode::Normal);
+
+                let sub_agent_id = self.agents.register(sub_agent);
+                tracing::info!("Spawned sub-agent {} for task: {}", sub_agent_id, task);
             }
             ToolEffect::IdeOpen { path, line } => {
                 if let Some(ide) = &self.ide {

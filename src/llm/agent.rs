@@ -172,26 +172,36 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Create a new agent with initial messages
+    /// Create a new agent with initial messages and default tools
     pub fn new(
         config: GeneralConfig,
         system_prompt: &str,
         oauth: Option<OAuthCredentials>,
     ) -> Self {
+        Self::with_tools(config, system_prompt, oauth, ToolRegistry::new())
+    }
+
+    /// Create a new agent with a custom tool registry
+    pub fn with_tools(
+        config: GeneralConfig,
+        system_prompt: &str,
+        oauth: Option<OAuthCredentials>,
+        tools: ToolRegistry,
+    ) -> Self {
         Self {
             client: Client::default(),
             config,
-            tools: ToolRegistry::new(),
+            tools,
             messages: vec![ChatMessage::system(system_prompt)],
             system_prompt: system_prompt.to_string(),
             total_usage: Usage::default(),
             oauth,
-            
+
             // Streaming state starts empty
             state: None,
             active_stream: None,
             mode: RequestMode::Normal,
-            
+
             // Accumulated during streaming
             streaming_text: String::new(),
             streaming_tool_calls: Vec::new(),
