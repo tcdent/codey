@@ -408,8 +408,8 @@ impl Ide for Nvim {
         Ok(result.as_bool().unwrap_or(false))
     }
 
-    fn event_receiver(&mut self) -> Option<&mut mpsc::Receiver<IdeEvent>> {
-        Some(&mut self.event_rx)
+    async fn next(&mut self) -> Option<IdeEvent> {
+        self.event_rx.recv().await
     }
 }
 

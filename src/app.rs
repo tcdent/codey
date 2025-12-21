@@ -384,9 +384,7 @@ impl App {
                     self.handle_term_event(term_event).await?;
                 }
                 // Handle IDE events (selection changes)
-                Some(ide_event) = async { 
-                    self.ide.as_mut()?.event_receiver()?.recv().await 
-                } => {
+                Some(ide_event) = async { self.ide.as_mut()?.next().await } => {
                     self.handle_ide_event(ide_event);
                 }
                 // Handle agent steps (streaming responses, tool requests)

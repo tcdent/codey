@@ -119,7 +119,7 @@ pub trait Ide: Send + Sync {
 
     // === Events: IDE → App (streaming) ===
 
-    /// Get a mutable reference to the event receiver for polling
-    /// Returns None if the IDE doesn't support event streaming
-    fn event_receiver(&mut self) -> Option<&mut mpsc::Receiver<IdeEvent>>;
+    /// Poll for the next event from the IDE
+    /// Returns None if no event is available or IDE doesn't support events
+    async fn next(&mut self) -> Option<IdeEvent>;
 }
