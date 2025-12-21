@@ -21,7 +21,7 @@ use crate::llm::{Agent, AgentStep, RequestMode};
 use crate::tools::{ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
 use crate::tool_filter::ToolFilters;
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
-use crate::ide::{Ide, Nvim};
+use crate::ide::{Ide, IdeEvent, Nvim};
 use crate::ui::{Attachment, ChatView, InputBox};
 
 
@@ -383,6 +383,12 @@ impl App {
                 Some(term_event) = self.events.next() => {
                     self.handle_term_event(term_event).await?;
                 }
+                // Handle IDE events (selection changes)
+                Some(ide_event) = async { 
+                    self.ide.as_mut()?.event_receiver()?.recv().await 
+                } => {
+                    self.handle_ide_event(ide_event);
+                }
                 // Handle agent steps (streaming responses, tool requests)
                 Some(agent_step) = async { self.agent.as_mut()?.next().await } => {
                     self.handle_agent_step(agent_step).await?;
@@ -588,6 +594,25 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Handle an IDE event (selection changes, etc.)
+    fn handle_ide_event(&mut self, event: IdeEvent) {
+        match event {
+            IdeEvent::SelectionChanged(selection) => {
+                let attachment = selection.map(|sel| {
+                    let path = std::env::current_dir()
+                        .ok()
+                        .and_then(|cwd| std::path::Path::new(&sel.path).strip_prefix(cwd).ok())
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or(sel.path);
+                    
+                    Attachment::ide_selection(path, sel.content, sel.start_line, sel.end_line)
+                });
+                self.input.set_ide_selection(attachment);
+                let _ = self.draw_throttled();
+            }
+        }
     }
     
     /// Start processing a message request

@@ -7,7 +7,8 @@
 //!
 //! The [`Ide`] trait defines a bidirectional interface:
 //! - **Output**: Show previews, close previews, reload buffers, navigate to files
-//! - **Input**: Get selections, current file info, cursor position
+//! - **Input**: Check for unsaved changes
+//! - **Events**: Selection changes streamed from the IDE
 //!
 //! The app holds an `Option<Box<dyn Ide>>` and calls these methods at appropriate
 //! points in the tool execution flow. Tools can define what previews they produce
@@ -17,6 +18,7 @@ pub mod nvim;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 pub use nvim::Nvim;
 
@@ -52,20 +54,6 @@ pub enum IdeAction {
         line: Option<u32>,
         column: Option<u32>,
     },
-    /// Show a notification message
-    Notify {
-        message: String,
-        level: NotifyLevel,
-    },
-}
-
-/// Notification severity level
-#[derive(Debug, Clone, Copy, Default)]
-pub enum NotifyLevel {
-    #[default]
-    Info,
-    Warn,
-    Error,
 }
 
 /// A text selection from the IDE
@@ -75,25 +63,13 @@ pub struct Selection {
     pub content: String,
     pub start_line: u32,
     pub end_line: u32,
-    pub start_col: Option<u32>,
-    pub end_col: Option<u32>,
 }
 
-/// Information about the currently focused file
+/// Events streamed from the IDE to the app
 #[derive(Debug, Clone)]
-pub struct CurrentFile {
-    pub path: String,
-    pub cursor_line: u32,
-    pub cursor_col: u32,
-    pub total_lines: u32,
-}
-
-/// Information about the visible range in the editor
-#[derive(Debug, Clone)]
-pub struct VisibleRange {
-    pub path: String,
-    pub start_line: u32,
-    pub end_line: u32,
+pub enum IdeEvent {
+    /// Selection changed (or cleared if None)
+    SelectionChanged(Option<Selection>),
 }
 
 // ============================================================================
@@ -127,7 +103,6 @@ pub trait Ide: Send + Sync {
             IdeAction::NavigateTo { path, line, column } => {
                 self.navigate_to(path, *line, *column).await
             }
-            IdeAction::Notify { message, level } => self.notify(message, *level).await,
         }
     }
 
@@ -139,20 +114,12 @@ pub trait Ide: Send + Sync {
         column: Option<u32>,
     ) -> Result<()>;
 
-    /// Show a notification in the IDE
-    async fn notify(&self, message: &str, level: NotifyLevel) -> Result<()>;
-
-    // === Input: IDE → App ===
-
-    /// Get the current text selection (if any)
-    async fn get_selection(&self) -> Result<Option<Selection>>;
-
-    /// Get information about the currently focused file
-    async fn get_current_file(&self) -> Result<Option<CurrentFile>>;
-
-    /// Get the visible line range in the current window
-    async fn get_visible_range(&self) -> Result<Option<VisibleRange>>;
-
     /// Check if a file has unsaved changes
     async fn has_unsaved_changes(&self, path: &str) -> Result<bool>;
+
+    // === Events: IDE → App (streaming) ===
+
+    /// Get a mutable reference to the event receiver for polling
+    /// Returns None if the IDE doesn't support event streaming
+    fn event_receiver(&mut self) -> Option<&mut mpsc::Receiver<IdeEvent>>;
 }

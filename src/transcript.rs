@@ -706,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_transcript_add_and_get() {
-        let mut transcript = Transcript::new();
+        let mut transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test.md"));
 
         let id1 = transcript.add_turn(Role::User, TextBlock::new("Hello"));
         let id2 = transcript.add_turn(Role::Assistant, TextBlock::new("Hi there!"));

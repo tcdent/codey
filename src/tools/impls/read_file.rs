@@ -187,7 +187,8 @@ impl Tool for ReadFileTool {
 
     fn description(&self) -> &'static str {
         "Read the contents of a file. Optionally specify a line range. \
-         Returns the file contents with line numbers prefixed."
+         Returns the file contents with line numbers prefixed. \
+         File content is only shown to the agent and is not displayed to the user."
     }
 
     fn schema(&self) -> serde_json::Value {

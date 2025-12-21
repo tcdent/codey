@@ -42,7 +42,12 @@ fn format_tokens(count: u32) -> String {
 pub enum AttachmentKind {
     /// Pasted text content
     PastedText { char_count: usize },
-    // Future: IdeSelection { file: String, line_start: usize, line_end: usize },
+    /// Selection from the IDE
+    IdeSelection {
+        path: String,
+        start_line: u32,
+        end_line: u32,
+    },
 }
 
 /// Attached content shown as a pill
@@ -61,16 +66,71 @@ impl Attachment {
         }
     }
 
+    /// Create a new IDE selection attachment
+    pub fn ide_selection(path: String, content: String, start_line: u32, end_line: u32) -> Self {
+        Self {
+            kind: AttachmentKind::IdeSelection { path, start_line, end_line },
+            content,
+        }
+    }
+
     /// Get the label for this attachment
     pub fn label(&self) -> String {
         match &self.kind {
             AttachmentKind::PastedText { char_count } => format!("pasted ({} chars)", char_count),
+            AttachmentKind::IdeSelection { path, start_line, end_line } => {
+                // Extract just the filename from the path
+                let filename = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(path);
+                if start_line == end_line {
+                    format!("{}:{}", filename, start_line)
+                } else {
+                    format!("{}:{}-{}", filename, start_line, end_line)
+                }
+            }
         }
     }
 
     /// Get the display string (pill format with trailing space)
     pub fn display(&self) -> String {
-        format!("[\u{1F4CE} {}] ", self.label())
+        let icon = match &self.kind {
+            AttachmentKind::PastedText { .. } => "\u{00B6}",  // ¶ pilcrow
+            AttachmentKind::IdeSelection { .. } => "\u{00A7}",  // § section
+        };
+        format!("[{} {}] ", icon, self.label())
+    }
+
+    /// Get the expanded content for the prompt
+    pub fn expanded(&self) -> String {
+        match &self.kind {
+            AttachmentKind::PastedText { .. } => {
+                self.content.clone()
+            }
+            AttachmentKind::IdeSelection { path, start_line, end_line } => {
+                // Format with line numbers like read_file does
+                let line_num_width = end_line.to_string().len().max(4);
+                let mut numbered_content = String::new();
+                
+                for (i, line) in self.content.lines().enumerate() {
+                    let line_num = start_line + i as u32;
+                    numbered_content.push_str(&format!(
+                        "{:>width$}\u{2502}{}\n",
+                        line_num,
+                        line,
+                        width = line_num_width as usize
+                    ));
+                }
+                
+                let range = if start_line == end_line {
+                    format!("{}", start_line)
+                } else {
+                    format!("{}-{}", start_line, end_line)
+                };
+                format!("\n```\n# {}:{}\n{}```\n\n", path, range, numbered_content)
+            }
+        }
     }
 }
 
@@ -119,7 +179,7 @@ impl Segment {
     fn expanded(&self) -> String {
         match self {
             Segment::Text(s) => s.clone(),
-            Segment::Attachment(a) => a.content.clone(),
+            Segment::Attachment(a) => a.expanded(),
         }
     }
 
@@ -423,6 +483,43 @@ impl InputBox {
         }
 
         content
+    }
+
+    /// Update the IDE selection (replaces any existing, inserts at front if new)
+    /// Pass None to clear the IDE selection.
+    pub fn set_ide_selection(&mut self, attachment: Option<Attachment>) {
+        // Find existing IDE selection
+        let existing_idx = self.segments.iter().position(|seg| {
+            matches!(seg, Segment::Attachment(a) if matches!(a.kind, AttachmentKind::IdeSelection { .. }))
+        });
+
+        match (existing_idx, attachment) {
+            // Update existing
+            (Some(idx), Some(new_attachment)) => {
+                self.segments[idx] = Segment::Attachment(new_attachment);
+            }
+            // Remove existing
+            (Some(idx), None) => {
+                self.segments.remove(idx);
+                if self.cursor_seg > idx {
+                    self.cursor_seg -= 1;
+                } else if self.cursor_seg == idx {
+                    self.cursor_seg = 0;
+                    self.cursor_offset = 0;
+                }
+                // Ensure we have at least one text segment
+                if self.segments.is_empty() {
+                    self.segments.push(Segment::Text(String::new()));
+                }
+            }
+            // Insert new at front
+            (None, Some(new_attachment)) => {
+                self.segments.insert(0, Segment::Attachment(new_attachment));
+                self.cursor_seg += 1;
+            }
+            // Nothing to do
+            (None, None) => {}
+        }
     }
 
     /// Navigate to previous history item

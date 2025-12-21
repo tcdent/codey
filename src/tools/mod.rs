@@ -2,7 +2,7 @@ mod exec;
 mod impls;
 
 pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
-pub use impls::{EditFileTool, FetchUrlTool, ReadFileTool, ShellTool, WebSearchTool, WriteFileTool};
+pub use impls::{EditFileTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, WebSearchTool, WriteFileTool};
 
 use crate::ide::{IdeAction, ToolPreview};
 use crate::transcript::Block;
@@ -107,6 +107,7 @@ impl ToolRegistry {
         registry.register(Arc::new(ShellTool::new()));
         registry.register(Arc::new(FetchUrlTool::new()));
         registry.register(Arc::new(WebSearchTool::new()));
+        registry.register(Arc::new(OpenFileTool));
 
         registry
     }
