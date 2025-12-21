@@ -813,64 +813,79 @@ impl App {
     async fn handle_tool_event(&mut self, event: ToolEvent) -> Result<()> {
         match event {
             ToolEvent::AwaitingApproval(tool_call) => {
-                // Display tool in transcript
-                self.draw()?; // there's sometimes a missing token otherwise
-                let tool = self.tool_executor.tools().get(&tool_call.name);
-                self.chat.start_block(
-                    tool.create_block(&tool_call.call_id, tool_call.params.clone()),
-                    &mut self.terminal)?;
+                let is_primary = self.agents.primary_id() == Some(tool_call.agent_id);
 
-                // Show preview in IDE if the tool provides one
-                if let Some(preview) = tool.ide_preview(&tool_call.params) {
-                    if let Some(ide) = &self.ide {
-                        if let Err(e) = ide.show_preview(&preview).await {
-                            tracing::warn!("Failed to show IDE preview: {}", e);
+                if is_primary {
+                    // Display tool in transcript for primary agent
+                    self.draw()?; // there's sometimes a missing token otherwise
+                    let tool = self.tool_executor.tools().get(&tool_call.name);
+                    self.chat.start_block(
+                        tool.create_block(&tool_call.call_id, tool_call.params.clone()),
+                        &mut self.terminal)?;
+
+                    // Show preview in IDE if the tool provides one
+                    if let Some(preview) = tool.ide_preview(&tool_call.params) {
+                        if let Some(ide) = &self.ide {
+                            if let Err(e) = ide.show_preview(&preview).await {
+                                tracing::warn!("Failed to show IDE preview: {}", e);
+                            }
                         }
                     }
-                }
-                self.draw()?;
-                
-                match self.tool_filters.evaluate(&tool_call.name, &tool_call.params) {
-                    Some(decision) => {
-                        // Auto-approve/deny based on filters
-                        self.decide_pending_tool(decision).await;
-                    }
-                    None => {
-                        // Ask user for approval
-                        self.input_mode = InputMode::ToolApproval;
-                    }
-                }
+                    self.draw()?;
 
+                    match self.tool_filters.evaluate(&tool_call.name, &tool_call.params) {
+                        Some(decision) => {
+                            // Auto-approve/deny based on filters
+                            self.decide_pending_tool(decision).await;
+                        }
+                        None => {
+                            // Ask user for approval
+                            self.input_mode = InputMode::ToolApproval;
+                        }
+                    }
+                } else {
+                    // Background agents: auto-approve tools without UI interaction
+                    tracing::debug!("Auto-approving tool {} for background agent {}",
+                        tool_call.name, tool_call.agent_id);
+                    self.tool_executor.decide(&tool_call.call_id, ToolDecision::Approve);
+                }
             }
 
-            ToolEvent::OutputDelta { call_id, delta, .. } => {
-                // Stream output to the active tool block
-                if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
-                    block.append_text(&delta);
-                    // Re-render to show the delta
-                    self.chat.render(&mut self.terminal)?;
-                    self.draw()?;
-                } else {
-                    tracing::warn!("No block found for call_id: {}", call_id);
+            ToolEvent::OutputDelta { agent_id, call_id, delta } => {
+                // Only stream output to transcript for primary agent
+                let is_primary = self.agents.primary_id() == Some(agent_id);
+                if is_primary {
+                    if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
+                        block.append_text(&delta);
+                        // Re-render to show the delta
+                        self.chat.render(&mut self.terminal)?;
+                        self.draw()?;
+                    } else {
+                        tracing::warn!("No block found for call_id: {}", call_id);
+                    }
                 }
             }
 
             ToolEvent::Completed { agent_id, call_id, content, is_error, ide_post_actions, effects } => {
-                // Update transcript status (content was already streamed via OutputDelta)
-                self.chat.transcript.mark_active_block(
-                    if is_error { Status::Error } else { Status::Complete }
-                );
+                let is_primary = self.agents.primary_id() == Some(agent_id);
 
-                // Execute post-actions from the tool
-                for action in ide_post_actions {
-                    if let Some(ide) = &self.ide {
-                        if let Err(e) = ide.execute(&action).await {
-                            tracing::warn!("Failed to execute IDE action: {}", e);
+                if is_primary {
+                    // Update transcript status for primary agent
+                    self.chat.transcript.mark_active_block(
+                        if is_error { Status::Error } else { Status::Complete }
+                    );
+
+                    // Execute post-actions from the tool
+                    for action in ide_post_actions {
+                        if let Some(ide) = &self.ide {
+                            if let Err(e) = ide.execute(&action).await {
+                                tracing::warn!("Failed to execute IDE action: {}", e);
+                            }
                         }
                     }
                 }
 
-                // Process tool effects
+                // Process tool effects (for all agents)
                 for effect in effects {
                     self.apply_effect(agent_id, effect).await?;
                 }
@@ -880,13 +895,15 @@ impl App {
                     agent_mutex.lock().await.submit_tool_result(&call_id, content);
                 }
 
-                // Tool is done - go back to streaming mode.
-                // If there's another tool pending, AwaitingApproval will switch back.
-                self.input_mode = InputMode::Streaming;
+                if is_primary {
+                    // Tool is done - go back to streaming mode.
+                    // If there's another tool pending, AwaitingApproval will switch back.
+                    self.input_mode = InputMode::Streaming;
 
-                // Render update
-                self.chat.render(&mut self.terminal)?;
-                self.draw()?;
+                    // Render update
+                    self.chat.render(&mut self.terminal)?;
+                    self.draw()?;
+                }
             }
         }
         Ok(())
