@@ -16,7 +16,7 @@ use ratatui::{
 };
 
 use crate::commands::Command;
-use crate::config::{Config, GeneralConfig, ToolAccess};
+use crate::config::{AgentRuntimeConfig, Config, ToolAccess};
 use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
 use crate::tools::{ToolDecision, ToolEffect, ToolEvent, ToolExecutor, ToolRegistry};
 use crate::tool_filter::ToolFilters;
@@ -376,7 +376,7 @@ impl App {
             .flatten();
 
         let mut agent = Agent::new(
-            self.config.general.clone(),
+            AgentRuntimeConfig::foreground(&self.config),
             SYSTEM_PROMPT,
             self.oauth.clone(),
         );
@@ -449,7 +449,7 @@ impl App {
             .and_then(|m| m.try_lock().ok())
             .map_or(0, |a| a.total_usage().context_tokens);
         let input_widget = self.input.widget(
-            &self.config.general.model,
+            &self.config.agents.foreground.model,
             context_tokens,
         );
         let alert = self.alert.clone();
@@ -899,23 +899,8 @@ impl App {
             ToolEffect::SpawnAgent { task, context } => {
                 tracing::info!("SpawnAgent effect: task={}, context={:?}", task, context);
 
-                // Build sub-agent config from main config
-                let sub_config = &self.config.general.sub_agent;
-                let agent_config = GeneralConfig {
-                    model: sub_config.model.clone()
-                        .unwrap_or_else(|| self.config.general.model.clone()),
-                    max_tokens: sub_config.max_tokens,
-                    thinking_budget: sub_config.thinking_budget,
-                    // Inherit other settings from primary
-                    working_dir: self.config.general.working_dir.clone(),
-                    max_retries: self.config.general.max_retries,
-                    compaction_threshold: self.config.general.compaction_threshold,
-                    compaction_thinking_budget: self.config.general.compaction_thinking_budget,
-                    sub_agent: self.config.general.sub_agent.clone(),
-                };
-
-                // Choose tool registry based on access level
-                let tools = match sub_config.tool_access {
+                // Choose tool registry based on background agent's access level
+                let tools = match self.config.agents.background.tool_access {
                     ToolAccess::Full => ToolRegistry::new(),
                     ToolAccess::ReadOnly => ToolRegistry::read_only(),
                     ToolAccess::None => ToolRegistry::empty(),
@@ -930,7 +915,7 @@ impl App {
 
                 // Create and register the sub-agent
                 let mut sub_agent = Agent::with_tools(
-                    agent_config,
+                    AgentRuntimeConfig::background(&self.config),
                     &system_prompt,
                     self.oauth.clone(),
                     tools,

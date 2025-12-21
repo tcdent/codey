@@ -11,6 +11,7 @@ use std::path::PathBuf;
 #[serde(default)]
 pub struct Config {
     pub general: GeneralConfig,
+    pub agents: AgentsConfig,
     pub auth: AuthConfig,
     pub ui: UiConfig,
     pub tools: ToolsConfig,
@@ -21,6 +22,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             general: GeneralConfig::default(),
+            agents: AgentsConfig::default(),
             auth: AuthConfig::default(),
             ui: UiConfig::default(),
             tools: ToolsConfig::default(),
@@ -29,41 +31,60 @@ impl Default for Config {
     }
 }
 
+/// Agent configurations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GeneralConfig {
-    pub model: String,
-    pub working_dir: Option<PathBuf>,
-    pub max_tokens: u32,
-    pub max_retries: u32,
-    /// Token threshold at which to trigger context compaction (default: 100,000)
-    pub compaction_threshold: u32,
-    /// Thinking budget in tokens (default: 2,000)
-    pub thinking_budget: u32,
-    /// Thinking budget for compaction requests (default: 8,000)
-    pub compaction_thinking_budget: u32,
-    /// Sub-agent configuration for background tasks
-    pub sub_agent: SubAgentConfig,
+pub struct AgentsConfig {
+    /// Foreground/primary agent configuration
+    pub foreground: AgentConfig,
+    /// Background agent configuration (spawned by task tool)
+    pub background: AgentConfig,
 }
 
-/// Configuration for sub-agents spawned by the task tool
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            foreground: AgentConfig::foreground_default(),
+            background: AgentConfig::background_default(),
+        }
+    }
+}
+
+/// Configuration for an agent
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SubAgentConfig {
-    /// Model to use for sub-agents (defaults to same as primary)
-    pub model: Option<String>,
-    /// Max tokens for sub-agent responses
+pub struct AgentConfig {
+    /// Model to use (defaults to claude-opus-4-5-20251101)
+    pub model: String,
+    /// Max tokens for responses
     pub max_tokens: u32,
-    /// Thinking budget for sub-agents
+    /// Thinking budget in tokens
     pub thinking_budget: u32,
-    /// Tool access level for sub-agents
+    /// Tool access level
     pub tool_access: ToolAccess,
 }
 
-impl Default for SubAgentConfig {
+impl Default for AgentConfig {
     fn default() -> Self {
+        Self::foreground_default()
+    }
+}
+
+impl AgentConfig {
+    /// Default configuration for foreground/primary agent
+    pub fn foreground_default() -> Self {
         Self {
-            model: None, // Use primary agent's model
+            model: "claude-opus-4-5-20251101".to_string(),
+            max_tokens: 8192,
+            thinking_budget: 2_000,
+            tool_access: ToolAccess::Full,
+        }
+    }
+
+    /// Default configuration for background agents
+    pub fn background_default() -> Self {
+        Self {
+            model: "claude-opus-4-5-20251101".to_string(),
             max_tokens: 4096,
             thinking_budget: 1_000,
             tool_access: ToolAccess::ReadOnly,
@@ -76,25 +97,67 @@ impl Default for SubAgentConfig {
 #[serde(rename_all = "snake_case")]
 pub enum ToolAccess {
     /// Full access to all tools
+    #[default]
     Full,
     /// Read-only tools: read_file, shell, fetch_url, web_search, open_file
-    #[default]
     ReadOnly,
     /// No tools
     None,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeneralConfig {
+    pub working_dir: Option<PathBuf>,
+    pub max_retries: u32,
+    /// Token threshold at which to trigger context compaction (default: 100,000)
+    pub compaction_threshold: u32,
+    /// Thinking budget for compaction requests (default: 8,000)
+    pub compaction_thinking_budget: u32,
+}
+
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
-            model: "claude-opus-4-5-20251101".to_string(),
             working_dir: None,
-            max_tokens: 8192,
             max_retries: 5,
             compaction_threshold: 192_000,
-            thinking_budget: 2_000,
             compaction_thinking_budget: 8_000,
-            sub_agent: SubAgentConfig::default(),
+        }
+    }
+}
+
+/// Runtime configuration for an Agent instance
+/// Combines values from AgentConfig and GeneralConfig
+#[derive(Debug, Clone)]
+pub struct AgentRuntimeConfig {
+    pub model: String,
+    pub max_tokens: u32,
+    pub thinking_budget: u32,
+    pub max_retries: u32,
+    pub compaction_thinking_budget: u32,
+}
+
+impl AgentRuntimeConfig {
+    /// Create runtime config for foreground agent
+    pub fn foreground(config: &Config) -> Self {
+        Self {
+            model: config.agents.foreground.model.clone(),
+            max_tokens: config.agents.foreground.max_tokens,
+            thinking_budget: config.agents.foreground.thinking_budget,
+            max_retries: config.general.max_retries,
+            compaction_thinking_budget: config.general.compaction_thinking_budget,
+        }
+    }
+
+    /// Create runtime config for background agent
+    pub fn background(config: &Config) -> Self {
+        Self {
+            model: config.agents.background.model.clone(),
+            max_tokens: config.agents.background.max_tokens,
+            thinking_budget: config.agents.background.thinking_budget,
+            max_retries: config.general.max_retries,
+            compaction_thinking_budget: config.general.compaction_thinking_budget,
         }
     }
 }
@@ -265,14 +328,14 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.general.model, "claude-opus-4-5-20251101");
+        assert_eq!(config.agents.foreground.model, "claude-opus-4-5-20251101");
         assert!(config.tools.enabled.contains(&"read_file".to_string()));
     }
 
     #[test]
     fn test_parse_config() {
         let toml = r#"
-[general]
+[agents.foreground]
 model = "claude-opus-4-20250514"
 max_tokens = 4096
 
@@ -285,9 +348,31 @@ theme = "monokai"
 auto_scroll = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.general.model, "claude-opus-4-20250514");
+        assert_eq!(config.agents.foreground.model, "claude-opus-4-20250514");
         assert_eq!(config.auth.method, AuthMethod::ApiKey);
         assert_eq!(config.ui.theme, "monokai");
+    }
+
+    #[test]
+    fn test_parse_agent_configs() {
+        let toml = r#"
+[agents.foreground]
+model = "claude-opus-4-5-20251101"
+max_tokens = 8192
+thinking_budget = 2000
+tool_access = "full"
+
+[agents.background]
+model = "claude-sonnet-4-20250514"
+max_tokens = 4096
+thinking_budget = 1000
+tool_access = "read_only"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.agents.foreground.model, "claude-opus-4-5-20251101");
+        assert_eq!(config.agents.foreground.tool_access, ToolAccess::Full);
+        assert_eq!(config.agents.background.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.agents.background.tool_access, ToolAccess::ReadOnly);
     }
 
     #[test]

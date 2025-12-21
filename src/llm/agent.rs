@@ -10,7 +10,7 @@ use genai::chat::{
 use genai::{Client, Headers};
 
 use crate::auth::OAuthCredentials;
-use crate::config::GeneralConfig;
+use crate::config::AgentRuntimeConfig;
 use crate::transcript::{BlockType, Role, Transcript};
 use crate::tools::{ToolCall, ToolDecision, ToolRegistry};
 
@@ -131,7 +131,7 @@ pub struct RequestOptions {
 }
 
 impl RequestMode {
-    pub fn options(&self, config: &GeneralConfig) -> RequestOptions {
+    pub fn options(&self, config: &AgentRuntimeConfig) -> RequestOptions {
         match self {
             Self::Normal => RequestOptions {
                 tools_enabled: true,
@@ -150,7 +150,7 @@ impl RequestMode {
 /// Agent for handling conversations
 pub struct Agent {
     client: Client,
-    config: GeneralConfig,
+    config: AgentRuntimeConfig,
     tools: ToolRegistry,
     messages: Vec<ChatMessage>,
     system_prompt: String,
@@ -174,7 +174,7 @@ pub struct Agent {
 impl Agent {
     /// Create a new agent with initial messages and default tools
     pub fn new(
-        config: GeneralConfig,
+        config: AgentRuntimeConfig,
         system_prompt: &str,
         oauth: Option<OAuthCredentials>,
     ) -> Self {
@@ -183,7 +183,7 @@ impl Agent {
 
     /// Create a new agent with a custom tool registry
     pub fn with_tools(
-        config: GeneralConfig,
+        config: AgentRuntimeConfig,
         system_prompt: &str,
         oauth: Option<OAuthCredentials>,
         tools: ToolRegistry,
