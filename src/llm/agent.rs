@@ -24,9 +24,12 @@ const ANTHROPIC_BETA_HEADER: &str = concat!(
 const ANTHROPIC_USER_AGENT: &str = "ai-sdk/anthropic/2.0.50 ai-sdk/provider-utils/3.0.18 runtime/bun/1.3.4";
 
 // Only expose internal ToolCall
+// Note: agent_id is set to 0 here - the caller (App) should set the correct ID
+// after receiving the ToolRequest from the registry
 impl From<&GenaiToolCall> for ToolCall {
     fn from(tc: &GenaiToolCall) -> Self {
         Self {
+            agent_id: 0, // Placeholder - set by App when handling ToolRequest
             call_id: tc.call_id.clone(),
             name: tc.fn_name.clone(),
             params: tc.fn_arguments.clone(),

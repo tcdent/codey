@@ -17,8 +17,8 @@ use ratatui::{
 
 use crate::commands::Command;
 use crate::config::Config;
-use crate::llm::{Agent, AgentStep, RequestMode};
-use crate::tools::{ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
+use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
+use crate::tools::{ToolDecision, ToolEffect, ToolEvent, ToolExecutor, ToolRegistry};
 use crate::tool_filter::ToolFilters;
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
 use crate::ide::{Ide, IdeEvent, Nvim};
@@ -234,8 +234,8 @@ pub struct App {
     events: EventStream,
     /// Current input mode
     input_mode: InputMode,
-    /// LLM agent for conversation
-    agent: Option<Agent>,
+    /// Agent registry for managing multiple agents
+    agents: AgentRegistry,
     /// Tool executor for managing tool approval and execution
     tool_executor: ToolExecutor,
 }
@@ -343,7 +343,7 @@ impl App {
             ide,
             events: EventStream::new(),
             input_mode: InputMode::Normal,
-            agent: None,
+            agents: AgentRegistry::new(),
             tool_executor: ToolExecutor::new(ToolRegistry::new()),
         })
     }
@@ -353,7 +353,7 @@ impl App {
         let oauth = crate::auth::OAuthCredentials::load()
             .ok()
             .flatten();
-        
+
         let mut agent = Agent::new(
             self.config.general.clone(),
             SYSTEM_PROMPT,
@@ -365,7 +365,7 @@ impl App {
         } else {
             self.chat.add_turn(Role::Assistant, TextBlock::pending(WELCOME_MESSAGE));
         }
-        self.agent = Some(agent);
+        self.agents.register(agent);
 
         // Initial render - populate hot zone from transcript
         self.chat.render(&mut self.terminal)?;
@@ -388,8 +388,8 @@ impl App {
                     self.handle_ide_event(ide_event);
                 }
                 // Handle agent steps (streaming responses, tool requests)
-                Some(agent_step) = async { self.agent.as_mut()?.next().await } => {
-                    self.handle_agent_step(agent_step).await?;
+                Some((agent_id, agent_step)) = self.agents.next() => {
+                    self.handle_agent_step(agent_id, agent_step).await?;
                 }
                 // Handle tool executor events (tool output, completion)
                 Some(tool_event) = self.tool_executor.next() => {
@@ -424,9 +424,12 @@ impl App {
 
         // Draw the viewport (hot zone content + input)
         let chat_widget = self.chat.widget();
+        let context_tokens = self.agents.primary()
+            .and_then(|m| m.try_lock().ok())
+            .map_or(0, |a| a.total_usage().context_tokens);
         let input_widget = self.input.widget(
             &self.config.general.model,
-            self.agent.as_ref().map_or(0, |a| a.total_usage().context_tokens),
+            context_tokens,
         );
         let alert = self.alert.clone();
 
@@ -562,9 +565,9 @@ impl App {
     }
 
     /// Cancel the current agent request and reset input mode
-    fn cancel(&mut self) -> Result<()> {
-        if let Some(agent) = self.agent.as_mut() {
-            agent.cancel();
+    async fn cancel(&mut self) -> Result<()> {
+        if let Some(agent_mutex) = self.agents.primary() {
+            agent_mutex.lock().await.cancel();
         }
         self.chat.finish_turn(&mut self.terminal)?;
         self.input_mode = InputMode::Normal;
@@ -586,7 +589,7 @@ impl App {
         };
 
         match self.handle_action(action).await {
-            ActionResult::Interrupt => { self.cancel()?; }
+            ActionResult::Interrupt => { self.cancel().await?; }
             ActionResult::Continue => { self.draw_throttled()?; }
             ActionResult::NoOp => {}
         }
@@ -615,7 +618,9 @@ impl App {
     
     /// Start processing a message request
     async fn handle_message(&mut self, request: MessageRequest) -> Result<()> {
-        if let Some(agent) = self.agent.as_mut() {
+        // Refresh OAuth token for primary agent if needed
+        if let Some(agent_mutex) = self.agents.primary() {
+            let mut agent = agent_mutex.lock().await;
             if let Err(e) = agent.refresh_oauth_if_needed().await {
                 tracing::warn!("Failed to refresh OAuth token: {}", e);
             }
@@ -652,15 +657,15 @@ impl App {
                 self.chat.render(&mut self.terminal)?;
                 self.draw()?;
 
-                if let Some(agent) = self.agent.as_mut() {
-                    agent.send_request(&content, RequestMode::Normal);
+                if let Some(agent_mutex) = self.agents.primary() {
+                    agent_mutex.lock().await.send_request(&content, RequestMode::Normal);
                 }
                 self.chat.begin_turn(Role::Assistant, &mut self.terminal)?;
                 self.input_mode = InputMode::Streaming;
             }
             MessageRequest::Compaction => {
-                if let Some(agent) = self.agent.as_mut() {
-                    agent.send_request(COMPACTION_PROMPT, RequestMode::Compaction);
+                if let Some(agent_mutex) = self.agents.primary() {
+                    agent_mutex.lock().await.send_request(COMPACTION_PROMPT, RequestMode::Compaction);
                 }
                 self.chat.begin_turn(Role::Assistant, &mut self.terminal)?;
                 self.input_mode = InputMode::Streaming;
@@ -671,7 +676,7 @@ impl App {
     }
 
     /// Handle a single agent step during streaming
-    async fn handle_agent_step(&mut self, step: AgentStep) -> Result<()> {
+    async fn handle_agent_step(&mut self, agent_id: AgentId, step: AgentStep) -> Result<()> {
         match step {
             AgentStep::TextDelta(text) => {
                 self.chat.transcript.stream_delta(BlockType::Text, &text);
@@ -683,7 +688,11 @@ impl App {
                 self.chat.transcript.stream_delta(BlockType::Thinking, &text);
             }
             AgentStep::ToolRequest(tool_calls) => {
-                // Just enqueue - the select loop will poll tool_executor.next()
+                // Set agent_id on each tool call before enqueuing
+                let tool_calls: Vec<_> = tool_calls
+                    .into_iter()
+                    .map(|tc| tc.with_agent_id(agent_id))
+                    .collect();
                 self.tool_executor.enqueue(tool_calls);
             }
             AgentStep::Retrying { attempt, error } => {
@@ -813,7 +822,7 @@ impl App {
 
             }
 
-            ToolEvent::OutputDelta { call_id, delta } => {
+            ToolEvent::OutputDelta { call_id, delta, .. } => {
                 // Stream output to the active tool block
                 if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
                     block.append_text(&delta);
@@ -825,7 +834,7 @@ impl App {
                 }
             }
 
-            ToolEvent::Completed { call_id, content, is_error, ide_post_actions } => {
+            ToolEvent::Completed { agent_id, call_id, content, is_error, ide_post_actions, effects } => {
                 // Update transcript status (content was already streamed via OutputDelta)
                 self.chat.transcript.mark_active_block(
                     if is_error { Status::Error } else { Status::Complete }
@@ -840,9 +849,14 @@ impl App {
                     }
                 }
 
-                // Tell agent about the result
-                if let Some(agent) = self.agent.as_mut() {
-                    agent.submit_tool_result(&call_id, content);
+                // Process tool effects
+                for effect in effects {
+                    self.apply_effect(agent_id, effect).await?;
+                }
+
+                // Tell agent about the result - route to the correct agent by ID
+                if let Some(agent_mutex) = self.agents.get(agent_id) {
+                    agent_mutex.lock().await.submit_tool_result(&call_id, content);
                 }
 
                 // Tool is done - go back to streaming mode.
@@ -852,6 +866,34 @@ impl App {
                 // Render update
                 self.chat.render(&mut self.terminal)?;
                 self.draw()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply a tool effect
+    /// Effects are side-effects requested by tools, processed after tool completion
+    async fn apply_effect(&mut self, _agent_id: AgentId, effect: ToolEffect) -> Result<()> {
+        match effect {
+            ToolEffect::SpawnAgent { task, context } => {
+                // TODO: Implement background agent spawning once AgentRegistry is integrated
+                tracing::info!("SpawnAgent effect: task={}, context={:?}", task, context);
+            }
+            ToolEffect::IdeOpen { path, line } => {
+                if let Some(ide) = &self.ide {
+                    use crate::ide::IdeAction;
+                    let action = IdeAction::NavigateTo {
+                        path: path.to_string_lossy().to_string(),
+                        line,
+                        column: None,
+                    };
+                    if let Err(e) = ide.execute(&action).await {
+                        tracing::warn!("Failed to open file in IDE: {}", e);
+                    }
+                }
+            }
+            ToolEffect::Notify { message } => {
+                self.alert = Some(message);
             }
         }
         Ok(())

@@ -1,7 +1,7 @@
 mod exec;
 mod impls;
 
-pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
+pub use exec::{ToolCall, ToolDecision, ToolEffect, ToolEvent, ToolExecutor};
 pub use impls::{EditFileTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, WebSearchTool, WriteFileTool};
 
 use crate::ide::{IdeAction, ToolPreview};
