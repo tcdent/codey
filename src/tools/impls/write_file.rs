@@ -1,6 +1,19 @@
 //! Write file tool
+//!
+//! The write_file tool as a composition of effects:
+//! ```text
+//! write_file = [
+//!     Pre:  ValidateParams       // Check params are well-formed
+//!           ValidateFileNotExists // Ensure file doesn't exist
+//!           IdeShowPreview       // Show the new file content
+//!     ---:  AwaitApproval        // Wait for user approval
+//!     Exec: WriteFile            // Create the file
+//!           Output               // Report success
+//!     Post: IdeReloadBuffer      // Reload buffer in IDE
+//! ]
+//! ```
 
-use super::{once_ready, Tool, ToolEffect, ToolOutput, ToolResult};
+use super::{once_ready, ComposableTool, Effect, Tool, ToolEffect, ToolOutput, ToolPipeline, ToolResult};
 use crate::ide::ToolPreview;
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
@@ -13,6 +26,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Tool name constant to avoid ambiguity between trait implementations
+const TOOL_NAME: &str = "write_file";
 
 /// Write file display block
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,7 +163,7 @@ impl WriteFileTool {
 
 impl Tool for WriteFileTool {
     fn name(&self) -> &'static str {
-        "write_file"
+        TOOL_NAME
     }
 
     fn description(&self) -> &'static str {
@@ -173,10 +189,10 @@ impl Tool for WriteFileTool {
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
-        if let Some(block) = WriteFileBlock::from_params(call_id, self.name(), params.clone()) {
+        if let Some(block) = WriteFileBlock::from_params(call_id, TOOL_NAME, params.clone()) {
             Box::new(block)
         } else {
-            Box::new(ToolBlock::new(call_id, self.name(), params))
+            Box::new(ToolBlock::new(call_id, TOOL_NAME, params))
         }
     }
 
@@ -185,13 +201,105 @@ impl Tool for WriteFileTool {
     }
 
     fn ide_preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
-        let file_path = params.get("path").and_then(|p| p.as_str())?;
-        let content = params.get("content").and_then(|c| c.as_str())?;
-
-        Some(ToolPreview::FileContent {
-            path: file_path.to_string(),
-            content: content.to_string(),
+        // Delegate to the effect pipeline - extract preview from pre-effects
+        let pipeline = ComposableTool::compose(self, params.clone());
+        pipeline.pre.into_iter().find_map(|effect| {
+            if let Effect::IdeShowPreview { preview } = effect {
+                Some(preview)
+            } else {
+                None
+            }
         })
+    }
+}
+
+// ============================================================================
+// ComposableTool Implementation
+// ============================================================================
+
+impl ComposableTool for WriteFileTool {
+    fn name(&self) -> &'static str {
+        TOOL_NAME
+    }
+
+    fn description(&self) -> &'static str {
+        "Create a new file with the specified content. Fails if the file already exists. \
+         Use edit_file to modify existing files."
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path where the file will be created"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Content to write to the file"
+                }
+            },
+            "required": ["path", "content"]
+        })
+    }
+
+    fn compose(&self, params: serde_json::Value) -> ToolPipeline {
+        // Parse parameters
+        let parsed: Result<WriteFileParams, _> = serde_json::from_value(params.clone());
+        let params = match parsed {
+            Ok(p) => p,
+            Err(e) => {
+                return ToolPipeline::error(format!("Invalid params: {}", e));
+            }
+        };
+
+        let path = PathBuf::from(&params.path);
+
+        // Check if file already exists
+        if path.exists() {
+            return ToolPipeline::error(format!(
+                "File already exists: {}. Use edit_file to modify existing files.",
+                params.path
+            ));
+        }
+
+        // Build the effect pipeline
+        ToolPipeline::new()
+            // Pre-approval: Show preview of file content
+            .pre(Effect::IdeShowPreview {
+                preview: ToolPreview::FileContent {
+                    path: params.path.clone(),
+                    content: params.content.clone(),
+                },
+            })
+            // Approval is required by default
+            .approval(true)
+            // Execute: Write the file
+            .exec(Effect::WriteFile {
+                path: path.clone(),
+                content: params.content.clone(),
+            })
+            .exec(Effect::Output {
+                content: format!(
+                    "Created file: {} ({} lines, {} bytes)",
+                    params.path,
+                    params.content.lines().count(),
+                    params.content.len()
+                ),
+            })
+            // Post: Reload buffer
+            .post(Effect::IdeReloadBuffer {
+                path: path.canonicalize().unwrap_or(path),
+            })
+    }
+
+    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
+        if let Some(block) = WriteFileBlock::from_params(call_id, TOOL_NAME, params.clone()) {
+            Box::new(block)
+        } else {
+            Box::new(ToolBlock::new(call_id, TOOL_NAME, params))
+        }
     }
 }
 

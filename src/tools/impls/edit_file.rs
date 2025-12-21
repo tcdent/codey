@@ -182,23 +182,14 @@ impl Tool for EditFileTool {
     }
 
     fn ide_preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
-        let file_path = params.get("path").and_then(|p| p.as_str())?;
-        let edits = params.get("edits").and_then(|e| e.as_array())?;
-
-        if edits.is_empty() {
-            return None;
-        }
-
-        // Read original file content
-        let original = fs::read_to_string(file_path).ok()?;
-
-        // Apply all edits to get the modified version
-        let modified = Self::apply_edits(&original, edits)?;
-
-        Some(ToolPreview::Diff {
-            path: file_path.to_string(),
-            original,
-            modified,
+        // Delegate to the effect pipeline - extract preview from pre-effects
+        let pipeline = ComposableTool::compose(self, params.clone());
+        pipeline.pre.into_iter().find_map(|effect| {
+            if let Effect::IdeShowPreview { preview } = effect {
+                Some(preview)
+            } else {
+                None
+            }
         })
     }
 }
