@@ -4,7 +4,7 @@ mod impls;
 pub use exec::{ToolCall, ToolDecision, ToolEffect, ToolEvent, ToolExecutor};
 pub use impls::{EditFileTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, TaskTool, WebSearchTool, WriteFileTool};
 
-use crate::ide::{IdeAction, ToolPreview};
+use crate::ide::ToolPreview;
 use crate::transcript::Block;
 use anyhow::Result;
 use futures::stream::BoxStream;
@@ -79,14 +79,6 @@ pub trait Tool: Send + Sync {
     /// so the user can see what will change in their editor.
     fn ide_preview(&self, _params: &serde_json::Value) -> Option<ToolPreview> {
         None
-    }
-
-    /// Get IDE actions to perform after successful execution
-    ///
-    /// For example, file-modifying tools should return `ReloadBuffer` so the
-    /// editor refreshes the changed file.
-    fn ide_post_actions(&self, _params: &serde_json::Value) -> Vec<IdeAction> {
-        vec![]
     }
 }
 

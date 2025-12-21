@@ -1,7 +1,7 @@
 //! Edit file tool with search/replace
 
-use super::{once_ready, Tool, ToolOutput, ToolResult};
-use crate::ide::{IdeAction, ToolPreview};
+use super::{once_ready, Tool, ToolEffect, ToolOutput, ToolResult};
+use crate::ide::ToolPreview;
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use futures::stream::BoxStream;
@@ -12,7 +12,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Edit file display block
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,7 +171,7 @@ impl Tool for EditFileTool {
 
         // Read original file content
         let original = fs::read_to_string(file_path).ok()?;
-        
+
         // Apply all edits to get the modified version
         let modified = Self::apply_edits(&original, edits)?;
 
@@ -180,14 +180,6 @@ impl Tool for EditFileTool {
             original,
             modified,
         })
-    }
-
-    fn ide_post_actions(&self, params: &serde_json::Value) -> Vec<IdeAction> {
-        params
-            .get("path")
-            .and_then(|p| p.as_str())
-            .map(|path| vec![IdeAction::ReloadBuffer(path.to_string())])
-            .unwrap_or_default()
     }
 }
 
@@ -276,12 +268,13 @@ impl EditFileTool {
         match fs::write(path, &content) {
             Ok(()) => {
                 let summary = applied_edits.join("\n");
+                let abs_path = path.canonicalize().unwrap_or_else(|_| PathBuf::from(&params.path));
                 ToolResult::success(format!(
                     "Successfully applied {} edit(s) to {}\n\n{}",
                     params.edits.len(),
                     params.path,
                     summary
-                ))
+                )).with_effects(vec![ToolEffect::IdeReloadBuffer { path: abs_path }])
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }

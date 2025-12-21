@@ -1,7 +1,7 @@
 //! Write file tool
 
-use super::{once_ready, Tool, ToolOutput, ToolResult};
-use crate::ide::{IdeAction, ToolPreview};
+use super::{once_ready, Tool, ToolEffect, ToolOutput, ToolResult};
+use crate::ide::ToolPreview;
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use futures::stream::BoxStream;
@@ -12,7 +12,7 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Write file display block
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,10 +134,11 @@ impl WriteFileTool {
             Ok(()) => {
                 let line_count = params.content.lines().count();
                 let byte_count = params.content.len();
+                let abs_path = path.canonicalize().unwrap_or_else(|_| PathBuf::from(&params.path));
                 ToolResult::success(format!(
                     "Created file: {} ({} lines, {} bytes)",
                     params.path, line_count, byte_count
-                ))
+                )).with_effects(vec![ToolEffect::IdeReloadBuffer { path: abs_path }])
             }
             Err(e) => ToolResult::error(format!("Failed to write file: {}", e)),
         }
@@ -191,14 +192,6 @@ impl Tool for WriteFileTool {
             path: file_path.to_string(),
             content: content.to_string(),
         })
-    }
-
-    fn ide_post_actions(&self, params: &serde_json::Value) -> Vec<IdeAction> {
-        params
-            .get("path")
-            .and_then(|p| p.as_str())
-            .map(|path| vec![IdeAction::ReloadBuffer(path.to_string())])
-            .unwrap_or_default()
     }
 }
 

@@ -866,7 +866,7 @@ impl App {
                 }
             }
 
-            ToolEvent::Completed { agent_id, call_id, content, is_error, ide_post_actions, effects } => {
+            ToolEvent::Completed { agent_id, call_id, content, is_error, effects } => {
                 let is_primary = self.agents.primary_id() == Some(agent_id);
 
                 if is_primary {
@@ -874,15 +874,6 @@ impl App {
                     self.chat.transcript.mark_active_block(
                         if is_error { Status::Error } else { Status::Complete }
                     );
-
-                    // Execute post-actions from the tool
-                    for action in ide_post_actions {
-                        if let Some(ide) = &self.ide {
-                            if let Err(e) = ide.execute(&action).await {
-                                tracing::warn!("Failed to execute IDE action: {}", e);
-                            }
-                        }
-                    }
                 }
 
                 // Process tool effects (for all agents)
@@ -944,15 +935,16 @@ impl App {
                 let sub_agent_id = self.agents.register(sub_agent);
                 tracing::info!("Spawned sub-agent {} for task: {}", sub_agent_id, task);
             }
-            ToolEffect::IdeOpen { path, line } => {
+            ToolEffect::IdeReloadBuffer { path } => {
                 if let Some(ide) = &self.ide {
-                    use crate::ide::IdeAction;
-                    let action = IdeAction::NavigateTo {
-                        path: path.to_string_lossy().to_string(),
-                        line,
-                        column: None,
-                    };
-                    if let Err(e) = ide.execute(&action).await {
+                    if let Err(e) = ide.reload_buffer(&path.to_string_lossy()).await {
+                        tracing::warn!("Failed to reload buffer in IDE: {}", e);
+                    }
+                }
+            }
+            ToolEffect::IdeOpen { path, line, column } => {
+                if let Some(ide) = &self.ide {
+                    if let Err(e) = ide.navigate_to(&path.to_string_lossy(), line, column).await {
                         tracing::warn!("Failed to open file in IDE: {}", e);
                     }
                 }

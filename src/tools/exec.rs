@@ -1,6 +1,5 @@
 //! Streamable tool executor
 
-use crate::ide::IdeAction;
 use crate::llm::AgentId;
 use crate::tools::ToolOutput;
 use futures::stream::BoxStream;
@@ -49,11 +48,15 @@ pub enum ToolEffect {
         task: String,
         context: Option<String>,
     },
-    /// Open a file in the IDE
-    #[allow(dead_code)]
+    /// Reload a buffer in the IDE (after file modification)
+    IdeReloadBuffer {
+        path: PathBuf,
+    },
+    /// Open/navigate to a file in the IDE
     IdeOpen {
         path: PathBuf,
         line: Option<u32>,
+        column: Option<u32>,
     },
     /// Show a notification to the user
     #[allow(dead_code)]
@@ -79,7 +82,6 @@ pub enum ToolEvent {
         call_id: String,
         content: String,
         is_error: bool,
-        ide_post_actions: Vec<IdeAction>,
         effects: Vec<ToolEffect>,
     },
 }
@@ -88,7 +90,6 @@ pub enum ToolEvent {
 struct ActiveExecution {
     agent_id: AgentId,
     call_id: String,
-    ide_post_actions: Vec<IdeAction>,
     stream: BoxStream<'static, ToolOutput>,
     collected_output: String,
 }
@@ -153,7 +154,6 @@ impl ToolExecutor {
                             call_id: active.call_id,
                             content: result.content,
                             is_error: result.is_error,
-                            ide_post_actions: active.ide_post_actions,
                             effects: result.effects,
                         });
                     }
@@ -166,7 +166,6 @@ impl ToolExecutor {
                             call_id: active.call_id,
                             content: active.collected_output,
                             is_error: false,
-                            ide_post_actions: active.ide_post_actions,
                             effects: vec![],
                         });
                     }
@@ -193,7 +192,6 @@ impl ToolExecutor {
                         call_id: tool_call.call_id,
                         content: "Denied by user".to_string(),
                         is_error: true,
-                        ide_post_actions: vec![],
                         effects: vec![],
                     });
                 }
@@ -201,13 +199,11 @@ impl ToolExecutor {
                     tracing::debug!("ToolExecutor executing approved tool {}", tool_call.call_id);
                     let tool_call = self.pending.pop_front().unwrap();
                     let tool = self.tools.get_arc(&tool_call.name);
-                    let ide_post_actions = tool.ide_post_actions(&tool_call.params);
                     let stream = tool.execute(tool_call.params.clone());
 
                     self.active = Some(ActiveExecution {
                         agent_id: tool_call.agent_id,
                         call_id: tool_call.call_id,
-                        ide_post_actions,
                         stream,
                         collected_output: String::new(),
                     });

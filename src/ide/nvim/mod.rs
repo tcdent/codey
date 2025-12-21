@@ -452,19 +452,4 @@ mod tests {
         nvim.show_preview(&preview).await.unwrap();
     }
 
-    #[tokio::test]
-    #[ignore] // Requires running nvim instance
-    async fn test_get_current_file() {
-        let nvim = Nvim::discover(&NvimConfig::default()).await.unwrap().expect("Need nvim");
-        let file = nvim.get_current_file().await.unwrap();
-        println!("Current file: {:?}", file);
-    }
-
-    #[tokio::test]
-    #[ignore] // Requires running nvim instance
-    async fn test_get_selection() {
-        let nvim = Nvim::discover(&NvimConfig::default()).await.unwrap().expect("Need nvim");
-        let selection = nvim.get_selection().await.unwrap();
-        println!("Selection: {:?}", selection);
-    }
 }

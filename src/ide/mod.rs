@@ -18,7 +18,6 @@ pub mod nvim;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
 
 pub use nvim::Nvim;
 
@@ -41,19 +40,6 @@ pub enum ToolPreview {
         content: String,
     },
     // Future: CommandOutput, DirectoryListing, etc.
-}
-
-/// An action for the IDE to perform after tool execution
-#[derive(Debug, Clone)]
-pub enum IdeAction {
-    /// Reload a buffer that was modified externally
-    ReloadBuffer(String),
-    /// Navigate to a specific location
-    NavigateTo {
-        path: String,
-        line: Option<u32>,
-        column: Option<u32>,
-    },
 }
 
 /// A text selection from the IDE
@@ -95,16 +81,6 @@ pub trait Ide: Send + Sync {
 
     /// Reload a buffer that was modified externally
     async fn reload_buffer(&self, path: &str) -> Result<()>;
-
-    /// Execute an IDE action
-    async fn execute(&self, action: &IdeAction) -> Result<()> {
-        match action {
-            IdeAction::ReloadBuffer(path) => self.reload_buffer(path).await,
-            IdeAction::NavigateTo { path, line, column } => {
-                self.navigate_to(path, *line, *column).await
-            }
-        }
-    }
 
     /// Navigate to a file and optionally a specific position
     async fn navigate_to(

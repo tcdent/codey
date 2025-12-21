@@ -1,7 +1,6 @@
 //! Open file tool - opens a file in the IDE at a specific line
 
-use super::{once_ready, Tool, ToolOutput, ToolResult};
-use crate::ide::IdeAction;
+use super::{once_ready, Tool, ToolEffect, ToolOutput, ToolResult};
 use crate::transcript::{render_approval_prompt, Block, BlockType, Status};
 use futures::stream::BoxStream;
 use ratatui::{
@@ -10,7 +9,7 @@ use ratatui::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Tool for opening files in the IDE
 pub struct OpenFileTool;
@@ -40,11 +39,19 @@ impl OpenFileTool {
             return ToolResult::error(format!("Not a file: {}", params.path));
         }
 
-        // Return success message
-        match params.line {
-            Some(line) => ToolResult::success(format!("Opening {} at line {}", params.path, line)),
-            None => ToolResult::success(format!("Opening {}", params.path)),
-        }
+        // Canonicalize to absolute path for the IDE
+        let abs_path = path.canonicalize().unwrap_or_else(|_| PathBuf::from(&params.path));
+
+        let message = match params.line {
+            Some(line) => format!("Opening {} at line {}", params.path, line),
+            None => format!("Opening {}", params.path),
+        };
+
+        ToolResult::success(message).with_effects(vec![ToolEffect::IdeOpen {
+            path: abs_path,
+            line: params.line,
+            column: None,
+        }])
     }
 }
 
@@ -81,24 +88,6 @@ impl Tool for OpenFileTool {
 
     fn execute(&self, params: serde_json::Value) -> BoxStream<'static, ToolOutput> {
         once_ready(Ok(self.execute_inner(params)))
-    }
-
-    fn ide_post_actions(&self, params: &serde_json::Value) -> Vec<IdeAction> {
-        let Ok(p) = serde_json::from_value::<OpenFileParams>(params.clone()) else {
-            return vec![];
-        };
-
-        // Canonicalize to absolute path for the IDE
-        let path = Path::new(&p.path)
-            .canonicalize()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or(p.path);
-
-        vec![IdeAction::NavigateTo {
-            path,
-            line: p.line,
-            column: None,
-        }]
     }
 }
 
