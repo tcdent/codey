@@ -11,7 +11,7 @@
 //! ]
 //! ```
 
-use super::{ComposableTool, Effect, ToolPipeline};
+use super::{handlers, Tool, ToolPipeline};
 use crate::ide::ToolPreview;
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
@@ -110,7 +110,7 @@ struct WriteFileParams {
     content: String,
 }
 
-impl ComposableTool for WriteFileTool {
+impl Tool for WriteFileTool {
     fn name(&self) -> &'static str {
         "write_file"
     }
@@ -147,27 +147,25 @@ impl ComposableTool for WriteFileTool {
         };
 
         let path = PathBuf::from(&params.path);
-
-        // Check if file already exists
-        if path.exists() {
-            return ToolPipeline::error(format!(
-                "File already exists: {}. Use edit_file to modify existing files.",
-                params.path
-            ));
-        }
-
-        // Build the effect chain
         let abs_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+
         ToolPipeline::new()
-            .then(Effect::IdeShowPreview {
-                preview: ToolPreview::FileContent {
+            .then(handlers::ValidateFileNotExists {
+                path: path.clone(),
+                message: format!(
+                    "File already exists: {}. Use edit_file to modify existing files.",
+                    params.path
+                ),
+            })
+            .then(handlers::IdeShowPreview {
+                preview: ToolPreview::File {
                     path: params.path.clone(),
                     content: params.content.clone(),
                 },
             })
             .await_approval()
-            .then(Effect::WriteFile { path: path.clone(), content: params.content.clone() })
-            .then(Effect::Output {
+            .then(handlers::WriteFile { path: path.clone(), content: params.content.clone() })
+            .then(handlers::Output {
                 content: format!(
                     "Created file: {} ({} lines, {} bytes)",
                     params.path,
@@ -175,7 +173,7 @@ impl ComposableTool for WriteFileTool {
                     params.content.len()
                 ),
             })
-            .then(Effect::IdeReloadBuffer { path: abs_path })
+            .then(handlers::IdeReloadBuffer { path: abs_path })
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {

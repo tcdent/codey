@@ -1,6 +1,6 @@
 //! Brave Web Search tool
 
-use super::{ComposableTool, Effect, ToolPipeline};
+use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, Status, ToolBlock};
 use ratatui::{
@@ -101,7 +101,7 @@ fn default_count() -> u32 {
     10
 }
 
-impl ComposableTool for WebSearchTool {
+impl Tool for WebSearchTool {
     fn name(&self) -> &'static str {
         "web_search"
     }
@@ -135,7 +135,7 @@ impl ComposableTool for WebSearchTool {
 
         ToolPipeline::new()
             .await_approval()
-            .then(Effect::WebSearch {
+            .then(handlers::WebSearch {
                 query: parsed.query,
                 count: parsed.count,
             })

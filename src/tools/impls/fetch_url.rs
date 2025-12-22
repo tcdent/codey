@@ -1,6 +1,6 @@
 //! URL fetching tool
 
-use super::{ComposableTool, Effect, ToolPipeline};
+use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use ratatui::{
@@ -95,7 +95,7 @@ struct FetchUrlParams {
     max_length: Option<usize>,
 }
 
-impl ComposableTool for FetchUrlTool {
+impl Tool for FetchUrlTool {
     fn name(&self) -> &'static str {
         "fetch_url"
     }
@@ -131,7 +131,7 @@ impl ComposableTool for FetchUrlTool {
 
         ToolPipeline::new()
             .await_approval()
-            .then(Effect::FetchUrl {
+            .then(handlers::FetchUrl {
                 url: parsed.url,
                 max_length: parsed.max_length,
             })

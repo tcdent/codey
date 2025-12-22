@@ -1,6 +1,6 @@
 //! Task tool for spawning background agents
 
-use super::{ComposableTool, Effect, ToolPipeline};
+use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, Block, BlockType, ToolBlock, Status};
 use ratatui::{
@@ -105,7 +105,7 @@ struct TaskParams {
     context: Option<String>,
 }
 
-impl ComposableTool for TaskTool {
+impl Tool for TaskTool {
     fn name(&self) -> &'static str {
         "task"
     }
@@ -143,11 +143,11 @@ impl ComposableTool for TaskTool {
 
         ToolPipeline::new()
             .await_approval()
-            .then(Effect::SpawnAgent {
+            .then(handlers::SpawnAgent {
                 task: parsed.task,
                 context: parsed.context,
             })
-            .then(Effect::Output { content: message })
+            .then(handlers::Output { content: message })
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {

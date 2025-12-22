@@ -1,6 +1,6 @@
 //! Open file tool - opens a file in the IDE at a specific line
 
-use super::{ComposableTool, Effect, ToolPipeline};
+use super::{handlers, Tool, ToolPipeline};
 use crate::transcript::{render_approval_prompt, Block, BlockType, Status};
 use ratatui::{
     style::{Color, Style},
@@ -8,7 +8,7 @@ use ratatui::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Tool for opening files in the IDE
 pub struct OpenFileTool;
@@ -19,7 +19,7 @@ struct OpenFileParams {
     line: Option<u32>,
 }
 
-impl ComposableTool for OpenFileTool {
+impl Tool for OpenFileTool {
     fn name(&self) -> &'static str {
         "open_file"
     }
@@ -52,20 +52,8 @@ impl ComposableTool for OpenFileTool {
             Err(e) => return ToolPipeline::error(format!("Invalid params: {}", e)),
         };
 
-        let path = Path::new(&parsed.path);
-
-        // Check if file exists
-        if !path.exists() {
-            return ToolPipeline::error(format!("File not found: {}", parsed.path));
-        }
-
-        // Check if it's a file (not a directory)
-        if !path.is_file() {
-            return ToolPipeline::error(format!("Not a file: {}", parsed.path));
-        }
-
-        // Canonicalize to absolute path for the IDE
-        let abs_path = path.canonicalize().unwrap_or_else(|_| PathBuf::from(&parsed.path));
+        let path = PathBuf::from(&parsed.path);
+        let abs_path = path.canonicalize().unwrap_or_else(|_| path.clone());
 
         let message = match parsed.line {
             Some(line) => format!("Opening {} at line {}", parsed.path, line),
@@ -73,13 +61,14 @@ impl ComposableTool for OpenFileTool {
         };
 
         ToolPipeline::new()
+            .then(handlers::ValidateFile { path })
             .await_approval()
-            .then(Effect::IdeOpen {
+            .then(handlers::IdeOpen {
                 path: abs_path,
                 line: parsed.line,
                 column: None,
             })
-            .then(Effect::Output { content: message })
+            .then(handlers::Output { content: message })
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {

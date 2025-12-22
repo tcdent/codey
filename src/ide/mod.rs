@@ -25,21 +25,18 @@ pub use nvim::Nvim;
 // Core Types
 // ============================================================================
 
+/// An edit operation (old_string → new_string)
+#[derive(Debug, Clone)]
+pub struct Edit {
+    pub old_string: String,
+    pub new_string: String,
+}
+
 /// A preview to show in the IDE before tool execution
 #[derive(Debug, Clone)]
 pub enum ToolPreview {
-    /// Show a side-by-side diff (for file edits)
-    Diff {
-        path: String,
-        original: String,
-        modified: String,
-    },
     /// Show file content (for write_file, showing what will be created)
-    FileContent {
-        path: String,
-        content: String,
-    },
-    // Future: CommandOutput, DirectoryListing, etc.
+    File { path: String, content: String },
 }
 
 /// A text selection from the IDE
@@ -73,8 +70,11 @@ pub trait Ide: Send + Sync {
 
     // === Output: App → IDE ===
 
-    /// Show a preview in the IDE (e.g., diff before approval)
+    /// Show a file preview in the IDE (for new file creation)
     async fn show_preview(&self, preview: &ToolPreview) -> Result<()>;
+
+    /// Show a diff preview with edits (hunks with context, not full file)
+    async fn show_diff_preview(&self, path: &str, edits: &[Edit]) -> Result<()>;
 
     /// Close any open preview windows/buffers
     async fn close_preview(&self) -> Result<()>;

@@ -1,6 +1,6 @@
 //! Shell command execution tool
 
-use super::{ComposableTool, Effect, ToolPipeline};
+use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use ratatui::{
@@ -118,7 +118,7 @@ struct ShellParams {
     working_dir: Option<String>,
 }
 
-impl ComposableTool for ShellTool {
+impl Tool for ShellTool {
     fn name(&self) -> &'static str {
         "shell"
     }
@@ -155,7 +155,7 @@ impl ComposableTool for ShellTool {
 
         ToolPipeline::new()
             .await_approval()
-            .then(Effect::Shell {
+            .then(handlers::Shell {
                 command: parsed.command,
                 working_dir: parsed.working_dir,
                 timeout_secs: self.timeout_secs,

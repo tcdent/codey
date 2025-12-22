@@ -23,7 +23,7 @@ use crate::tool_filter::ToolFilters;
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
 use crate::ide::{Ide, IdeEvent, Nvim};
 use crate::ui::{Attachment, ChatView, InputBox};
-
+use tokio::sync::oneshot;
 
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
 
@@ -32,7 +32,8 @@ pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const CODEY_DIR: &str = ".codey";
 pub const TRANSCRIPTS_DIR: &str = "transcripts";
 
-const WELCOME_MESSAGE: &str = "Welcome to Codey! I'm your AI coding assistant. How can I help you today?";
+const WELCOME_MESSAGE: &str =
+    "Welcome to Codey! I'm your AI coding assistant. How can I help you today?";
 const SYSTEM_PROMPT: &str = r#"You are Codey, an AI coding assistant running in a terminal interface.
 
 ## Capabilities
@@ -58,14 +59,17 @@ You have access to the following tools:
 - The `old_string` must match EXACTLY, including whitespace and indentation
 - If `old_string` appears multiple times, include more context to make it unique
 - Apply edits sequentially; each edit sees the result of previous edits
-- UYou can do multiple edits at once, but keep it under 1000 lines
+- You can do multiple edits at once, but keep it under 1000 lines
+- Avoid the urge to completely rewrite files - make precise, minimal edits so the user can review them easily
 
 ### Shell Commands
 - Prefer `read_file` over `cat`, `head`, `tail`
 - Use `ls` for directory exploration
 - Use `grep` or `rg` for searching code
-- `pwd` is an easy way to remind yourself of your current directory
-- Only prepend a command with cd <some/dir> && if you really need to change directories
+
+### Bad Habits
+- Be mindful of your bad habits, they include:
+  - Using cd to change directories unnecessarily before running commands, ususally with &&. You are probably already in the working directory you need to be in. 
 
 ### General
 - Be concise but thorough
@@ -84,7 +88,7 @@ Please provide a comprehensive summary of our conversation so far in markdown fo
 3. **Key project information** - Important facts about the project that the user has shared or that we're not immediately apparent
 4. **Relevant files** - Files most relevant to the current work with brief descriptions, line numbers, or method/variable names
 5. **Relevant documentation paths or URLs** - Links to docs or resources we will use to continue our work
-6. **Quotes and log snippets** - Any important quotes or logs that th euser provided that we'll need later
+6. **Quotes and log snippets** - Any important quotes or logs that the user provided that we'll need later
 
 Be thorough but concise - this summary will seed a fresh conversation context."#;
 
@@ -105,7 +109,6 @@ You have read-only access to:
 - You cannot modify files - only read and explore
 - If you need to suggest changes, describe them clearly for the primary agent to implement
 "#;
-
 
 /// Result of handling an action
 enum ActionResult {
@@ -258,6 +261,8 @@ pub struct App {
     tool_executor: ToolExecutor,
     /// OAuth credentials for agent creation
     oauth: Option<crate::auth::OAuthCredentials>,
+    /// Pending approval responder (when tool is awaiting user decision)
+    pending_approval: Option<oneshot::Sender<ToolDecision>>,
 }
 
 impl App {
@@ -287,22 +292,20 @@ impl App {
             crossterm::event::PopKeyboardEnhancementFlags
         )
         .context("Failed to restore terminal")?;
-        self.terminal
-            .show_cursor()
-            .context("Failed to show cursor")?;
+        self.terminal.show_cursor().context("Failed to show cursor")?;
 
         Ok(())
     }
 
     /// Create a new application
     pub async fn new(config: Config, continue_session: bool) -> Result<Self> {
-        // Okay so in tracing down trying to get the viewport to line up with the 
-        // scroll, it looks like we need to subtract the height of the input from 
+        // Okay so in tracing down trying to get the viewport to line up with the
+        // scroll, it looks like we need to subtract the height of the input from
         // the viewport in order to get the height of the chat view
-        // TODO All of those dimensions are in the draw method 
+        // TODO All of those dimensions are in the draw method
         let viewport_height: u16 = 12;
         let chat_height = viewport_height.saturating_sub(5) as usize;
-        
+
         let mut stdout = io::stdout();
         Self::setup_terminal(&mut stdout)?;
         let terminal_size = crossterm::terminal::size()?;
@@ -311,18 +314,15 @@ impl App {
         // Use inline viewport for native scrollback support
         let terminal = Terminal::with_options(
             backend,
-            TerminalOptions {
-                viewport: Viewport::Inline(viewport_height),
-            }
-        ).context("Failed to create terminal")?;
+            TerminalOptions { viewport: Viewport::Inline(viewport_height) },
+        )
+        .context("Failed to create terminal")?;
 
         // Load existing transcript or create new one
         let transcript = if continue_session {
-            Transcript::load()
-                .context("Failed to load transcript")?
+            Transcript::load().context("Failed to load transcript")?
         } else {
-            Transcript::new_numbered()
-                .context("Failed to create new transcript")?
+            Transcript::new_numbered().context("Failed to create new transcript")?
         };
 
         // Compile tool filters from config
@@ -335,15 +335,15 @@ impl App {
                 Ok(Some(nvim)) => {
                     tracing::info!("Connected to {} at {:?}", nvim.name(), nvim.socket_path());
                     Some(Box::new(nvim))
-                }
+                },
                 Ok(None) => {
                     tracing::debug!("No nvim instance found");
                     None
-                }
+                },
                 Err(e) => {
                     tracing::warn!("Failed to connect to nvim: {}", e);
                     None
-                }
+                },
             }
         } else {
             None
@@ -366,14 +366,13 @@ impl App {
             agents: AgentRegistry::new(),
             tool_executor: ToolExecutor::new(ToolRegistry::new()),
             oauth: None,
+            pending_approval: None,
         })
     }
 
     /// Run the main event loop - purely event-driven rendering
     pub async fn run(&mut self) -> Result<()> {
-        self.oauth = crate::auth::OAuthCredentials::load()
-            .ok()
-            .flatten();
+        self.oauth = crate::auth::OAuthCredentials::load().ok().flatten();
 
         let mut agent = Agent::new(
             AgentRuntimeConfig::foreground(&self.config),
@@ -391,7 +390,7 @@ impl App {
         // Initial render - populate hot zone from transcript
         self.chat.render(&mut self.terminal)?;
         self.draw()?;
-        
+
         // CANCEL-SAFETY: When one branch of tokio::select! completes, all other
         // futures are dropped (not paused). Any async fn polled here must store
         // its state on `self`, not in local variables, so it can resume correctly
@@ -434,7 +433,7 @@ impl App {
     fn draw(&mut self) -> Result<()> {
         use ratatui::style::{Color, Style};
         use ratatui::widgets::Paragraph;
-        
+
         self.last_render = Instant::now();
 
         // Calculate dimensions
@@ -445,13 +444,12 @@ impl App {
 
         // Draw the viewport (hot zone content + input)
         let chat_widget = self.chat.widget();
-        let context_tokens = self.agents.primary()
+        let context_tokens = self
+            .agents
+            .primary()
             .and_then(|m| m.try_lock().ok())
             .map_or(0, |a| a.total_usage().context_tokens);
-        let input_widget = self.input.widget(
-            &self.config.agents.foreground.model,
-            context_tokens,
-        );
+        let input_widget = self.input.widget(&self.config.agents.foreground.model, context_tokens);
         let alert = self.alert.clone();
 
         self.terminal.draw(|frame| {
@@ -466,11 +464,11 @@ impl App {
 
             frame.render_widget(chat_widget, chunks[0]);
             frame.render_widget(input_widget, chunks[1]);
-           
+
             // TODO build as an actual widget on self.alert
             if let Some(ref msg) = alert {
-                let alert_widget = Paragraph::new(msg.as_str())
-                    .style(Style::default().fg(Color::Red));
+                let alert_widget =
+                    Paragraph::new(msg.as_str()).style(Style::default().fg(Color::Red));
                 frame.render_widget(alert_widget, chunks[2]);
             }
         })?;
@@ -493,7 +491,7 @@ impl App {
     async fn handle_action(&mut self, action: Action) -> ActionResult {
         // Clear alert on any input action
         self.alert = None;
-        
+
         if !matches!(action, Action::InsertChar(_)) {
             tracing::debug!("Action received: {:?}", action);
         }
@@ -504,23 +502,23 @@ impl App {
             Action::Quit => {
                 self.should_quit = true;
                 return ActionResult::Interrupt;
-            }
+            },
             Action::ApproveTool => {
                 self.decide_pending_tool(ToolDecision::Approve).await;
-            }
+            },
             Action::DenyTool => {
                 self.decide_pending_tool(ToolDecision::Deny).await;
-            }
+            },
             Action::ApproveToolSession => {
                 // TODO: implement allow for session
                 self.decide_pending_tool(ToolDecision::Approve).await;
-            }
+            },
             Action::InsertChar(c) => self.input.insert_char(c),
             Action::InsertNewline => self.input.insert_newline(),
             Action::DeleteBack => self.input.delete_char(),
             Action::Paste(content) => {
                 self.input.add_attachment(Attachment::pasted(content));
-            }
+            },
             Action::CursorLeft => self.input.move_cursor_left(),
             Action::CursorRight => self.input.move_cursor_right(),
             Action::CursorHome => self.input.move_cursor_start(),
@@ -530,23 +528,23 @@ impl App {
                 if !content.trim().is_empty() {
                     self.queue_message(content);
                 }
-            }
+            },
             Action::ClearInput => self.input.clear(),
             Action::HistoryPrev => {
                 self.input.history_prev();
-            }
+            },
             Action::HistoryNext => {
                 self.input.history_next();
-            }
+            },
             Action::TabComplete => {
                 if let Some(completed) = Command::complete(&self.input.content()) {
                     self.input.set_content(&completed);
                 }
-            }
+            },
             Action::Resize(_w, _h) => {
                 // TODO trigger redraw with new dimensions
                 return ActionResult::NoOp;
-            }
+            },
         }
 
         ActionResult::Continue
@@ -558,25 +556,20 @@ impl App {
             Some(command) => {
                 // Slash command
                 let name = command.name().to_string();
-                let turn_id = self.chat.add_turn(
-                    Role::User, 
-                    TextBlock::pending(format!("/{}", name)));
+                let turn_id =
+                    self.chat.add_turn(Role::User, TextBlock::pending(format!("/{}", name)));
                 MessageRequest::Command(name, turn_id)
             },
             None => {
                 // Regular user message
-                let turn_id = self.chat.add_turn(
-                    Role::User, 
-                    TextBlock::pending(&content));
+                let turn_id = self.chat.add_turn(Role::User, TextBlock::pending(&content));
                 MessageRequest::User(content, turn_id)
             },
         };
         self.message_queue.push_back(message);
 
-        self.chat.render(&mut self.terminal)
-            .expect("Failed to render chat");
-        self.draw()
-            .expect("Failed to draw terminal after queuing message");
+        self.chat.render(&mut self.terminal).expect("Failed to render chat");
+        self.draw().expect("Failed to draw terminal after queuing message");
     }
 
     /// Queue a compaction request
@@ -602,7 +595,7 @@ impl App {
             Err(e) => {
                 tracing::warn!("Event stream error: {}", e);
                 return Ok(());
-            }
+            },
         };
 
         let Some(action) = map_event(self.input_mode, event) else {
@@ -610,9 +603,13 @@ impl App {
         };
 
         match self.handle_action(action).await {
-            ActionResult::Interrupt => { self.cancel().await?; }
-            ActionResult::Continue => { self.draw_throttled()?; }
-            ActionResult::NoOp => {}
+            ActionResult::Interrupt => {
+                self.cancel().await?;
+            },
+            ActionResult::Continue => {
+                self.draw_throttled()?;
+            },
+            ActionResult::NoOp => {},
         }
 
         Ok(())
@@ -628,15 +625,15 @@ impl App {
                         .and_then(|cwd| std::path::Path::new(&sel.path).strip_prefix(cwd).ok())
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or(sel.path);
-                    
+
                     Attachment::ide_selection(path, sel.content, sel.start_line, sel.end_line)
                 });
                 self.input.set_ide_selection(attachment);
                 let _ = self.draw_throttled();
-            }
+            },
         }
     }
-    
+
     /// Start processing a message request
     async fn handle_message(&mut self, request: MessageRequest) -> Result<()> {
         // Refresh OAuth token for primary agent if needed
@@ -657,7 +654,7 @@ impl App {
                             // Command executed, no output - still need to render
                             self.chat.render(&mut self.terminal)?;
                             self.draw()?;
-                        }
+                        },
                         Ok(Some(output)) => {
                             let idx = self.chat.transcript.add_empty(Role::Assistant);
                             if let Some(turn) = self.chat.transcript.get_mut(idx) {
@@ -665,14 +662,14 @@ impl App {
                             }
                             self.chat.render(&mut self.terminal)?;
                             self.draw()?;
-                        }
+                        },
                         Err(e) => {
                             tracing::error!("Command execution error: {}", e);
                             self.alert = Some(format!("Command error: {}", e));
-                        }
+                        },
                     }
                 }
-            }
+            },
             MessageRequest::User(content, turn_id) => {
                 self.chat.mark_last_block_complete(turn_id);
                 self.chat.render(&mut self.terminal)?;
@@ -683,14 +680,17 @@ impl App {
                 }
                 self.chat.begin_turn(Role::Assistant, &mut self.terminal)?;
                 self.input_mode = InputMode::Streaming;
-            }
+            },
             MessageRequest::Compaction => {
                 if let Some(agent_mutex) = self.agents.primary() {
-                    agent_mutex.lock().await.send_request(COMPACTION_PROMPT, RequestMode::Compaction);
+                    agent_mutex
+                        .lock()
+                        .await
+                        .send_request(COMPACTION_PROMPT, RequestMode::Compaction);
                 }
                 self.chat.begin_turn(Role::Assistant, &mut self.terminal)?;
                 self.input_mode = InputMode::Streaming;
-            }
+            },
         }
 
         Ok(())
@@ -701,30 +701,29 @@ impl App {
         match step {
             AgentStep::TextDelta(text) => {
                 self.chat.transcript.stream_delta(BlockType::Text, &text);
-            }
+            },
             AgentStep::CompactionDelta(text) => {
                 self.chat.transcript.stream_delta(BlockType::Compaction, &text);
-            }
+            },
             AgentStep::ThinkingDelta(text) => {
                 self.chat.transcript.stream_delta(BlockType::Thinking, &text);
-            }
+            },
             AgentStep::ToolRequest(tool_calls) => {
                 // Set agent_id on each tool call before enqueuing
-                let tool_calls: Vec<_> = tool_calls
-                    .into_iter()
-                    .map(|tc| tc.with_agent_id(agent_id))
-                    .collect();
+                let tool_calls: Vec<_> =
+                    tool_calls.into_iter().map(|tc| tc.with_agent_id(agent_id)).collect();
                 self.tool_executor.enqueue(tool_calls);
-            }
+            },
             AgentStep::Retrying { attempt, error } => {
-                self.alert = Some(format!("Request failed (attempt {}): {}. Retrying...", attempt, error));
+                self.alert =
+                    Some(format!("Request failed (attempt {}): {}. Retrying...", attempt, error));
                 tracing::warn!("Retrying request: attempt {}, error: {}", attempt, error);
-            }
+            },
             AgentStep::Finished { usage } => {
                 self.input_mode = InputMode::Normal;
 
                 // Handle compaction completion
-                // TODO something more robust than checking active block type 
+                // TODO something more robust than checking active block type
                 if self.chat.transcript.is_streaming_block_type(BlockType::Compaction) {
                     self.chat.transcript.finish_turn();
                     if let Err(e) = self.chat.transcript.save() {
@@ -732,13 +731,16 @@ impl App {
                     }
                     match self.chat.transcript.rotate() {
                         Ok(new_transcript) => {
-                            tracing::info!("Compaction complete, rotating to {:?}", new_transcript.path());
+                            tracing::info!(
+                                "Compaction complete, rotating to {:?}",
+                                new_transcript.path()
+                            );
                             self.chat.reset_transcript(new_transcript, &mut self.terminal)?;
                             self.draw()?;
-                        }
+                        },
                         Err(e) => {
                             tracing::error!("Failed to rotate transcript: {}", e);
-                        }
+                        },
                     }
                 } else {
                     // Normal completion
@@ -752,7 +754,7 @@ impl App {
                         self.queue_compaction();
                     }
                 }
-            }
+            },
             AgentStep::Error(msg) => {
                 self.chat.transcript.mark_active_block(Status::Error);
                 self.input_mode = InputMode::Normal;
@@ -766,7 +768,7 @@ impl App {
                     msg.clone()
                 };
                 self.alert = Some(alert_msg);
-            }
+            },
         }
 
         // Update display
@@ -778,85 +780,91 @@ impl App {
 
     /// Execute a tool decision (approve/deny) for the current tool
     async fn decide_pending_tool(&mut self, decision: ToolDecision) {
-        // Get current tool call_id
-        // TODO I'd prefer to reference the call_id explictly
-        let call_id = match self.tool_executor.front() {
-            Some(tc) => tc.call_id.clone(),
+        // Take the responder
+        let responder = match self.pending_approval.take() {
+            Some(r) => r,
             None => {
-                tracing::warn!("No current tool to execute decision for");
+                tracing::warn!("No tool awaiting approval");
                 return;
-            }
+            },
         };
 
         // Close IDE preview
-        // TODO: Would be nice to know if the tool actually had an IDE preview open
         if let Some(ide) = &self.ide {
             if let Err(e) = ide.close_preview().await {
                 tracing::warn!("Failed to close IDE preview: {}", e);
             }
         }
 
-        // Update block status to Running/Denied
+        // Update block status
         self.chat.transcript.mark_active_block(match decision {
             ToolDecision::Approve => Status::Running,
             ToolDecision::Deny => Status::Denied,
-            _ => unreachable!(),
+            _ => Status::Pending,
         });
         let _ = self.chat.render(&mut self.terminal);
         let _ = self.draw();
 
-        // Mark decision on the tool - next poll will execute it
-        self.tool_executor.decide(&call_id, decision);
+        // Send decision to executor
+        let _ = responder.send(decision);
     }
 
     /// Handle events from the tool executor
     async fn handle_tool_event(&mut self, event: ToolEvent) -> Result<()> {
         match event {
-            ToolEvent::AwaitingApproval(tool_call) => {
-                let is_primary = self.agents.primary_id() == Some(tool_call.agent_id);
+            ToolEvent::AwaitingApproval { agent_id, call_id, name, params, responder } => {
+                let is_primary = self.agents.primary_id() == Some(agent_id);
 
                 if is_primary {
                     // Display tool in transcript for primary agent
                     self.draw()?; // there's sometimes a missing token otherwise
-                    let tool = self.tool_executor.tools().get(&tool_call.name);
+                    let tool = self.tool_executor.tools().get(&name);
                     self.chat.start_block(
-                        tool.create_block(&tool_call.call_id, tool_call.params.clone()),
-                        &mut self.terminal)?;
-
-                    // Show preview in IDE if the tool provides one
-                    if let Some(preview) = tool.ide_preview(&tool_call.params) {
-                        if let Some(ide) = &self.ide {
-                            if let Err(e) = ide.show_preview(&preview).await {
-                                tracing::warn!("Failed to show IDE preview: {}", e);
-                            }
-                        }
-                    }
+                        tool.create_block(&call_id, params.clone()),
+                        &mut self.terminal,
+                    )?;
                     self.draw()?;
 
-                    match self.tool_filters.evaluate(&tool_call.name, &tool_call.params) {
+                    // Store responder for later decision
+                    self.pending_approval = Some(responder);
+
+                    match self.tool_filters.evaluate(&name, &params) {
                         Some(decision) => {
                             // Auto-approve/deny based on filters
                             self.decide_pending_tool(decision).await;
-                        }
+                        },
                         None => {
                             // Ask user for approval
                             self.input_mode = InputMode::ToolApproval;
-                        }
+                        },
                     }
                 } else {
+                    // TODO: Review auto-approve behavior for background agents
                     // Background agents: auto-approve tools without UI interaction
-                    tracing::debug!("Auto-approving tool {} for background agent {}",
-                        tool_call.name, tool_call.agent_id);
-                    self.tool_executor.decide(&tool_call.call_id, ToolDecision::Approve);
+                    tracing::debug!(
+                        "Auto-approving tool {} for background agent {}",
+                        name,
+                        agent_id
+                    );
+                    let _ = responder.send(ToolDecision::Approve);
                 }
-            }
+            },
 
-            ToolEvent::OutputDelta { agent_id, call_id, delta } => {
+            ToolEvent::Delegate { agent_id, effect, responder, .. } => {
+                let result = match self.apply_effect(agent_id, effect).await {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(e.to_string()),
+                };
+                // Send result back to executor (ignore if receiver dropped)
+                let _ = responder.send(result);
+            },
+
+            ToolEvent::Delta { agent_id, call_id, content } => {
                 // Only stream output to transcript for primary agent
                 let is_primary = self.agents.primary_id() == Some(agent_id);
                 if is_primary {
                     if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
-                        block.append_text(&delta);
+                        block.append_text(&content);
                         // Re-render to show the delta
                         self.chat.render(&mut self.terminal)?;
                         self.draw()?;
@@ -864,21 +872,18 @@ impl App {
                         tracing::warn!("No block found for call_id: {}", call_id);
                     }
                 }
-            }
+            },
 
-            ToolEvent::Completed { agent_id, call_id, content, is_error, effects } => {
+            ToolEvent::Completed { agent_id, call_id, content, is_error } => {
                 let is_primary = self.agents.primary_id() == Some(agent_id);
 
                 if is_primary {
                     // Update transcript status for primary agent
-                    self.chat.transcript.mark_active_block(
-                        if is_error { Status::Error } else { Status::Complete }
-                    );
-                }
-
-                // Process tool effects (for all agents)
-                for effect in effects {
-                    self.apply_effect(agent_id, effect).await?;
+                    self.chat.transcript.mark_active_block(if is_error {
+                        Status::Error
+                    } else {
+                        Status::Complete
+                    });
                 }
 
                 // Tell agent about the result - route to the correct agent by ID
@@ -895,13 +900,14 @@ impl App {
                     self.chat.render(&mut self.terminal)?;
                     self.draw()?;
                 }
-            }
+            },
         }
         Ok(())
     }
 
-    /// Apply a tool effect
+    /// Apply a tool effect. Returns Err to fail the pipeline.
     async fn apply_effect(&mut self, _agent_id: AgentId, effect: Effect) -> Result<()> {
+        tracing::debug!("Applying effect: {:?}", effect);
         match effect {
             Effect::SpawnAgent { task, context } => {
                 tracing::info!("SpawnAgent effect: task={}, context={:?}", task, context);
@@ -928,26 +934,45 @@ impl App {
 
                 let sub_agent_id = self.agents.register(sub_agent);
                 tracing::info!("Spawned sub-agent {} for task: {}", sub_agent_id, task);
-            }
+            },
             Effect::IdeReloadBuffer { path } => {
                 if let Some(ide) = &self.ide {
-                    if let Err(e) = ide.reload_buffer(&path.to_string_lossy()).await {
-                        tracing::warn!("Failed to reload buffer: {}", e);
-                    }
+                    ide.reload_buffer(&path.to_string_lossy()).await?;
                 }
-            }
+            },
             Effect::IdeOpen { path, line, column } => {
                 if let Some(ide) = &self.ide {
-                    if let Err(e) = ide.navigate_to(&path.to_string_lossy(), line, column).await {
-                        tracing::warn!("Failed to open file in IDE: {}", e);
-                    }
+                    ide.navigate_to(&path.to_string_lossy(), line, column).await?;
                 }
-            }
+            },
+            Effect::IdeShowPreview { preview } => {
+                if let Some(ide) = &self.ide {
+                    ide.show_preview(&preview).await?;
+                }
+            },
+            Effect::IdeShowDiffPreview { path, edits } => {
+                if let Some(ide) = &self.ide {
+                    ide.show_diff_preview(&path.to_string_lossy(), &edits).await?;
+                }
+            },
+            Effect::IdeClosePreview => {
+                if let Some(ide) = &self.ide {
+                    ide.close_preview().await?;
+                }
+            },
             Effect::Notify { message } => {
                 self.alert = Some(message);
-            }
-            // Other effects are handled during pipeline execution, not post-completion
-            _ => {}
+            },
+            Effect::IdeCheckUnsavedEdits { path } => {
+                if let Some(ide) = &self.ide {
+                    if ide.has_unsaved_changes(&path.to_string_lossy()).await? {
+                        anyhow::bail!(
+                            "File {} has unsaved changes in the IDE. Save or discard them first.",
+                            path.display()
+                        );
+                    }
+                }
+            },
         }
         Ok(())
     }
@@ -958,5 +983,3 @@ impl Drop for App {
         let _ = self.restore_terminal();
     }
 }
-
-

@@ -1,6 +1,6 @@
 //! Effect-based tool definitions
 //!
-//! Tools are defined as a chain of effects:
+//! Tools are defined as a chain of effect handlers:
 //! ```text
 //! edit_file = [
 //!     IdeOpen,           // Open file in IDE
@@ -12,226 +12,129 @@
 //! ]
 //! ```
 
-use crate::ide::ToolPreview;
+use crate::ide::{Edit, ToolPreview};
 use crate::transcript::Block;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 
-/// Effects that compose a tool's behavior
+/// Result of calling an effect handler
+pub enum Step {
+    /// Continue to next effect
+    Continue,
+    /// Set pipeline output
+    Output(String),
+    /// Emit streaming content
+    Delta(String),
+    /// Delegate effect to app layer
+    Delegate(Effect),
+    /// Pause and wait for user approval
+    AwaitApproval,
+    /// Pipeline failed
+    Error(String),
+}
+
+/// Trait for effect handlers - each effect knows how to execute itself
+#[async_trait::async_trait]
+pub trait EffectHandler: Send {
+    async fn call(self: Box<Self>) -> Step;
+}
+
+/// Effects that must be delegated to the app layer
 #[derive(Debug, Clone)]
 pub enum Effect {
-    // === Validation ===
-    ValidateParams { error: Option<String> },
-    ValidateFileExists { path: PathBuf },
-    ValidateFileReadable { path: PathBuf },
-    Validate { ok: bool, error: String },
-
     // === IDE ===
     IdeOpen { path: PathBuf, line: Option<u32>, column: Option<u32> },
     IdeShowPreview { preview: ToolPreview },
+    IdeShowDiffPreview { path: PathBuf, edits: Vec<Edit> },
     IdeReloadBuffer { path: PathBuf },
     IdeClosePreview,
-
-    // === Control Flow ===
-    AwaitApproval,
-    Output { content: String },
-    StreamDelta { content: String },
-    Error { message: String },
-
-    // === File System ===
-    ReadFile { path: PathBuf },
-    WriteFile { path: PathBuf, content: String },
-
-    // === Shell ===
-    Shell { command: String, working_dir: Option<String>, timeout_secs: u64 },
-
-    // === Network ===
-    FetchUrl { url: String, max_length: Option<usize> },
-    WebSearch { query: String, count: u32 },
+    /// Check if IDE buffer has unsaved changes - fails pipeline if dirty
+    IdeCheckUnsavedEdits { path: PathBuf },
 
     // === Agents ===
     SpawnAgent { task: String, context: Option<String> },
     Notify { message: String },
 }
 
-/// A tool defined as a chain of effects
-#[derive(Debug, Clone, Default)]
+/// A tool defined as a chain of effect handlers
 pub struct ToolPipeline {
-    pub effects: Vec<Effect>,
+    pub effects: VecDeque<Box<dyn EffectHandler>>,
 }
 
-impl ToolPipeline {
-    pub fn new() -> Self {
-        Self { effects: vec![] }
-    }
-
-    /// Create a pipeline that immediately errors
-    pub fn error(message: impl Into<String>) -> Self {
-        Self {
-            effects: vec![Effect::Error { message: message.into() }],
-        }
-    }
-
-    /// Add an effect to the chain
-    pub fn then(mut self, effect: Effect) -> Self {
-        self.effects.push(effect);
-        self
-    }
-
-    /// Add approval point (convenience method)
-    pub fn await_approval(self) -> Self {
-        self.then(Effect::AwaitApproval)
-    }
-
-    /// Check if pipeline requires approval
-    pub fn requires_approval(&self) -> bool {
-        self.effects.iter().any(|e| matches!(e, Effect::AwaitApproval))
-    }
-
-    /// Get effects before approval
-    pub fn pre_approval(&self) -> Vec<Effect> {
-        self.effects
-            .iter()
-            .take_while(|e| !matches!(e, Effect::AwaitApproval))
-            .cloned()
-            .collect()
-    }
-
-    /// Get effects after approval
-    pub fn post_approval(&self) -> Vec<Effect> {
-        self.effects
-            .iter()
-            .skip_while(|e| !matches!(e, Effect::AwaitApproval))
-            .skip(1) // skip the AwaitApproval itself
-            .cloned()
-            .collect()
+impl std::fmt::Debug for ToolPipeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolPipeline")
+            .field("effects_count", &self.effects.len())
+            .finish()
     }
 }
 
-/// Tool that composes effects
-pub trait ComposableTool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
-    fn schema(&self) -> serde_json::Value;
-    fn compose(&self, params: serde_json::Value) -> ToolPipeline;
-    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block>;
-
-    fn ide_preview(&self, params: &serde_json::Value) -> Option<ToolPreview> {
-        let pipeline = self.compose(params.clone());
-        pipeline.effects.iter().find_map(|e| {
-            if let Effect::IdeShowPreview { preview } = e {
-                Some(preview.clone())
-            } else {
-                None
-            }
-        })
-    }
-}
-
-/// Context for effect execution
-#[derive(Debug, Clone, Default)]
-pub struct EffectContext {
-    pub params: serde_json::Value,
-    pub data: std::collections::HashMap<String, String>,
-    pub output: String,
-}
-
-impl EffectContext {
-    pub fn new(params: serde_json::Value) -> Self {
-        Self {
-            params,
-            data: std::collections::HashMap::new(),
-            output: String::new(),
-        }
-    }
-
-    pub fn param_str(&self, key: &str) -> Option<&str> {
-        self.params.get(key).and_then(|v| v.as_str())
-    }
-
-    pub fn param_path(&self, key: &str) -> Option<PathBuf> {
-        self.param_str(key).map(PathBuf::from)
-    }
-
-    pub fn store(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.data.insert(key.into(), value.into());
-    }
-
-    pub fn get(&self, key: &str) -> Option<&str> {
-        self.data.get(key).map(|s| s.as_str())
-    }
-}
-
-// These are unused but kept for API compatibility
-#[derive(Debug, Clone)]
-pub enum EffectResult {
-    Continue,
-    Delta(String),
-    Done { content: String, is_error: bool },
-    Suspend(SuspendReason),
-    StoreContext { key: String, value: String },
-}
-
-#[derive(Debug, Clone)]
-pub enum SuspendReason {
-    AwaitingApproval,
-}
-
-// Keep PipelineBuilder for convenience but simplify it
-pub struct PipelineBuilder {
-    pipeline: ToolPipeline,
-}
-
-impl PipelineBuilder {
-    pub fn new() -> Self {
-        Self { pipeline: ToolPipeline::new() }
-    }
-
-    pub fn then(mut self, effect: Effect) -> Self {
-        self.pipeline = self.pipeline.then(effect);
-        self
-    }
-
-    pub fn await_approval(self) -> Self {
-        self.then(Effect::AwaitApproval)
-    }
-
-    pub fn build(self) -> ToolPipeline {
-        self.pipeline
-    }
-}
-
-impl Default for PipelineBuilder {
+impl Default for ToolPipeline {
     fn default() -> Self {
         Self::new()
     }
 }
 
+impl ToolPipeline {
+    pub fn new() -> Self {
+        Self {
+            effects: VecDeque::new(),
+        }
+    }
+
+    /// Create a pipeline that immediately errors
+    pub fn error(message: impl Into<String>) -> Self {
+        use crate::tools::handlers;
+        Self::new().then(handlers::Error { message: message.into() })
+    }
+
+    /// Add an effect handler to the chain
+    pub fn then(mut self, handler: impl EffectHandler + 'static) -> Self {
+        self.effects.push_back(Box::new(handler));
+        self
+    }
+
+    /// Add approval checkpoint
+    pub fn await_approval(self) -> Self {
+        use crate::tools::handlers;
+        self.then(handlers::AwaitApproval)
+    }
+
+    /// Pop the next effect handler
+    pub fn pop(&mut self) -> Option<Box<dyn EffectHandler>> {
+        self.effects.pop_front()
+    }
+}
+
+/// Tool that composes effect handlers
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn description(&self) -> &'static str;
+    fn schema(&self) -> serde_json::Value;
+    fn compose(&self, params: serde_json::Value) -> ToolPipeline;
+    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::handlers;
 
     #[test]
     fn test_pipeline_chain() {
         let pipeline = ToolPipeline::new()
-            .then(Effect::ValidateFileExists { path: "/tmp/test".into() })
-            .then(Effect::IdeOpen { path: "/tmp/test".into(), line: None, column: None })
+            .then(handlers::ValidateFile { path: "/tmp/test".into() })
             .await_approval()
-            .then(Effect::WriteFile { path: "/tmp/test".into(), content: "hello".into() })
-            .then(Effect::Output { content: "done".into() });
+            .then(handlers::Output { content: "done".into() });
 
-        assert_eq!(pipeline.effects.len(), 5);
-        assert!(pipeline.requires_approval());
-        assert_eq!(pipeline.pre_approval().len(), 2);
-        assert_eq!(pipeline.post_approval().len(), 2);
+        assert_eq!(pipeline.effects.len(), 3);
     }
 
     #[test]
-    fn test_no_approval() {
+    fn test_pipeline_single_handler() {
         let pipeline = ToolPipeline::new()
-            .then(Effect::Output { content: "hello".into() });
+            .then(handlers::Output { content: "hello".into() });
 
-        assert!(!pipeline.requires_approval());
-        assert_eq!(pipeline.pre_approval().len(), 1);
-        assert_eq!(pipeline.post_approval().len(), 0);
+        assert_eq!(pipeline.effects.len(), 1);
     }
 }

@@ -3,55 +3,26 @@
 //! Tools are defined as chains of effects that get interpreted by the executor.
 
 mod exec;
+pub mod handlers;
 mod impls;
+mod io;
 mod pipeline;
 
-pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
+pub use exec::{EffectResult, ToolCall, ToolDecision, ToolEvent, ToolExecutor};
 pub use impls::{
     EditFileTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, TaskTool,
     WebSearchTool, WriteFileTool,
 };
-pub use pipeline::{ComposableTool, Effect, ToolPipeline};
+pub use pipeline::{Tool, Effect, EffectHandler, Step, ToolPipeline};
 
-use crate::ide::ToolPreview;
-use crate::transcript::Block;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Result of a tool execution (used for compatibility)
-#[derive(Debug, Clone)]
-pub struct ToolResult {
-    pub content: String,
-    pub is_error: bool,
-    pub effects: Vec<Effect>,
-}
 
-impl ToolResult {
-    pub fn success(content: impl Into<String>) -> Self {
-        Self {
-            content: content.into(),
-            is_error: false,
-            effects: vec![],
-        }
-    }
-
-    pub fn error(message: impl Into<String>) -> Self {
-        Self {
-            content: message.into(),
-            is_error: true,
-            effects: vec![],
-        }
-    }
-
-    pub fn with_effect(mut self, effect: Effect) -> Self {
-        self.effects.push(effect);
-        self
-    }
-}
 
 /// Registry of available tools
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn ComposableTool>>,
+    tools: HashMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -92,25 +63,25 @@ impl ToolRegistry {
         }
     }
 
-    pub fn register(&mut self, tool: Arc<dyn ComposableTool>) {
+    pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.insert(tool.name().to_string(), tool);
     }
 
-    pub fn get(&self, name: &str) -> &dyn ComposableTool {
+    pub fn get(&self, name: &str) -> &dyn Tool {
         self.tools
             .get(name)
             .map(|t| t.as_ref())
             .expect("unknown tool")
     }
 
-    pub fn get_arc(&self, name: &str) -> Arc<dyn ComposableTool> {
+    pub fn get_arc(&self, name: &str) -> Arc<dyn Tool> {
         self.tools
             .get(name)
             .cloned()
             .expect("unknown tool")
     }
 
-    pub fn values(&self) -> impl Iterator<Item = &dyn ComposableTool> {
+    pub fn values(&self) -> impl Iterator<Item = &dyn Tool> {
         self.tools.values().map(|t| t.as_ref())
     }
 }

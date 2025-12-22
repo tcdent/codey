@@ -10,7 +10,7 @@
 //! 2. Auto-discovered from tmux session name: `/tmp/nvim-{session}.sock`
 //! 3. Set via `$NVIM_LISTEN_ADDRESS` environment variable
 
-use super::{Ide, IdeEvent, Selection, ToolPreview};
+use super::{Edit, Ide, IdeEvent, Selection, ToolPreview};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use nvim_rs::{compat::tokio::Compat, create::tokio as create, Handler, Neovim, Value};
@@ -348,6 +348,30 @@ impl Nvim {
         info!("Displayed file preview in nvim: {}", title);
         Ok(())
     }
+
+    /// Display diff hunks with context for edits
+    async fn show_diff_hunks(
+        &self,
+        path: &str,
+        edits: &[Edit],
+        language: Option<&str>,
+    ) -> Result<()> {
+        debug!("show_diff_hunks called for: {} ({} edits)", path, edits.len());
+
+        // Read the original file
+        let original = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read file: {}", path))?;
+
+        // Apply edits to get modified content
+        let mut modified = original.clone();
+        for edit in edits {
+            modified = modified.replacen(&edit.old_string, &edit.new_string, 1);
+        }
+
+        // TODO: Extract just the hunks with context instead of full file
+        // For now, show the full diff
+        self.show_diff(&original, &modified, path, language).await
+    }
 }
 
 // ============================================================================
@@ -365,15 +389,19 @@ impl Ide for Nvim {
             return Ok(());
         }
         match preview {
-            ToolPreview::Diff { path, original, modified } => {
-                let lang = detect_filetype(path);
-                self.show_diff(original, modified, path, lang).await
-            }
-            ToolPreview::FileContent { path, content } => {
+            ToolPreview::File { path, content } => {
                 let lang = detect_filetype(path);
                 self.show_file_preview(content, path, lang).await
             }
         }
+    }
+
+    async fn show_diff_preview(&self, path: &str, edits: &[Edit]) -> Result<()> {
+        if !self.show_diffs {
+            return Ok(());
+        }
+        let lang = detect_filetype(path);
+        self.show_diff_hunks(path, edits, lang).await
     }
 
     async fn close_preview(&self) -> Result<()> {
@@ -437,19 +465,37 @@ mod tests {
     #[ignore] // Requires running nvim instance
     async fn test_show_preview() {
         let nvim = Nvim::discover(&NvimConfig::default()).await.unwrap().expect("Need nvim");
-        let preview = ToolPreview::Diff {
+        let preview = ToolPreview::File {
             path: "test.rs".to_string(),
-            original: r#"fn main() {
-    println!("hello");
-}
-"#.to_string(),
-            modified: r#"fn main() {
+            content: r#"fn main() {
     println!("hello, world!");
-    println!("goodbye");
 }
 "#.to_string(),
         };
         nvim.show_preview(&preview).await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore] // Requires running nvim instance
+    async fn test_show_diff_preview() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        // Create a temp file with some content
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(file, r#"fn main() {{
+    println!("hello");
+}}"#).unwrap();
+        let path = file.path().to_str().unwrap();
+
+        let nvim = Nvim::discover(&NvimConfig::default()).await.unwrap().expect("Need nvim");
+        let edits = vec![
+            Edit {
+                old_string: r#"println!("hello")"#.to_string(),
+                new_string: r#"println!("hello, world!")"#.to_string(),
+            },
+        ];
+        nvim.show_diff_preview(path, &edits).await.unwrap();
     }
 
 }

@@ -3,27 +3,79 @@
 //! The edit_file tool as a chain of effects:
 //! ```text
 //! edit_file = [
-//!     IdeOpen,          // Open file in IDE
-//!     IdeShowPreview,   // Show the diff preview
-//!     AwaitApproval,    // Wait for user approval
-//!     WriteFile,        // Apply the edits
-//!     Output,           // Report success
-//!     IdeReloadBuffer,  // Reload the modified buffer
+//!     ValidateFile,           // Check file exists and is readable
+//!     ValidateNoUnsavedEdits, // Check IDE has no unsaved changes
+//!     ValidateFileWritable,   // Check file is writable
+//!     ValidateEdits,          // Check edits are valid before prompting user
+//!     IdeShowDiffPreview,     // Show hunks with context
+//!     AwaitApproval,
+//!     ApplyEdits,             // Apply the edits
+//!     Output,
+//!     IdeReloadBuffer,
+//!     IdeClosePreview,
 //! ]
 //! ```
 
-use super::{ComposableTool, Effect, ToolPipeline};
-use crate::ide::ToolPreview;
-use crate::impl_base_block;
-use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
+use std::path::PathBuf;
+
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::fs;
-use std::path::{Path, PathBuf};
+
+use super::{handlers, Tool, ToolPipeline};
+use crate::ide::Edit;
+use crate::impl_base_block;
+use crate::tools::pipeline::{EffectHandler, Step};
+
+// =============================================================================
+// Edit-specific validation handler
+// =============================================================================
+
+/// Validate edits can be applied (each old_string exists exactly once)
+pub struct ValidateEdits {
+    pub path: PathBuf,
+    pub edits: Vec<Edit>,
+}
+
+#[async_trait::async_trait]
+impl EffectHandler for ValidateEdits {
+    async fn call(self: Box<Self>) -> Step {
+        let content = match std::fs::read_to_string(&self.path) {
+            Ok(c) => c,
+            Err(e) => return Step::Error(format!("Failed to read file: {}", e)),
+        };
+
+        for (i, edit) in self.edits.iter().enumerate() {
+            let count = content.matches(&edit.old_string).count();
+            match count {
+                0 => {
+                    return Step::Error(format!(
+                        "Edit {}: old_string not found in file. \
+                         Make sure the string matches exactly, including whitespace and indentation.",
+                        i + 1
+                    ));
+                }
+                1 => {} // good
+                n => {
+                    return Step::Error(format!(
+                        "Edit {}: old_string found {} times (must be unique). \
+                         Include more surrounding context to make the match unique.",
+                        i + 1,
+                        n
+                    ));
+                }
+            }
+        }
+
+        Step::Continue
+    }
+}
+use crate::transcript::{
+    render_approval_prompt, render_result, Block, BlockType, Status, ToolBlock,
+};
 
 /// Edit file display block
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,7 +88,11 @@ pub struct EditFileBlock {
 }
 
 impl EditFileBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value) -> Self {
+    pub fn new(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Self {
         Self {
             call_id: call_id.into(),
             tool_name: tool_name.into(),
@@ -60,7 +116,8 @@ impl Block for EditFileBlock {
         let mut lines = Vec::new();
 
         let path = self.params["path"].as_str().unwrap_or("");
-        let edit_count = self.params.get("edits").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        let edit_count =
+            self.params.get("edits").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
 
         // Format: edit_file(path, N edits)
         lines.push(Line::from(vec![
@@ -68,7 +125,10 @@ impl Block for EditFileBlock {
             Span::styled("edit_file", Style::default().fg(Color::Magenta)),
             Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(path, Style::default().fg(Color::Yellow)),
-            Span::styled(format!(", {} edit{}", edit_count, if edit_count == 1 { "" } else { "s" }), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(", {} edit{}", edit_count, if edit_count == 1 { "" } else { "s" }),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(")", Style::default().fg(Color::DarkGray)),
         ]));
 
@@ -118,43 +178,7 @@ struct SearchReplace {
     new_string: String,
 }
 
-impl EditFileTool {
-    /// Validate the edits and compute the modified content
-    fn validate_and_compute(path: &Path, edits: &[SearchReplace]) -> Result<(String, String), String> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read file: {}", e))?;
-
-        let mut modified = content.clone();
-
-        for (i, edit) in edits.iter().enumerate() {
-            let count = modified.matches(&edit.old_string).count();
-            match count {
-                0 => {
-                    return Err(format!(
-                        "Edit {}: old_string not found in file. \
-                         Make sure the string matches exactly, including whitespace and indentation.",
-                        i + 1
-                    ));
-                }
-                1 => {
-                    modified = modified.replacen(&edit.old_string, &edit.new_string, 1);
-                }
-                n => {
-                    return Err(format!(
-                        "Edit {}: old_string found {} times (must be unique). \
-                         Include more surrounding context to make the match unique.",
-                        i + 1,
-                        n
-                    ));
-                }
-            }
-        }
-
-        Ok((content, modified))
-    }
-}
-
-impl ComposableTool for EditFileTool {
+impl Tool for EditFileTool {
     fn name(&self) -> &'static str {
         "edit_file"
     }
@@ -202,46 +226,33 @@ impl ComposableTool for EditFileTool {
             Ok(p) => p,
             Err(e) => {
                 return ToolPipeline::error(format!("Invalid params: {}", e));
-            }
+            },
         };
 
         let path = PathBuf::from(&params.path);
-
-        if !path.exists() {
-            return ToolPipeline::error(format!(
-                "File not found: {}. Use write_file to create new files.",
-                params.path
-            ));
-        }
-
-        if !path.is_file() {
-            return ToolPipeline::error(format!("Not a file: {}", params.path));
-        }
-
-        let (original, modified) = match Self::validate_and_compute(&path, &params.edits) {
-            Ok((orig, mod_)) => (orig, mod_),
-            Err(e) => return ToolPipeline::error(e),
-        };
-
-        let edit_count = params.edits.len();
         let abs_path = path.canonicalize().unwrap_or_else(|_| path.clone());
+        let edit_count = params.edits.len();
+
+        // Convert to Edit type for handlers
+        let edits: Vec<Edit> = params
+            .edits
+            .iter()
+            .map(|e| Edit { old_string: e.old_string.clone(), new_string: e.new_string.clone() })
+            .collect();
 
         ToolPipeline::new()
-            .then(Effect::IdeOpen { path: abs_path.clone(), line: None, column: None })
-            .then(Effect::IdeShowPreview {
-                preview: ToolPreview::Diff {
-                    path: params.path.clone(),
-                    original,
-                    modified: modified.clone(),
-                },
-            })
+            .then(handlers::ValidateFile { path: path.clone() })
+            .then(handlers::ValidateNoUnsavedEdits { path: path.clone() })
+            .then(handlers::ValidateFileWritable { path: path.clone() })
+            .then(ValidateEdits { path: path.clone(), edits: edits.clone() })
+            .then(handlers::IdeShowDiffPreview { path: abs_path.clone(), edits: edits.clone() })
             .await_approval()
-            .then(Effect::WriteFile { path: abs_path.clone(), content: modified })
-            .then(Effect::Output {
+            .then(handlers::ApplyEdits { path: abs_path.clone(), edits })
+            .then(handlers::Output {
                 content: format!("Successfully applied {} edit(s) to {}", edit_count, params.path),
             })
-            .then(Effect::IdeReloadBuffer { path: abs_path })
-            .then(Effect::IdeClosePreview)
+            .then(handlers::IdeReloadBuffer { path: abs_path })
+            .then(handlers::IdeClosePreview)
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
@@ -255,9 +266,12 @@ impl ComposableTool for EditFileTool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
+    use std::fs;
+
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::tools::{ToolCall, ToolDecision, ToolExecutor, ToolRegistry};
 
     #[tokio::test]
     async fn test_edit_file_single() {
@@ -343,7 +357,9 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
+        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) =
+            executor.next().await
+        {
             assert!(is_error);
             assert!(content.contains("not found"));
         } else {
@@ -372,7 +388,9 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
+        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) =
+            executor.next().await
+        {
             assert!(is_error);
             assert!(content.contains("3 times"));
         } else {
@@ -401,7 +419,9 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
+        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) =
+            executor.next().await
+        {
             assert!(is_error);
             assert!(content.contains("not found"));
         } else {

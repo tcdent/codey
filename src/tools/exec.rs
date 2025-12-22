@@ -2,15 +2,16 @@
 //!
 //! Executes tool pipelines with approval flow and streaming output.
 
-use crate::llm::AgentId;
-use crate::tools::pipeline::{Effect, ToolPipeline};
-use crate::tools::ToolRegistry;
 use std::collections::VecDeque;
-use std::fs;
-use std::path::Path;
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+
+use tokio::sync::oneshot;
+
+use crate::llm::AgentId;
+use crate::tools::pipeline::{Effect, Step, ToolPipeline};
+use crate::tools::ToolRegistry;
+
+/// Result of executing a delegated effect
+pub type EffectResult = Result<(), String>;
 
 /// A tool call pending execution
 #[derive(Debug, Clone)]
@@ -43,12 +44,27 @@ pub enum ToolDecision {
 #[derive(Debug)]
 pub enum ToolEvent {
     /// Tool needs user approval
-    AwaitingApproval(ToolCall),
-    /// Streaming output from execution
-    OutputDelta {
+    AwaitingApproval {
         agent_id: AgentId,
         call_id: String,
-        delta: String,
+        name: String,
+        params: serde_json::Value,
+        /// Send decision back to executor
+        responder: oneshot::Sender<ToolDecision>,
+    },
+    /// Effect delegated to app (IDE, agents, etc)
+    Delegate {
+        agent_id: AgentId,
+        call_id: String,
+        effect: Effect,
+        /// Send result back to executor to continue/error the pipeline
+        responder: oneshot::Sender<EffectResult>,
+    },
+    /// Streaming output from execution
+    Delta {
+        agent_id: AgentId,
+        call_id: String,
+        content: String,
     },
     /// Tool execution completed
     Completed {
@@ -56,21 +72,102 @@ pub enum ToolEvent {
         call_id: String,
         content: String,
         is_error: bool,
-        effects: Vec<Effect>,
     },
+}
+
+impl ToolEvent {
+    fn completed(active: ActivePipeline) -> Self {
+        Self::Completed {
+            agent_id: active.agent_id,
+            call_id: active.call_id,
+            content: active.output,
+            is_error: false,
+        }
+    }
+
+    fn error(active: ActivePipeline, content: impl Into<String>) -> Self {
+        Self::Completed {
+            agent_id: active.agent_id,
+            call_id: active.call_id,
+            content: content.into(),
+            is_error: true,
+        }
+    }
+
+    fn delta(active: &ActivePipeline, content: String) -> Self {
+        Self::Delta {
+            agent_id: active.agent_id,
+            call_id: active.call_id.clone(),
+            content,
+        }
+    }
+
+    fn delegate(
+        active: &ActivePipeline,
+        effect: Effect,
+    ) -> (Self, oneshot::Receiver<EffectResult>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            Self::Delegate {
+                agent_id: active.agent_id,
+                call_id: active.call_id.clone(),
+                effect,
+                responder: tx,
+            },
+            rx,
+        )
+    }
+
+    fn awaiting_approval(active: &ActivePipeline) -> (Self, oneshot::Receiver<ToolDecision>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            Self::AwaitingApproval {
+                agent_id: active.agent_id,
+                call_id: active.call_id.clone(),
+                name: active.name.clone(),
+                params: active.params.clone(),
+                responder: tx,
+            },
+            rx,
+        )
+    }
 }
 
 /// Active pipeline execution state
 struct ActivePipeline {
     agent_id: AgentId,
     call_id: String,
+    name: String,
+    params: serde_json::Value,
     pipeline: ToolPipeline,
-    index: usize,
     output: String,
-    post_effects: Vec<Effect>,
+    /// Waiting for effect result from app layer
+    pending_effect: Option<oneshot::Receiver<EffectResult>>,
+    /// Waiting for approval decision from app layer
+    pending_approval: Option<oneshot::Receiver<ToolDecision>>,
 }
 
-/// Executes tools with approval flow and streaming output
+impl ActivePipeline {
+    fn new(tool_call: ToolCall, pipeline: ToolPipeline) -> Self {
+        Self {
+            agent_id: tool_call.agent_id,
+            call_id: tool_call.call_id,
+            name: tool_call.name,
+            params: tool_call.params,
+            pipeline,
+            output: String::new(),
+            pending_effect: None,
+            pending_approval: None,
+        }
+    }
+}
+
+/// Executes tools with approval flow and streaming output.
+///
+/// TODO: Currently executes tools sequentially with a single active pipeline.
+/// This executor is shared between all agents, so parallel tool execution
+/// is not supported. Consider per-agent executors or a concurrent model
+/// if parallel execution is needed.
 pub struct ToolExecutor {
     tools: ToolRegistry,
     pending: VecDeque<ToolCall>,
@@ -94,470 +191,114 @@ impl ToolExecutor {
         self.pending.extend(tool_calls);
     }
 
-    pub fn front(&self) -> Option<&ToolCall> {
-        self.pending.front()
-    }
-
-    pub fn decide(&mut self, call_id: &str, decision: ToolDecision) {
-        if let Some(tool) = self.pending.iter_mut().find(|t| t.call_id == call_id) {
-            tool.decision = decision;
-        }
-    }
-
     pub async fn next(&mut self) -> Option<ToolEvent> {
+        // Check if active pipeline is waiting for effect or approval
+        if let Some(event) = self.check_pending_effect().await {
+            return Some(event);
+        }
+        if let Some(event) = self.check_pending_approval().await {
+            return Some(event);
+        }
+
+        // If no active pipeline, start next pending tool
+        if self.active.is_none() {
+            let tool_call = match self.pending.front() {
+                Some(t) if t.decision == ToolDecision::Pending => self.pending.pop_front().unwrap(),
+                _ => return None,
+            };
+
+            let tool = self.tools.get(&tool_call.name);
+            let pipeline = tool.compose(tool_call.params.clone());
+            self.active = Some(ActivePipeline::new(tool_call, pipeline));
+        }
+
+        // Execute pipeline steps until an event
         loop {
-            // Continue active pipeline
-            if self.active.is_some() {
-                let active = self.active.as_mut().unwrap();
-
-                if active.index >= active.pipeline.effects.len() {
-                    // Pipeline complete
-                    let active = self.active.take().unwrap();
-                    return Some(ToolEvent::Completed {
-                        agent_id: active.agent_id,
-                        call_id: active.call_id,
-                        content: active.output,
-                        is_error: false,
-                        effects: active.post_effects,
-                    });
-                }
-
-                let effect = active.pipeline.effects[active.index].clone();
-                active.index += 1;
-
-                // Drop the mutable borrow before calling interpret_effect
-                drop(active);
-
-                let interpretation = Self::interpret_effect(effect).await;
-
-                // Re-borrow to update state
-                let active = self.active.as_mut().unwrap();
-                match interpretation {
-                    Interpretation::Continue => continue,
-                    Interpretation::Output(content) => {
-                        active.output = content;
-                        continue;
-                    }
-                    Interpretation::Delta(delta) => {
-                        return Some(ToolEvent::OutputDelta {
-                            agent_id: active.agent_id,
-                            call_id: active.call_id.clone(),
-                            delta,
-                        });
-                    }
-                    Interpretation::PostEffect(effect) => {
-                        active.post_effects.push(effect);
-                        continue;
-                    }
-                    Interpretation::Error(msg) => {
-                        let active = self.active.take().unwrap();
-                        return Some(ToolEvent::Completed {
-                            agent_id: active.agent_id,
-                            call_id: active.call_id,
-                            content: msg,
-                            is_error: true,
-                            effects: vec![],
-                        });
-                    }
-                }
-            }
-
-            // Start next pending tool
-            let tool_call = self.pending.front_mut()?;
-            match tool_call.decision {
-                ToolDecision::Pending => {
-                    tool_call.decision = ToolDecision::Requested;
-                    return Some(ToolEvent::AwaitingApproval(tool_call.clone()));
-                }
-                ToolDecision::Requested => return None,
-                ToolDecision::Deny => {
-                    let tool_call = self.pending.pop_front().unwrap();
-                    return Some(ToolEvent::Completed {
-                        agent_id: tool_call.agent_id,
-                        call_id: tool_call.call_id,
-                        content: "Denied by user".to_string(),
-                        is_error: true,
-                        effects: vec![],
-                    });
-                }
-                ToolDecision::Approve => {
-                    let tool_call = self.pending.pop_front().unwrap();
-                    let tool = self.tools.get(&tool_call.name);
-                    let pipeline = tool.compose(tool_call.params.clone());
-
-                    self.active = Some(ActivePipeline {
-                        agent_id: tool_call.agent_id,
-                        call_id: tool_call.call_id,
-                        pipeline,
-                        index: 0,
-                        output: String::new(),
-                        post_effects: vec![],
-                    });
-                    continue;
-                }
+            if let Some(event) = self.execute_step().await {
+                return Some(event);
             }
         }
     }
 
-    async fn interpret_effect(effect: Effect) -> Interpretation {
-        match effect {
-            // === Validation ===
-            Effect::ValidateParams { error } => {
-                error.map_or(Interpretation::Continue, Interpretation::Error)
-            }
-            Effect::ValidateFileExists { ref path } => {
-                if path.exists() {
-                    Interpretation::Continue
-                } else {
-                    Interpretation::Error(format!("File not found: {}", path.display()))
-                }
-            }
-            Effect::ValidateFileReadable { ref path } => match fs::metadata(path) {
-                Ok(m) if m.is_file() => Interpretation::Continue,
-                Ok(_) => Interpretation::Error(format!("Not a file: {}", path.display())),
-                Err(e) => Interpretation::Error(format!("Cannot read {}: {}", path.display(), e)),
+    /// Await pending effect result, return error event if it failed
+    async fn check_pending_effect(&mut self) -> Option<ToolEvent> {
+        let active = self.active.as_mut()?;
+        let rx = active.pending_effect.take()?;
+
+        match rx.await {
+            Ok(Ok(())) => None,
+            Ok(Err(msg)) => {
+                let active = self.active.take().unwrap();
+                Some(ToolEvent::error(active, msg))
             },
-            Effect::Validate { ok, error } => {
-                if ok { Interpretation::Continue } else { Interpretation::Error(error) }
-            }
-
-            // === IDE effects - post effects for app to handle ===
-            Effect::IdeOpen { .. }
-            | Effect::IdeShowPreview { .. }
-            | Effect::IdeReloadBuffer { .. }
-            | Effect::IdeClosePreview => Interpretation::PostEffect(effect),
-
-            // === Control flow ===
-            Effect::AwaitApproval => Interpretation::Continue, // Already approved at this point
-            Effect::Output { content } => Interpretation::Output(content),
-            Effect::StreamDelta { content } => Interpretation::Delta(content),
-            Effect::Error { message } => Interpretation::Error(message),
-
-            // === File system ===
-            Effect::ReadFile { ref path } => {
-                match Self::read_file(path) {
-                    Ok(content) => Interpretation::Output(content),
-                    Err(e) => Interpretation::Error(e),
-                }
-            }
-            Effect::WriteFile { ref path, ref content } => {
-                // Create parent directories if needed
-                if let Some(parent) = path.parent() {
-                    if !parent.exists() {
-                        if let Err(e) = fs::create_dir_all(parent) {
-                            return Interpretation::Error(format!(
-                                "Failed to create directory {}: {}", parent.display(), e
-                            ));
-                        }
-                    }
-                }
-                match fs::write(path, content) {
-                    Ok(()) => Interpretation::Continue,
-                    Err(e) => Interpretation::Error(format!("Failed to write {}: {}", path.display(), e)),
-                }
-            }
-
-            // === Shell ===
-            Effect::Shell { command, working_dir, timeout_secs } => {
-                Self::execute_shell(&command, working_dir.as_deref(), timeout_secs).await
-            }
-
-            // === Network ===
-            Effect::FetchUrl { url, max_length } => {
-                Self::fetch_url(&url, max_length).await
-            }
-            Effect::WebSearch { query, count } => {
-                Self::web_search(&query, count).await
-            }
-
-            // === Agents - post effects for app to handle ===
-            Effect::SpawnAgent { .. } | Effect::Notify { .. } => {
-                Interpretation::PostEffect(effect)
-            }
-        }
-    }
-
-    fn read_file(path: &Path) -> Result<String, String> {
-        if !path.exists() {
-            return Err(format!("File not found: {}", path.display()));
-        }
-        if !path.is_file() {
-            return Err(format!("Not a file: {}", path.display()));
-        }
-
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read file: {}", e))?;
-
-        let lines: Vec<&str> = content.lines().collect();
-        let total_lines = lines.len();
-        let line_num_width = total_lines.to_string().len().max(4);
-
-        let mut output = String::new();
-        for (i, line) in lines.iter().enumerate() {
-            output.push_str(&format!("{:>width$}│{}\n", i + 1, line, width = line_num_width));
-        }
-
-        Ok(output)
-    }
-
-    async fn execute_shell(command: &str, working_dir: Option<&str>, timeout_secs: u64) -> Interpretation {
-        let mut cmd = Command::new("bash");
-        cmd.arg("-c").arg(command);
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-
-        if let Some(dir) = working_dir {
-            let path = Path::new(dir);
-            if !path.exists() {
-                return Interpretation::Error(format!("Working directory does not exist: {}", dir));
-            }
-            if !path.is_dir() {
-                return Interpretation::Error(format!("Not a directory: {}", dir));
-            }
-            cmd.current_dir(dir);
-        }
-
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => return Interpretation::Error(format!("Failed to spawn: {}", e)),
-        };
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        let mut collected = String::new();
-
-        if let Some(stdout) = stdout {
-            let mut reader = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                collected.push_str(&line);
-                collected.push('\n');
-            }
-        }
-
-        let mut stderr_output = String::new();
-        if let Some(stderr) = stderr {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                stderr_output.push_str(&line);
-                stderr_output.push('\n');
-            }
-        }
-
-        let status = match tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            child.wait(),
-        ).await {
-            Ok(Ok(status)) => status,
-            Ok(Err(e)) => return Interpretation::Error(format!("Wait failed: {}", e)),
             Err(_) => {
-                let _ = child.kill().await;
-                return Interpretation::Error(format!("Command timed out after {} seconds", timeout_secs));
-            }
-        };
-
-        let exit_code = status.code().unwrap_or(-1);
-        let mut result = collected;
-
-        if !stderr_output.is_empty() {
-            if !result.is_empty() {
-                result.push('\n');
-            }
-            result.push_str("[stderr]\n");
-            result.push_str(&stderr_output);
-        }
-
-        if result.is_empty() {
-            result = "(no output)".to_string();
-        }
-
-        if exit_code != 0 {
-            result.push_str(&format!("\n[exit code: {}]", exit_code));
-        }
-
-        // Truncate if too long
-        const MAX_OUTPUT: usize = 50000;
-        if result.len() > MAX_OUTPUT {
-            result = format!(
-                "{}\n\n[... output truncated ({} bytes total)]",
-                &result[..MAX_OUTPUT],
-                result.len()
-            );
-        }
-
-        if status.success() {
-            Interpretation::Output(result)
-        } else {
-            Interpretation::Error(result)
+                let active = self.active.take().unwrap();
+                Some(ToolEvent::error(active, "Effect channel dropped"))
+            },
         }
     }
 
-    async fn fetch_url(url: &str, max_length: Option<usize>) -> Interpretation {
-        let max_length = max_length.unwrap_or(50000);
+    /// Await pending approval decision, return error event if denied
+    async fn check_pending_approval(&mut self) -> Option<ToolEvent> {
+        let active = self.active.as_mut()?;
+        let rx = active.pending_approval.take()?;
 
-        let parsed_url = match url::Url::parse(url) {
-            Ok(u) => u,
-            Err(e) => return Interpretation::Error(format!("Invalid URL: {}", e)),
-        };
-
-        if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
-            return Interpretation::Error(format!(
-                "Unsupported URL scheme: {}. Only http and https are allowed.",
-                parsed_url.scheme()
-            ));
-        }
-
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap();
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            client.get(url).send(),
-        ).await;
-
-        match result {
-            Ok(Ok(response)) => {
-                let status = response.status();
-                let content_type = response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("unknown")
-                    .to_string();
-
-                if !status.is_success() {
-                    return Interpretation::Error(format!(
-                        "HTTP error: {} {}",
-                        status.as_u16(),
-                        status.canonical_reason().unwrap_or("Unknown")
-                    ));
-                }
-
-                match response.text().await {
-                    Ok(mut text) => {
-                        let original_len = text.len();
-                        if text.len() > max_length {
-                            text = text[..max_length].to_string();
-                            text.push_str(&format!(
-                                "\n\n[... truncated, {} of {} bytes shown]",
-                                max_length, original_len
-                            ));
-                        }
-
-                        let header = format!(
-                            "[URL: {}]\n[Content-Type: {}]\n[Size: {} bytes]\n\n",
-                            url, content_type, original_len
-                        );
-
-                        Interpretation::Output(header + &text)
-                    }
-                    Err(e) => Interpretation::Error(format!("Failed to read response body: {}", e)),
-                }
-            }
-            Ok(Err(e)) => Interpretation::Error(format!("Request failed: {}", e)),
-            Err(_) => Interpretation::Error("Request timed out after 30 seconds".to_string()),
+        match rx.await {
+            Ok(ToolDecision::Approve) => None,
+            Ok(ToolDecision::Deny) => {
+                let active = self.active.take().unwrap();
+                Some(ToolEvent::error(active, "Denied by user"))
+            },
+            Ok(_) => None, // Pending/Requested shouldn't happen, treat as continue
+            Err(_) => {
+                let active = self.active.take().unwrap();
+                Some(ToolEvent::error(active, "Approval channel dropped"))
+            },
         }
     }
 
-    async fn web_search(query: &str, count: u32) -> Interpretation {
-        let api_key = match std::env::var("BRAVE_API_KEY") {
-            Ok(key) => key,
-            Err(_) => return Interpretation::Error(
-                "BRAVE_API_KEY environment variable not set. \
-                 Get an API key from https://brave.com/search/api/".to_string()
-            ),
+    /// Execute next handler in active pipeline
+    async fn execute_step(&mut self) -> Option<ToolEvent> {
+        let active = self.active.as_mut().unwrap();
+
+        // Pop next handler
+        let handler = match active.pipeline.pop() {
+            Some(h) => h,
+            None => {
+                // Pipeline complete
+                let active = self.active.take().unwrap();
+                return Some(ToolEvent::completed(active));
+            },
         };
 
-        let count = count.min(20);
-        let url = format!(
-            "https://api.search.brave.com/res/v1/web/search?q={}&count={}",
-            urlencoding::encode(query),
-            count
-        );
+        // Execute handler
+        let step = handler.call().await;
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-            .build()
-            .unwrap();
-
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            client
-                .get(&url)
-                .header("Accept", "application/json")
-                .header("X-Subscription-Token", &api_key)
-                .send(),
-        ).await;
-
-        match result {
-            Ok(Ok(response)) => {
-                let status = response.status();
-                if !status.is_success() {
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Interpretation::Error(format!(
-                        "Brave Search API error: {} {} - {}",
-                        status.as_u16(),
-                        status.canonical_reason().unwrap_or("Unknown"),
-                        error_text
-                    ));
-                }
-
-                match response.json::<BraveSearchResponse>().await {
-                    Ok(search_response) => {
-                        let mut output = String::new();
-                        if let Some(web) = search_response.web {
-                            if web.results.is_empty() {
-                                output.push_str("No results found.");
-                            } else {
-                                for (i, result) in web.results.iter().enumerate() {
-                                    output.push_str(&format!(
-                                        "{}. [{}]({})\n", i + 1, result.title, result.url
-                                    ));
-                                }
-                            }
-                        } else {
-                            output.push_str("No web results found.");
-                        }
-                        Interpretation::Output(output)
-                    }
-                    Err(e) => Interpretation::Error(format!(
-                        "Failed to parse Brave Search response: {}", e
-                    )),
-                }
-            }
-            Ok(Err(e)) => Interpretation::Error(format!("Request failed: {}", e)),
-            Err(_) => Interpretation::Error("Request timed out after 30 seconds".to_string()),
+        // Re-borrow after await
+        let active = self.active.as_mut().unwrap();
+        match step {
+            Step::Continue => None,
+            Step::Output(content) => {
+                active.output = content;
+                None
+            },
+            Step::Delta(content) => {
+                Some(ToolEvent::delta(active, content)) //
+            },
+            Step::Delegate(effect) => {
+                let (event, rx) = ToolEvent::delegate(active, effect);
+                active.pending_effect = Some(rx);
+                Some(event)
+            },
+            Step::AwaitApproval => {
+                let (event, rx) = ToolEvent::awaiting_approval(active);
+                active.pending_approval = Some(rx);
+                Some(event)
+            },
+            Step::Error(msg) => {
+                let active = self.active.take().unwrap();
+                Some(ToolEvent::error(active, msg))
+            },
         }
     }
-}
-
-enum Interpretation {
-    Continue,
-    Output(String),
-    Delta(String),
-    PostEffect(Effect),
-    Error(String),
-}
-
-// Brave Search API response structures
-#[derive(Debug, serde::Deserialize)]
-struct BraveSearchResponse {
-    #[serde(default)]
-    web: Option<WebResults>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct WebResults {
-    #[serde(default)]
-    results: Vec<WebResult>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct WebResult {
-    title: String,
-    url: String,
 }

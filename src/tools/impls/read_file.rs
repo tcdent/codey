@@ -1,6 +1,6 @@
 //! Read file tool
 
-use super::{ComposableTool, Effect, ToolPipeline};
+use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use ratatui::{
@@ -109,7 +109,7 @@ struct ReadFileParams {
     end_line: Option<i32>,
 }
 
-impl ComposableTool for ReadFileTool {
+impl Tool for ReadFileTool {
     fn name(&self) -> &'static str {
         "read_file"
     }
@@ -150,10 +150,9 @@ impl ComposableTool for ReadFileTool {
         let path = PathBuf::from(&parsed.path);
 
         ToolPipeline::new()
-            .then(Effect::ValidateFileExists { path: path.clone() })
-            .then(Effect::ValidateFileReadable { path: path.clone() })
+            .then(handlers::ValidateFile { path: path.clone() })
             .await_approval()
-            .then(Effect::ReadFile { path })
+            .then(handlers::ReadFile { path })
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
