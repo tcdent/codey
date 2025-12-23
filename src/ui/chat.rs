@@ -82,7 +82,7 @@ impl ChatView {
         &mut self,
         role: Role,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> anyhow::Result<()> {
+    ) {
         self.transcript.begin_turn(role);
         self.render(terminal)
     }
@@ -91,7 +91,7 @@ impl ChatView {
     pub fn finish_turn(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> anyhow::Result<()> {
+    ) {
         self.transcript.finish_turn();
         self.render(terminal)
     }
@@ -101,7 +101,7 @@ impl ChatView {
         &mut self,
         block: Box<dyn Block>,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> anyhow::Result<()> {
+    ) {
         self.transcript.start_block(block);
         self.render(terminal)
     }
@@ -117,7 +117,7 @@ impl ChatView {
         &mut self,
         transcript: Transcript,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> anyhow::Result<()> {
+    ) {
         self.transcript = transcript;
         self.lines.clear();
         self.committed_count = 0;
@@ -131,7 +131,7 @@ impl ChatView {
     pub fn render(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> anyhow::Result<()> {
+    ) {
         // Render non-frozen turns to lines
         let mut active_lines: Vec<Line<'static>> = Vec::new();
         for turn in self.transcript.turns() {
@@ -158,9 +158,11 @@ impl ChatView {
             while self.lines.len() > self.max_lines {
                 let committed = self.lines.pop_front().unwrap();
 
-                terminal.insert_before(1, |buf| {
+                if let Err(e) = terminal.insert_before(1, |buf| {
                     Paragraph::new(committed).render(buf.area, buf);
-                })?;
+                }) {
+                    tracing::warn!("Failed to commit line to scrollback: {}", e);
+                }
                 self.committed_count += 1;
             }
         }
@@ -186,8 +188,6 @@ impl ChatView {
                 break;
             }
         }
-
-        Ok(())
     }
 
     /// Render a turn to lines (header + content + separator)

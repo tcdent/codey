@@ -388,8 +388,8 @@ impl App {
         self.agents.register(agent);
 
         // Initial render - populate hot zone from transcript
-        self.chat.render(&mut self.terminal)?;
-        self.draw()?;
+        self.chat.render(&mut self.terminal);
+        self.draw();
 
         // CANCEL-SAFETY: When one branch of tokio::select! completes, all other
         // futures are dropped (not paused). Any async fn polled here must store
@@ -430,14 +430,20 @@ impl App {
     }
 
     /// Draw the UI
-    fn draw(&mut self) -> Result<()> {
+    fn draw(&mut self) {
         use ratatui::style::{Color, Style};
         use ratatui::widgets::Paragraph;
 
         self.last_render = Instant::now();
 
         // Calculate dimensions
-        let size = self.terminal.size()?;
+        let size = match self.terminal.size() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Failed to get terminal size: {}", e);
+                return;
+            }
+        };
         let input_height = self.input.required_height(size.width);
         let max_input_height = size.height / 2;
         let input_height = input_height.min(max_input_height).max(5);
@@ -452,7 +458,7 @@ impl App {
         let input_widget = self.input.widget(&self.config.agents.foreground.model, context_tokens);
         let alert = self.alert.clone();
 
-        self.terminal.draw(|frame| {
+        if let Err(e) = self.terminal.draw(|frame| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -471,20 +477,20 @@ impl App {
                     Paragraph::new(msg.as_str()).style(Style::default().fg(Color::Red));
                 frame.render_widget(alert_widget, chunks[2]);
             }
-        })?;
-
-        Ok(())
+        }) {
+            tracing::warn!("Failed to draw: {}", e);
+        }
     }
 
     /// Draw with frame rate limiting - skips if called too frequently
     /// Returns true if a draw actually occurred
-    fn draw_throttled(&mut self) -> Result<bool> {
+    fn draw_throttled(&mut self) -> bool {
         if self.last_render.elapsed() < MIN_FRAME_TIME {
-            return Ok(false);
+            return false;
         }
 
-        self.draw()?;
-        Ok(true)
+        self.draw();
+        true
     }
 
     /// Handle an action. Returns the result indicating what the main loop should do.
@@ -568,8 +574,8 @@ impl App {
         };
         self.message_queue.push_back(message);
 
-        self.chat.render(&mut self.terminal).expect("Failed to render chat");
-        self.draw().expect("Failed to draw terminal after queuing message");
+        self.chat.render(&mut self.terminal);
+        self.draw();
     }
 
     /// Queue a compaction request
@@ -583,7 +589,7 @@ impl App {
         if let Some(agent_mutex) = self.agents.primary() {
             agent_mutex.lock().await.cancel();
         }
-        self.chat.finish_turn(&mut self.terminal)?;
+        self.chat.finish_turn(&mut self.terminal);
         self.input_mode = InputMode::Normal;
         Ok(())
     }
@@ -607,7 +613,7 @@ impl App {
                 self.cancel().await?;
             },
             ActionResult::Continue => {
-                self.draw_throttled()?;
+                self.draw_throttled();
             },
             ActionResult::NoOp => {},
         }
@@ -652,16 +658,16 @@ impl App {
                     match command.execute(self) {
                         Ok(None) => {
                             // Command executed, no output - still need to render
-                            self.chat.render(&mut self.terminal)?;
-                            self.draw()?;
+                            self.chat.render(&mut self.terminal);
+                            self.draw();
                         },
                         Ok(Some(output)) => {
                             let idx = self.chat.transcript.add_empty(Role::Assistant);
                             if let Some(turn) = self.chat.transcript.get_mut(idx) {
                                 turn.start_block(Box::new(TextBlock::complete(&output)));
                             }
-                            self.chat.render(&mut self.terminal)?;
-                            self.draw()?;
+                            self.chat.render(&mut self.terminal);
+                            self.draw();
                         },
                         Err(e) => {
                             tracing::error!("Command execution error: {}", e);
@@ -672,13 +678,13 @@ impl App {
             },
             MessageRequest::User(content, turn_id) => {
                 self.chat.mark_last_block_complete(turn_id);
-                self.chat.render(&mut self.terminal)?;
-                self.draw()?;
+                self.chat.render(&mut self.terminal);
+                self.draw();
 
                 if let Some(agent_mutex) = self.agents.primary() {
                     agent_mutex.lock().await.send_request(&content, RequestMode::Normal);
                 }
-                self.chat.begin_turn(Role::Assistant, &mut self.terminal)?;
+                self.chat.begin_turn(Role::Assistant, &mut self.terminal);
                 self.input_mode = InputMode::Streaming;
             },
             MessageRequest::Compaction => {
@@ -688,7 +694,7 @@ impl App {
                         .await
                         .send_request(COMPACTION_PROMPT, RequestMode::Compaction);
                 }
-                self.chat.begin_turn(Role::Assistant, &mut self.terminal)?;
+                self.chat.begin_turn(Role::Assistant, &mut self.terminal);
                 self.input_mode = InputMode::Streaming;
             },
         }
@@ -735,8 +741,8 @@ impl App {
                                 "Compaction complete, rotating to {:?}",
                                 new_transcript.path()
                             );
-                            self.chat.reset_transcript(new_transcript, &mut self.terminal)?;
-                            self.draw()?;
+                            self.chat.reset_transcript(new_transcript, &mut self.terminal);
+                            self.draw();
                         },
                         Err(e) => {
                             tracing::error!("Failed to rotate transcript: {}", e);
@@ -772,8 +778,8 @@ impl App {
         }
 
         // Update display
-        self.chat.render(&mut self.terminal)?;
-        self.draw_throttled()?;
+        self.chat.render(&mut self.terminal);
+        self.draw_throttled();
 
         Ok(())
     }
@@ -802,11 +808,11 @@ impl App {
             ToolDecision::Deny => Status::Denied,
             _ => Status::Pending,
         });
-        let _ = self.chat.render(&mut self.terminal);
-        let _ = self.draw();
+        self.chat.render(&mut self.terminal);
+        self.draw();
 
         // Send decision to executor
-        let _ = responder.send(decision);
+        responder.send(decision).ok();
     }
 
     /// Handle events from the tool executor
@@ -817,13 +823,13 @@ impl App {
 
                 if is_primary {
                     // Display tool in transcript for primary agent
-                    self.draw()?; // there's sometimes a missing token otherwise
+                    self.draw(); // there's sometimes a missing token otherwise
                     let tool = self.tool_executor.tools().get(&name);
                     self.chat.start_block(
                         tool.create_block(&call_id, params.clone()),
                         &mut self.terminal,
-                    )?;
-                    self.draw()?;
+                    );
+                    self.draw();
 
                     // Store responder for later decision
                     self.pending_approval = Some(responder);
@@ -866,8 +872,8 @@ impl App {
                     if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
                         block.append_text(&content);
                         // Re-render to show the delta
-                        self.chat.render(&mut self.terminal)?;
-                        self.draw()?;
+                        self.chat.render(&mut self.terminal);
+                        self.draw();
                     } else {
                         tracing::warn!("No block found for call_id: {}", call_id);
                     }
@@ -897,8 +903,8 @@ impl App {
                     self.input_mode = InputMode::Streaming;
 
                     // Render update
-                    self.chat.render(&mut self.terminal)?;
-                    self.draw()?;
+                    self.chat.render(&mut self.terminal);
+                    self.draw();
                 }
             },
         }
