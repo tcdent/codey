@@ -10,16 +10,18 @@
 //! 2. Auto-discovered from tmux session name: `/tmp/nvim-{session}.sock`
 //! 3. Set via `$NVIM_LISTEN_ADDRESS` environment variable
 
-use super::{Edit, Ide, IdeEvent, Selection, ToolPreview};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use nvim_rs::{compat::tokio::Compat, create::tokio as create, Handler, Neovim, Value};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tokio::io::WriteHalf;
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
+
+use super::{Edit, Ide, IdeEvent, Selection, ToolPreview};
 
 /// Type alias for the writer half of the nvim connection
 type NvimWriter = Compat<WriteHalf<UnixStream>>;
@@ -87,22 +89,17 @@ impl NvimHandler {
 impl Handler for NvimHandler {
     type Writer = NvimWriter;
 
-    async fn handle_notify(
-        &self,
-        name: String,
-        args: Vec<Value>,
-        _neovim: Neovim<Self::Writer>,
-    ) {
+    async fn handle_notify(&self, name: String, args: Vec<Value>, _neovim: Neovim<Self::Writer>) {
         match name.as_str() {
             "codey_selection" => {
                 let event = parse_selection_event(&args);
                 if let Err(e) = self.event_tx.send(event).await {
                     warn!("Failed to send IDE event: {}", e);
                 }
-            }
+            },
             other => {
                 debug!("Ignoring nvim notification: {}", other);
-            }
+            },
         }
     }
 }
@@ -115,7 +112,7 @@ fn parse_selection_event(args: &[Value]) -> IdeEvent {
             return None;
         }
         let map = v.as_map()?;
-        
+
         let get_str = |key: &str| -> Option<String> {
             map.iter()
                 .find(|(k, _)| k.as_str() == Some(key))
@@ -222,8 +219,13 @@ impl Nvim {
                     if !session_name.is_empty() {
                         let socket_path = PathBuf::from(format!("/tmp/nvim-{}.sock", session_name));
                         if socket_path.exists() {
-                            info!("Discovered nvim socket from tmux session: {:?}", socket_path);
-                            return Ok(Some(Self::connect(socket_path, show_diffs, auto_reload).await?));
+                            info!(
+                                "Discovered nvim socket from tmux session: {:?}",
+                                socket_path
+                            );
+                            return Ok(Some(
+                                Self::connect(socket_path, show_diffs, auto_reload).await?,
+                            ));
                         }
                     }
                 }
@@ -234,7 +236,10 @@ impl Nvim {
         if let Ok(addr) = std::env::var("NVIM_LISTEN_ADDRESS") {
             let path = PathBuf::from(&addr);
             if path.exists() {
-                info!("Discovered nvim socket from NVIM_LISTEN_ADDRESS: {:?}", path);
+                info!(
+                    "Discovered nvim socket from NVIM_LISTEN_ADDRESS: {:?}",
+                    path
+                );
                 return Ok(Some(Self::connect(path, show_diffs, auto_reload).await?));
             }
         }
@@ -251,26 +256,28 @@ impl Nvim {
     /// Set up autocommands to track visual mode selection changes
     async fn setup_selection_tracking(&self) -> Result<()> {
         // First, store our channel ID in a global variable
-        let channel_info = self.exec_lua("return vim.api.nvim_get_chan_info(0)", vec![]).await?;
-        
+        let channel_info = self
+            .exec_lua("return vim.api.nvim_get_chan_info(0)", vec![])
+            .await?;
+
         let channel_id = channel_info
             .as_map()
             .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("id")))
             .and_then(|(_, v)| v.as_i64())
             .unwrap_or(0);
-        
+
         debug!("Neovim assigned channel ID: {}", channel_id);
-        
+
         // Set the channel ID then load the selection tracking script
         let setup_lua = format!(
             "vim.g.codey_channel_id = {}\n{}",
             channel_id,
             include_str!("lua/selection_tracking.lua")
         );
-        
+
         self.exec_lua(&setup_lua, vec![]).await?;
         info!("Set up neovim selection tracking");
-        
+
         Ok(())
     }
 
@@ -290,13 +297,14 @@ impl Nvim {
         client
             .exec_lua(code, args)
             .await
-            .context("Failed to execute lua code")
+            .context("nvim: failed to execute lua")
     }
 
     /// Reload a buffer by file path (if it's open in nvim) - internal helper
     async fn reload_buffer_internal(&self, file_path: &str) -> Result<()> {
         let args = vec![Value::from(file_path)];
-        self.exec_lua(include_str!("lua/reload_buffer.lua"), args).await?;
+        self.exec_lua(include_str!("lua/reload_buffer.lua"), args)
+            .await?;
         Ok(())
     }
 
@@ -319,14 +327,16 @@ impl Nvim {
             Value::from(language.unwrap_or("")),
         ];
 
-        self.exec_lua(include_str!("lua/show_diff.lua"), args).await?;
+        self.exec_lua(include_str!("lua/show_diff.lua"), args)
+            .await?;
         info!("Displayed side-by-side diff in nvim: {}", title);
         Ok(())
     }
 
     /// Close any open Codey preview buffers - internal helper
     async fn close_diff_buffers(&self) -> Result<()> {
-        self.exec_lua(include_str!("lua/close_preview.lua"), vec![]).await?;
+        self.exec_lua(include_str!("lua/close_preview.lua"), vec![])
+            .await?;
         Ok(())
     }
 
@@ -344,7 +354,8 @@ impl Nvim {
             Value::from(language.unwrap_or("")),
         ];
 
-        self.exec_lua(include_str!("lua/show_file_preview.lua"), args).await?;
+        self.exec_lua(include_str!("lua/show_file_preview.lua"), args)
+            .await?;
         info!("Displayed file preview in nvim: {}", title);
         Ok(())
     }
@@ -356,7 +367,11 @@ impl Nvim {
         edits: &[Edit],
         language: Option<&str>,
     ) -> Result<()> {
-        debug!("show_diff_hunks called for: {} ({} edits)", path, edits.len());
+        debug!(
+            "show_diff_hunks called for: {} ({} edits)",
+            path,
+            edits.len()
+        );
 
         // Read the original file
         let original = std::fs::read_to_string(path)
@@ -391,8 +406,10 @@ impl Ide for Nvim {
         match preview {
             ToolPreview::File { path, content } => {
                 let lang = detect_filetype(path);
-                self.show_file_preview(content, path, lang).await
-            }
+                self.show_file_preview(content, path, lang)
+                    .await
+                    .context("nvim: failed to show preview")
+            },
         }
     }
 
@@ -401,38 +418,44 @@ impl Ide for Nvim {
             return Ok(());
         }
         let lang = detect_filetype(path);
-        self.show_diff_hunks(path, edits, lang).await
+        self.show_diff_hunks(path, edits, lang)
+            .await
+            .with_context(|| format!("nvim: failed to show diff preview for {}", path))
     }
 
     async fn close_preview(&self) -> Result<()> {
-        self.close_diff_buffers().await
+        self.close_diff_buffers()
+            .await
+            .context("nvim: failed to close preview")
     }
 
     async fn reload_buffer(&self, path: &str) -> Result<()> {
         if !self.auto_reload {
             return Ok(());
         }
-        self.reload_buffer_internal(path).await
+        self.reload_buffer_internal(path)
+            .await
+            .with_context(|| format!("nvim: failed to reload buffer {}", path))
     }
 
-    async fn navigate_to(
-        &self,
-        path: &str,
-        line: Option<u32>,
-        column: Option<u32>,
-    ) -> Result<()> {
+    async fn navigate_to(&self, path: &str, line: Option<u32>, column: Option<u32>) -> Result<()> {
         let args = vec![
             Value::from(path),
             Value::from(line.unwrap_or(1) as i64),
             Value::from(column.unwrap_or(1) as i64),
         ];
-        self.exec_lua(include_str!("lua/navigate_to.lua"), args).await?;
+        self.exec_lua(include_str!("lua/navigate_to.lua"), args)
+            .await
+            .with_context(|| format!("nvim: failed to navigate to {}", path))?;
         Ok(())
     }
 
     async fn has_unsaved_changes(&self, path: &str) -> Result<bool> {
         let args = vec![Value::from(path)];
-        let result = self.exec_lua(include_str!("lua/has_unsaved_changes.lua"), args).await?;
+        let result = self
+            .exec_lua(include_str!("lua/has_unsaved_changes.lua"), args)
+            .await
+            .with_context(|| format!("nvim: failed to check unsaved changes for {}", path))?;
         Ok(result.as_bool().unwrap_or(false))
     }
 
@@ -464,13 +487,17 @@ mod tests {
     #[tokio::test]
     #[ignore] // Requires running nvim instance
     async fn test_show_preview() {
-        let nvim = Nvim::discover(&NvimConfig::default()).await.unwrap().expect("Need nvim");
+        let nvim = Nvim::discover(&NvimConfig::default())
+            .await
+            .unwrap()
+            .expect("Need nvim");
         let preview = ToolPreview::File {
             path: "test.rs".to_string(),
             content: r#"fn main() {
     println!("hello, world!");
 }
-"#.to_string(),
+"#
+            .to_string(),
         };
         nvim.show_preview(&preview).await.unwrap();
     }
@@ -479,23 +506,28 @@ mod tests {
     #[ignore] // Requires running nvim instance
     async fn test_show_diff_preview() {
         use std::io::Write;
+
         use tempfile::NamedTempFile;
 
         // Create a temp file with some content
         let mut file = NamedTempFile::new().unwrap();
-        writeln!(file, r#"fn main() {{
+        writeln!(
+            file,
+            r#"fn main() {{
     println!("hello");
-}}"#).unwrap();
+}}"#
+        )
+        .unwrap();
         let path = file.path().to_str().unwrap();
 
-        let nvim = Nvim::discover(&NvimConfig::default()).await.unwrap().expect("Need nvim");
-        let edits = vec![
-            Edit {
-                old_string: r#"println!("hello")"#.to_string(),
-                new_string: r#"println!("hello, world!")"#.to_string(),
-            },
-        ];
+        let nvim = Nvim::discover(&NvimConfig::default())
+            .await
+            .unwrap()
+            .expect("Need nvim");
+        let edits = vec![Edit {
+            old_string: r#"println!("hello")"#.to_string(),
+            new_string: r#"println!("hello, world!")"#.to_string(),
+        }];
         nvim.show_diff_preview(path, &edits).await.unwrap();
     }
-
 }

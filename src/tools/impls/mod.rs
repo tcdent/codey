@@ -8,7 +8,7 @@ mod web_search;
 mod write_file;
 
 pub use super::handlers;
-pub use super::pipeline::{Tool, Effect, ToolPipeline};
+pub use super::pipeline::{Tool, ToolPipeline};
 
 pub use edit_file::EditFileTool;
 pub use fetch_url::FetchUrlTool;

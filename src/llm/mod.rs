@@ -3,5 +3,5 @@
 mod agent;
 mod registry;
 
-pub use agent::{Agent, AgentStep, RequestMode, Usage};
+pub use agent::{Agent, AgentStep, RequestMode};
 pub use registry::{AgentId, AgentRegistry};

@@ -8,12 +8,12 @@ mod impls;
 mod io;
 mod pipeline;
 
-pub use exec::{EffectResult, ToolCall, ToolDecision, ToolEvent, ToolExecutor};
+pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
 pub use impls::{
     EditFileTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, TaskTool,
     WebSearchTool, WriteFileTool,
 };
-pub use pipeline::{Tool, Effect, EffectHandler, Step, ToolPipeline};
+pub use pipeline::{Tool, Effect};
 
 use std::collections::HashMap;
 use std::sync::Arc;
