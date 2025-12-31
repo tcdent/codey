@@ -143,12 +143,17 @@ pub async fn execute_shell(
         output.push_str(&format!("\n[exit code: {}]", exit_code));
     }
 
-    // Truncate if too long
+    // Truncate if too long (UTF-8 safe)
     const MAX_OUTPUT: usize = 50000;
     if output.len() > MAX_OUTPUT {
+        // Find a valid UTF-8 boundary at or before MAX_OUTPUT
+        let mut end = MAX_OUTPUT;
+        while end > 0 && !output.is_char_boundary(end) {
+            end -= 1;
+        }
         output = format!(
             "{}\n\n[... output truncated ({} bytes total)]",
-            &output[..MAX_OUTPUT],
+            &output[..end],
             output.len()
         );
     }
@@ -208,10 +213,15 @@ pub async fn fetch_url(url: &str, max_length: Option<usize>) -> Result<FetchResu
                 Ok(mut text) => {
                     let original_len = text.len();
                     if text.len() > max_length {
-                        text = text[..max_length].to_string();
+                        // Find a valid UTF-8 boundary at or before max_length
+                        let mut end = max_length;
+                        while end > 0 && !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        text = text[..end].to_string();
                         text.push_str(&format!(
                             "\n\n[... truncated, {} of {} bytes shown]",
-                            max_length, original_len
+                            end, original_len
                         ));
                     }
 

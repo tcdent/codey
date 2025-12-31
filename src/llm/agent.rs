@@ -4,8 +4,9 @@ use tracing::{debug, error, info};
 use anyhow::Result;
 use futures::StreamExt;
 use genai::chat::{
-    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent, ChatStreamResponse,
-    ContentPart, MessageContent, ReasoningEffort, Thinking, Tool, ToolCall as GenaiToolCall, ToolResponse,
+    CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent,
+    ChatStreamResponse, ContentPart, MessageContent, ReasoningEffort, Thinking, Tool,
+    ToolCall as GenaiToolCall, ToolResponse,
 };
 use genai::{Client, Headers};
 
@@ -14,14 +15,14 @@ use crate::config::AgentRuntimeConfig;
 use crate::transcript::{BlockType, Role, Transcript};
 use crate::tools::{ToolCall, ToolDecision, ToolRegistry};
 
-
 const ANTHROPIC_BETA_HEADER: &str = concat!(
     "oauth-2025-04-20,",
     "claude-code-20250219,",
     "interleaved-thinking-2025-05-14,",
     "fine-grained-tool-streaming-2025-05-14",
 );
-const ANTHROPIC_USER_AGENT: &str = "ai-sdk/anthropic/2.0.50 ai-sdk/provider-utils/3.0.18 runtime/bun/1.3.4";
+const ANTHROPIC_USER_AGENT: &str =
+    "ai-sdk/anthropic/2.0.50 ai-sdk/provider-utils/3.0.18 runtime/bun/1.3.4";
 
 // Only expose internal ToolCall
 // Note: agent_id is set to 0 here - the caller (App) should set the correct ID
@@ -57,17 +58,16 @@ impl Usage {
     pub fn format_log(&self) -> String {
         // context_tokens = total input (uncached + cache_creation + cache_read)
         let mut details = format!("Context: {} tokens", self.context_tokens);
-        
+
         if self.cache_read_tokens > 0 || self.cache_creation_tokens > 0 {
             details.push_str(&format!(
                 " (cached: {}, new: {})",
-                self.cache_read_tokens,
-                self.cache_creation_tokens
+                self.cache_read_tokens, self.cache_creation_tokens
             ));
         }
-        
+
         details.push_str(&format!(", output: {}", self.output_tokens));
-        
+
         details
     }
 }
@@ -93,10 +93,7 @@ pub enum AgentStep {
     /// Agent wants to execute tools, needs approval
     ToolRequest(Vec<ToolCall>),
     /// Retrying after error
-    Retrying {
-        attempt: u32,
-        error: String,
-    },
+    Retrying { attempt: u32, error: String },
     /// Agent finished processing this message
     Finished { usage: Usage },
     /// Error occurred
@@ -157,13 +154,14 @@ pub struct Agent {
     total_usage: Usage,
     /// OAuth credentials for Claude Max (if available)
     oauth: Option<OAuthCredentials>,
-    
+
     // Streaming state (Some when actively processing)
     state: Option<StreamState>,
     /// Active response stream (stored separately from state for cancel-safety)
-    active_stream: Option<futures::stream::BoxStream<'static, Result<ChatStreamEvent, genai::Error>>>,
+    active_stream:
+        Option<futures::stream::BoxStream<'static, Result<ChatStreamEvent, genai::Error>>>,
     mode: RequestMode,
-    
+
     // Accumulated during streaming, consumed when tools complete
     streaming_text: String,
     streaming_tool_calls: Vec<GenaiToolCall>,
@@ -214,10 +212,11 @@ impl Agent {
     /// Preserves the existing system prompt (first message if it's a system message)
     pub fn restore_from_transcript(&mut self, transcript: &Transcript) {
         self.messages.clear();
-        
+
         // Restore system prompt first
-        self.messages.push(ChatMessage::system(self.system_prompt.clone()));
-        
+        self.messages
+            .push(ChatMessage::system(self.system_prompt.clone()));
+
         for turn in transcript.turns() {
             match turn.role {
                 // Skip system turns - we use our predefined system prompt
@@ -230,19 +229,19 @@ impl Agent {
                                 if let Some(text) = block.text() {
                                     self.messages.push(ChatMessage::user(text));
                                 }
-                            }
-                            BlockType::Thinking  => {}
-                            BlockType::Tool => {}
-                            BlockType::Compaction => {}
+                            },
+                            BlockType::Thinking => {},
+                            BlockType::Tool => {},
+                            BlockType::Compaction => {},
                         }
                     }
-                }
+                },
                 Role::Assistant => {
                     let mut content = MessageContent::default();
                     let mut text_parts = Vec::new();
                     let mut tool_calls = Vec::new();
                     let mut tool_responses = Vec::new();
-                    
+
                     // Process blocks by kind
                     for block in &turn.content {
                         match block.kind() {
@@ -250,28 +249,31 @@ impl Agent {
                                 if let Some(text) = block.text() {
                                     text_parts.push(text);
                                 }
-                            }
+                            },
                             BlockType::Tool => {
                                 // Add tool call
-                                if let (Some(call_id), Some(tool_name), Some(params)) = 
-                                    (block.call_id(), block.tool_name(), block.params()) 
+                                if let (Some(call_id), Some(tool_name), Some(params)) =
+                                    (block.call_id(), block.tool_name(), block.params())
                                 {
                                     tool_calls.push(GenaiToolCall {
                                         call_id: call_id.to_string(),
                                         fn_name: tool_name.to_string(),
                                         fn_arguments: params.clone(),
                                     });
-                                    
+
                                     // Also collect tool response
                                     if let Some(text) = block.text() {
-                                        tool_responses.push(ToolResponse::new(call_id.to_string(), text.to_string()));
+                                        tool_responses.push(ToolResponse::new(
+                                            call_id.to_string(),
+                                            text.to_string(),
+                                        ));
                                     }
                                 }
-                            }
-                            BlockType::Thinking => {}
+                            },
+                            BlockType::Thinking => {},
                         }
                     }
-                    
+
                     // Build assistant message
                     if !text_parts.is_empty() {
                         content = content.append(ContentPart::Text(text_parts.join("\n")));
@@ -279,23 +281,23 @@ impl Agent {
                     for tc in tool_calls {
                         content = content.append(ContentPart::ToolCall(tc));
                     }
-                    
+
                     if !content.is_empty() {
                         self.messages.push(ChatMessage {
                             role: ChatRole::Assistant,
                             content,
                             options: None,
                         });
-                        
+
                         // Add tool responses
                         for response in tool_responses {
                             self.messages.push(ChatMessage::from(response));
                         }
                     }
-                }
+                },
             }
         }
-        
+
         info!("Restored {} messages from transcript", self.messages.len());
     }
 
@@ -318,7 +320,7 @@ impl Agent {
         self.mode = mode;
         self.state = Some(StreamState::NeedsChatRequest);
     }
-    
+
     /// Cancel the current streaming operation
     pub fn cancel(&mut self) {
         debug!("Agent::cancel");
@@ -365,9 +367,12 @@ impl Agent {
         self.messages.push(ChatMessage::user(summary));
         self.total_usage = Usage::default();
 
-        info!("Agent reset with compaction summary ({} chars)", summary.len());
+        info!(
+            "Agent reset with compaction summary ({} chars)",
+            summary.len()
+        );
     }
-    
+
     /// Convert genai Usage to our Usage struct (for a single turn, not cumulative)
     fn extract_turn_usage(genai_usage: &genai::chat::Usage) -> Usage {
         let input_tokens = genai_usage.prompt_tokens.unwrap_or(0) as u32;
@@ -402,9 +407,12 @@ impl Agent {
         let mut messages = self.messages.clone();
         if let Some(last_msg) = messages.last_mut() {
             last_msg.options = Some(CacheControl::Ephemeral.into());
-            debug!("Added cache_control to last message (role: {})", last_msg.role);
+            debug!(
+                "Added cache_control to last message (role: {})",
+                last_msg.role
+            );
         }
-        
+
         let mut request = ChatRequest::new(messages);
         let mode_opts = self.mode.options(&self.config);
         if mode_opts.tools_enabled {
@@ -414,8 +422,14 @@ impl Agent {
         // Build headers based on OAuth availability
         let headers = if let Some(ref oauth) = self.oauth {
             Headers::from([
-                ("authorization".to_string(), format!("Bearer {}", oauth.access_token)),
-                ("anthropic-beta".to_string(), ANTHROPIC_BETA_HEADER.to_string()),
+                (
+                    "authorization".to_string(),
+                    format!("Bearer {}", oauth.access_token),
+                ),
+                (
+                    "anthropic-beta".to_string(),
+                    ANTHROPIC_BETA_HEADER.to_string(),
+                ),
                 ("user-agent".to_string(), ANTHROPIC_USER_AGENT.to_string()),
             ])
         } else {
@@ -445,7 +459,7 @@ impl Agent {
                 Ok(resp) => {
                     info!("Chat request successful");
                     return Ok(resp);
-                }
+                },
                 Err(e) => {
                     let err = format!("{:#}", e);
                     error!("Chat request failed: {}", err);
@@ -456,15 +470,18 @@ impl Agent {
                         )));
                     }
                     // Return retry step, caller should call next() again
-                    return Err(AgentStep::Retrying { attempt, error: err });
-                }
+                    return Err(AgentStep::Retrying {
+                        attempt,
+                        error: err,
+                    });
+                },
             }
         }
     }
 
     /// Get the next step from the agent
     /// Returns None when streaming is complete or awaiting tool decisions
-    /// 
+    ///
     /// This method is cancel-safe: if the future is dropped mid-poll,
     /// the agent remains in a valid state and can be polled again.
     pub async fn next(&mut self) -> Option<AgentStep> {
@@ -478,7 +495,7 @@ impl Agent {
                     self.streaming_tool_calls.clear();
                     self.streaming_thinking.clear();
                     self.tool_responses.clear();
-                    
+
                     match self.exec_chat_with_retry().await {
                         Ok(response) => {
                             debug!("Agent state: NeedsChatRequest -> Streaming");
@@ -486,41 +503,43 @@ impl Agent {
                             self.active_stream = Some(Box::pin(response.stream));
                             self.state = Some(StreamState::Streaming);
                             // Continue to process streaming state
-                        }
+                        },
                         Err(step) => {
                             // Retrying or Error - state stays NeedsChatRequest for retry
                             if !matches!(step, AgentStep::Retrying { .. }) {
                                 self.state = None;
                             }
                             return Some(step);
-                        }
+                        },
                     }
-                }
+                },
 
                 StreamState::Streaming => {
                     // Get the stream (must exist if we're in Streaming state)
                     let stream = self.active_stream.as_mut()?;
-                    
+
                     match stream.next().await {
                         Some(Ok(event)) => match event {
                             ChatStreamEvent::Start => {
                                 // Continue polling
-                            }
+                            },
                             ChatStreamEvent::Chunk(chunk) => {
                                 self.streaming_text.push_str(&chunk.content);
                                 // State remains Streaming, stream remains in active_stream
                                 return Some(match self.mode {
-                                    RequestMode::Compaction => AgentStep::CompactionDelta(chunk.content),
+                                    RequestMode::Compaction => {
+                                        AgentStep::CompactionDelta(chunk.content)
+                                    },
                                     RequestMode::Normal => AgentStep::TextDelta(chunk.content),
                                 });
-                            }
+                            },
                             ChatStreamEvent::ToolCallChunk(_) => {
                                 // Continue polling
-                            }
+                            },
                             ChatStreamEvent::ReasoningChunk(chunk) => {
                                 // State remains Streaming
                                 return Some(AgentStep::ThinkingDelta(chunk.content));
-                            }
+                            },
                             ChatStreamEvent::End(mut end) => {
                                 if let Some(ref genai_usage) = end.captured_usage {
                                     let turn_usage = Self::extract_turn_usage(genai_usage);
@@ -536,80 +555,82 @@ impl Agent {
                                     self.streaming_tool_calls = captured;
                                 }
                                 // Continue to process stream end
-                            }
+                            },
                         },
                         Some(Err(e)) => {
-                            let err_msg = format!("Stream error: {:#}", e);
                             error!("Stream error: {:?}", e);
                             self.state = None;
                             self.active_stream = None;
-                            return Some(AgentStep::Error(err_msg));
-                        }
+                            return Some(AgentStep::Error(format!("Stream error: {:?}", e)));
+                        },
                         None => {
                             // Stream ended, clean up stream
                             self.active_stream = None;
-                            
-                            debug!(
-                                "Agent: stream ended, thinking={} text_len={} tool_calls={}",
-                                self.streaming_thinking.len(),
-                                self.streaming_text.len(),
-                                self.streaming_tool_calls.len()
-                            );
 
                             if self.streaming_tool_calls.is_empty() {
                                 match self.mode {
-                                    RequestMode::Compaction => self.reset_with_summary(&self.streaming_text.clone()),
+                                    RequestMode::Compaction => {
+                                        self.reset_with_summary(&self.streaming_text.clone())
+                                    },
                                     RequestMode::Normal => {
                                         // Build message with thinking blocks + text (same pattern as tool use)
                                         // Only push if there's actual content
-                                        let has_content = !self.streaming_thinking.is_empty() || !self.streaming_text.is_empty();
+                                        let has_content = !self.streaming_thinking.is_empty()
+                                            || !self.streaming_text.is_empty();
                                         if has_content {
                                             let mut msg_content = MessageContent::default();
-                                            
+
                                             // Add thinking blocks first
                                             for thinking in &self.streaming_thinking {
-                                                msg_content = msg_content.append(ContentPart::Thinking(thinking.clone()));
+                                                msg_content = msg_content.append(
+                                                    ContentPart::Thinking(thinking.clone()),
+                                                );
                                             }
-                                            
+
                                             // Add text if non-empty
                                             if !self.streaming_text.is_empty() {
-                                                msg_content = msg_content.append(ContentPart::Text(self.streaming_text.clone()));
+                                                msg_content = msg_content.append(
+                                                    ContentPart::Text(self.streaming_text.clone()),
+                                                );
                                             }
-                                            
+
                                             self.messages.push(ChatMessage {
                                                 role: ChatRole::Assistant,
                                                 content: msg_content,
                                                 options: None,
                                             });
                                         } else {
-                                            debug!("Agent: no content to push (no thinking, no text)");
+                                            debug!(
+                                                "Agent: no content to push (no thinking, no text)"
+                                            );
                                         }
-                                    }
+                                    },
                                 }
-                                debug!("Agent state: Streaming -> None (Finished), messages={}", self.messages.len());
+                                debug!(
+                                    "Agent state: Streaming -> None (Finished), messages={}",
+                                    self.messages.len()
+                                );
                                 self.state = None;
-                                return Some(AgentStep::Finished { usage: self.total_usage });
+                                return Some(AgentStep::Finished {
+                                    usage: self.total_usage,
+                                });
                             }
 
-                            // Emit all tool requests at once, enter waiting state
-                            debug!(
-                                "Agent: emitting {} tool requests, state -> AwaitingToolDecision",
-                                self.streaming_tool_calls.len()
-                            );
-                            let tool_calls: Vec<ToolCall> = self.streaming_tool_calls
+                            let tool_calls: Vec<ToolCall> = self
+                                .streaming_tool_calls
                                 .iter()
                                 .map(ToolCall::from)
                                 .collect();
                             self.state = Some(StreamState::AwaitingToolDecision);
                             return Some(AgentStep::ToolRequest(tool_calls));
-                        }
+                        },
                     }
-                }
+                },
 
                 StreamState::AwaitingToolDecision => {
                     // Blocked waiting for tool results
                     return None;
-                }
+                },
             }
         }
     }
@@ -617,6 +638,8 @@ impl Agent {
     /// Submit a tool execution result
     /// Called by App after ToolExecutor runs the tool
     pub fn submit_tool_result(&mut self, call_id: &str, content: String) {
+        debug!("Agent: submit_tool_result call_id={}", call_id);
+
         let state_name = match &self.state {
             Some(StreamState::NeedsChatRequest) => "NeedsChatRequest",
             Some(StreamState::Streaming { .. }) => "Streaming",
@@ -624,11 +647,15 @@ impl Agent {
             None => "None",
         };
         if !matches!(self.state, Some(StreamState::AwaitingToolDecision)) {
-            tracing::warn!("submit_tool_result called in unexpected state: {}", state_name);
+            tracing::warn!(
+                "submit_tool_result called in unexpected state: {}",
+                state_name
+            );
         }
-        
+
         // Store the response
-        self.tool_responses.push(ToolResponse::new(call_id.to_string(), content));
+        self.tool_responses
+            .push(ToolResponse::new(call_id.to_string(), content));
 
         // Check if all tools have been decided
         // Guard: streaming_tool_calls must be non-empty (otherwise we shouldn't be receiving results)
@@ -636,26 +663,39 @@ impl Agent {
             tracing::warn!("submit_tool_result called but no tool calls pending");
             return;
         }
+
+        debug!(
+            "Agent: tool_responses={}/{}",
+            self.tool_responses.len(),
+            self.streaming_tool_calls.len()
+        );
+
         if self.tool_responses.len() >= self.streaming_tool_calls.len() {
+            debug!(
+                "Agent: all tools complete, building message. thinking_blocks={}, text_len={}, tool_calls={}",
+                self.streaming_thinking.len(),
+                self.streaming_text.len(),
+                self.streaming_tool_calls.len()
+            );
             // All tools processed - build the assistant message
             // Per Anthropic docs: thinking blocks must come first, then text/tool_use
             let mut msg_content = MessageContent::default();
-            
+
             // Add thinking blocks first
             for thinking in &self.streaming_thinking {
                 msg_content = msg_content.append(ContentPart::Thinking(thinking.clone()));
             }
-            
+
             // Add text if non-empty
             if !self.streaming_text.is_empty() {
                 msg_content = msg_content.append(ContentPart::Text(self.streaming_text.clone()));
             }
-            
+
             // Add tool calls
             for tc in &self.streaming_tool_calls {
                 msg_content = msg_content.append(ContentPart::ToolCall(tc.clone()));
             }
-            
+
             // Add assistant message
             self.messages.push(ChatMessage {
                 role: ChatRole::Assistant,
@@ -665,11 +705,17 @@ impl Agent {
 
             // Add tool responses
             for response in std::mem::take(&mut self.tool_responses) {
+                debug!("Agent: adding tool response - call_id={}", response.call_id);
                 self.messages.push(ChatMessage::from(response));
             }
-            
+
+            debug!(
+                "Agent: continuation will have {} messages total",
+                self.messages.len()
+            );
+
+            debug!("Agent: state -> NeedsChatRequest (ready for continuation)");
             self.state = Some(StreamState::NeedsChatRequest);
         }
     }
 }
-

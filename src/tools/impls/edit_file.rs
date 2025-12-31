@@ -29,6 +29,9 @@ use super::{handlers, Tool, ToolPipeline};
 use crate::ide::Edit;
 use crate::impl_base_block;
 use crate::tools::pipeline::{EffectHandler, Step};
+use crate::transcript::{
+    render_approval_prompt, render_result, Block, BlockType, Status, ToolBlock,
+};
 
 // =============================================================================
 // Edit-specific validation handler
@@ -57,8 +60,8 @@ impl EffectHandler for ValidateEdits {
                          Make sure the string matches exactly, including whitespace and indentation.",
                         i + 1
                     ));
-                }
-                1 => {} // good
+                },
+                1 => {}, // good
                 n => {
                     return Step::Error(format!(
                         "Edit {}: old_string found {} times (must be unique). \
@@ -66,16 +69,13 @@ impl EffectHandler for ValidateEdits {
                         i + 1,
                         n
                     ));
-                }
+                },
             }
         }
 
         Step::Continue
     }
 }
-use crate::transcript::{
-    render_approval_prompt, render_result, Block, BlockType, Status, ToolBlock,
-};
 
 /// Edit file display block
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,8 +116,12 @@ impl Block for EditFileBlock {
         let mut lines = Vec::new();
 
         let path = self.params["path"].as_str().unwrap_or("");
-        let edit_count =
-            self.params.get("edits").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        let edit_count = self
+            .params
+            .get("edits")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
 
         // Format: edit_file(path, N edits)
         lines.push(Line::from(vec![
@@ -126,7 +130,11 @@ impl Block for EditFileBlock {
             Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(path, Style::default().fg(Color::Yellow)),
             Span::styled(
-                format!(", {} edit{}", edit_count, if edit_count == 1 { "" } else { "s" }),
+                format!(
+                    ", {} edit{}",
+                    edit_count,
+                    if edit_count == 1 { "" } else { "s" }
+                ),
                 Style::default().fg(Color::DarkGray),
             ),
             Span::styled(")", Style::default().fg(Color::DarkGray)),
@@ -237,19 +245,34 @@ impl Tool for EditFileTool {
         let edits: Vec<Edit> = params
             .edits
             .iter()
-            .map(|e| Edit { old_string: e.old_string.clone(), new_string: e.new_string.clone() })
+            .map(|e| Edit {
+                old_string: e.old_string.clone(),
+                new_string: e.new_string.clone(),
+            })
             .collect();
 
         ToolPipeline::new()
             .then(handlers::ValidateFile { path: path.clone() })
             .then(handlers::ValidateNoUnsavedEdits { path: path.clone() })
             .then(handlers::ValidateFileWritable { path: path.clone() })
-            .then(ValidateEdits { path: path.clone(), edits: edits.clone() })
-            .then(handlers::IdeShowDiffPreview { path: abs_path.clone(), edits: edits.clone() })
+            .then(ValidateEdits {
+                path: path.clone(),
+                edits: edits.clone(),
+            })
+            .then(handlers::IdeShowDiffPreview {
+                path: abs_path.clone(),
+                edits: edits.clone(),
+            })
             .await_approval()
-            .then(handlers::ApplyEdits { path: abs_path.clone(), edits })
+            .then(handlers::ApplyEdits {
+                path: abs_path.clone(),
+                edits,
+            })
             .then(handlers::Output {
-                content: format!("Successfully applied {} edit(s) to {}", edit_count, params.path),
+                content: format!(
+                    "Successfully applied {} edit(s) to {}",
+                    edit_count, params.path
+                ),
             })
             .then(handlers::IdeReloadBuffer { path: abs_path })
             .then(handlers::IdeClosePreview)
@@ -357,8 +380,9 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) =
-            executor.next().await
+        if let Some(crate::tools::ToolEvent::Completed {
+            content, is_error, ..
+        }) = executor.next().await
         {
             assert!(is_error);
             assert!(content.contains("not found"));
@@ -388,8 +412,9 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) =
-            executor.next().await
+        if let Some(crate::tools::ToolEvent::Completed {
+            content, is_error, ..
+        }) = executor.next().await
         {
             assert!(is_error);
             assert!(content.contains("3 times"));
@@ -419,8 +444,9 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) =
-            executor.next().await
+        if let Some(crate::tools::ToolEvent::Completed {
+            content, is_error, ..
+        }) = executor.next().await
         {
             assert!(is_error);
             assert!(content.contains("not found"));

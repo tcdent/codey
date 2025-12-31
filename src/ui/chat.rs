@@ -149,6 +149,11 @@ impl ChatView {
             .skip(self.committed_count)
             .collect();
 
+        tracing::trace!(
+            "render(): hot_lines={}, committed_count={}, max_lines={}",
+            hot_lines.len(), self.committed_count, self.max_lines
+        );
+
         self.lines.clear();
 
         for line in hot_lines {
@@ -157,6 +162,11 @@ impl ChatView {
             // Overflow promotes to scrollback
             while self.lines.len() > self.max_lines {
                 let committed = self.lines.pop_front().unwrap();
+                let line_preview: String = committed.spans.iter().map(|s| s.content.as_ref()).collect();
+                tracing::trace!(
+                    "Scrollback commit: line={:?}, committed_count={}, lines.len={}, max={}",
+                    line_preview, self.committed_count, self.lines.len(), self.max_lines
+                );
 
                 if let Err(e) = terminal.insert_before(1, |buf| {
                     Paragraph::new(committed).render(buf.area, buf);

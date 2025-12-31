@@ -14,6 +14,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     Terminal, TerminalOptions, Viewport,
 };
+use tokio::sync::oneshot;
 
 use crate::commands::Command;
 use crate::config::{AgentRuntimeConfig, Config, ToolAccess};
@@ -23,7 +24,6 @@ use crate::tool_filter::ToolFilters;
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
 use crate::ide::{Ide, IdeEvent, Nvim};
 use crate::ui::{Attachment, ChatView, InputBox};
-use tokio::sync::oneshot;
 
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
 
@@ -292,7 +292,9 @@ impl App {
             crossterm::event::PopKeyboardEnhancementFlags
         )
         .context("Failed to restore terminal")?;
-        self.terminal.show_cursor().context("Failed to show cursor")?;
+        self.terminal
+            .show_cursor()
+            .context("Failed to show cursor")?;
 
         Ok(())
     }
@@ -314,7 +316,9 @@ impl App {
         // Use inline viewport for native scrollback support
         let terminal = Terminal::with_options(
             backend,
-            TerminalOptions { viewport: Viewport::Inline(viewport_height) },
+            TerminalOptions {
+                viewport: Viewport::Inline(viewport_height),
+            },
         )
         .context("Failed to create terminal")?;
 
@@ -383,7 +387,8 @@ impl App {
         if self.continue_session {
             agent.restore_from_transcript(&self.chat.transcript);
         } else {
-            self.chat.add_turn(Role::Assistant, TextBlock::pending(WELCOME_MESSAGE));
+            self.chat
+                .add_turn(Role::Assistant, TextBlock::pending(WELCOME_MESSAGE));
         }
         self.agents.register(agent);
 
@@ -442,7 +447,7 @@ impl App {
             Err(e) => {
                 tracing::warn!("Failed to get terminal size: {}", e);
                 return;
-            }
+            },
         };
         let input_height = self.input.required_height(size.width);
         let max_input_height = size.height / 2;
@@ -455,7 +460,9 @@ impl App {
             .primary()
             .and_then(|m| m.try_lock().ok())
             .map_or(0, |a| a.total_usage().context_tokens);
-        let input_widget = self.input.widget(&self.config.agents.foreground.model, context_tokens);
+        let input_widget = self
+            .input
+            .widget(&self.config.agents.foreground.model, context_tokens);
         let alert = self.alert.clone();
 
         if let Err(e) = self.terminal.draw(|frame| {
@@ -562,8 +569,9 @@ impl App {
             Some(command) => {
                 // Slash command
                 let name = command.name().to_string();
-                let turn_id =
-                    self.chat.add_turn(Role::User, TextBlock::pending(format!("/{}", name)));
+                let turn_id = self
+                    .chat
+                    .add_turn(Role::User, TextBlock::pending(format!("/{}", name)));
                 MessageRequest::Command(name, turn_id)
             },
             None => {
@@ -682,7 +690,10 @@ impl App {
                 self.draw();
 
                 if let Some(agent_mutex) = self.agents.primary() {
-                    agent_mutex.lock().await.send_request(&content, RequestMode::Normal);
+                    agent_mutex
+                        .lock()
+                        .await
+                        .send_request(&content, RequestMode::Normal);
                 }
                 self.chat.begin_turn(Role::Assistant, &mut self.terminal);
                 self.input_mode = InputMode::Streaming;
@@ -699,6 +710,9 @@ impl App {
             },
         }
 
+        self.chat.render(&mut self.terminal);
+        self.draw();
+
         Ok(())
     }
 
@@ -709,20 +723,28 @@ impl App {
                 self.chat.transcript.stream_delta(BlockType::Text, &text);
             },
             AgentStep::CompactionDelta(text) => {
-                self.chat.transcript.stream_delta(BlockType::Compaction, &text);
+                self.chat
+                    .transcript
+                    .stream_delta(BlockType::Compaction, &text);
             },
             AgentStep::ThinkingDelta(text) => {
-                self.chat.transcript.stream_delta(BlockType::Thinking, &text);
+                self.chat
+                    .transcript
+                    .stream_delta(BlockType::Thinking, &text);
             },
             AgentStep::ToolRequest(tool_calls) => {
                 // Set agent_id on each tool call before enqueuing
-                let tool_calls: Vec<_> =
-                    tool_calls.into_iter().map(|tc| tc.with_agent_id(agent_id)).collect();
+                let tool_calls: Vec<_> = tool_calls
+                    .into_iter()
+                    .map(|tc| tc.with_agent_id(agent_id))
+                    .collect();
                 self.tool_executor.enqueue(tool_calls);
             },
             AgentStep::Retrying { attempt, error } => {
-                self.alert =
-                    Some(format!("Request failed (attempt {}): {}. Retrying...", attempt, error));
+                self.alert = Some(format!(
+                    "Request failed (attempt {}): {}. Retrying...",
+                    attempt, error
+                ));
                 tracing::warn!("Retrying request: attempt {}, error: {}", attempt, error);
             },
             AgentStep::Finished { usage } => {
@@ -730,7 +752,11 @@ impl App {
 
                 // Handle compaction completion
                 // TODO something more robust than checking active block type
-                if self.chat.transcript.is_streaming_block_type(BlockType::Compaction) {
+                if self
+                    .chat
+                    .transcript
+                    .is_streaming_block_type(BlockType::Compaction)
+                {
                     self.chat.transcript.finish_turn();
                     if let Err(e) = self.chat.transcript.save() {
                         tracing::error!("Failed to save transcript before compaction: {}", e);
@@ -741,7 +767,8 @@ impl App {
                                 "Compaction complete, rotating to {:?}",
                                 new_transcript.path()
                             );
-                            self.chat.reset_transcript(new_transcript, &mut self.terminal);
+                            self.chat
+                                .reset_transcript(new_transcript, &mut self.terminal);
                             self.draw();
                         },
                         Err(e) => {
@@ -786,6 +813,8 @@ impl App {
 
     /// Execute a tool decision (approve/deny) for the current tool
     async fn decide_pending_tool(&mut self, decision: ToolDecision) {
+        tracing::debug!("decide_pending_tool: decision={:?}", decision);
+        
         // Take the responder
         let responder = match self.pending_approval.take() {
             Some(r) => r,
@@ -812,13 +841,30 @@ impl App {
         self.draw();
 
         // Send decision to executor
-        responder.send(decision).ok();
+        tracing::debug!("decide_pending_tool: sending decision to executor");
+        match responder.send(decision) {
+            Ok(()) => tracing::debug!("decide_pending_tool: decision sent successfully"),
+            Err(_) => tracing::warn!("decide_pending_tool: failed to send decision (receiver dropped)"),
+        }
     }
 
     /// Handle events from the tool executor
     async fn handle_tool_event(&mut self, event: ToolEvent) -> Result<()> {
+        tracing::debug!("handle_tool_event: {:?}", match &event {
+            ToolEvent::AwaitingApproval { name, .. } => format!("AwaitingApproval({})", name),
+            ToolEvent::Delegate { effect, .. } => format!("Delegate({:?})", effect),
+            ToolEvent::Delta { .. } => "Delta".to_string(),
+            ToolEvent::Completed { is_error, content, .. } => format!("Completed(is_error={}, content_len={})", is_error, content.len()),
+        });
+        
         match event {
-            ToolEvent::AwaitingApproval { agent_id, call_id, name, params, responder } => {
+            ToolEvent::AwaitingApproval {
+                agent_id,
+                call_id,
+                name,
+                params,
+                responder,
+            } => {
                 let is_primary = self.agents.primary_id() == Some(agent_id);
 
                 if is_primary {
@@ -856,7 +902,12 @@ impl App {
                 }
             },
 
-            ToolEvent::Delegate { agent_id, effect, responder, .. } => {
+            ToolEvent::Delegate {
+                agent_id,
+                effect,
+                responder,
+                ..
+            } => {
                 let result = match self.apply_effect(agent_id, effect).await {
                     Ok(()) => Ok(()),
                     Err(e) => Err(e.to_string()),
@@ -865,7 +916,11 @@ impl App {
                 let _ = responder.send(result);
             },
 
-            ToolEvent::Delta { agent_id, call_id, content } => {
+            ToolEvent::Delta {
+                agent_id,
+                call_id,
+                content,
+            } => {
                 // Only stream output to transcript for primary agent
                 let is_primary = self.agents.primary_id() == Some(agent_id);
                 if is_primary {
@@ -880,10 +935,20 @@ impl App {
                 }
             },
 
-            ToolEvent::Completed { agent_id, call_id, content, is_error } => {
+            ToolEvent::Completed {
+                agent_id,
+                call_id,
+                content,
+                is_error,
+            } => {
                 let is_primary = self.agents.primary_id() == Some(agent_id);
 
                 if is_primary {
+                    // Set the output on the block before marking complete
+                    if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
+                        block.append_text(&content);
+                    }
+
                     // Update transcript status for primary agent
                     self.chat.transcript.mark_active_block(if is_error {
                         Status::Error
@@ -894,7 +959,10 @@ impl App {
 
                 // Tell agent about the result - route to the correct agent by ID
                 if let Some(agent_mutex) = self.agents.get(agent_id) {
-                    agent_mutex.lock().await.submit_tool_result(&call_id, content);
+                    agent_mutex
+                        .lock()
+                        .await
+                        .submit_tool_result(&call_id, content);
                 }
 
                 if is_primary {
@@ -948,7 +1016,8 @@ impl App {
             },
             Effect::IdeOpen { path, line, column } => {
                 if let Some(ide) = &self.ide {
-                    ide.navigate_to(&path.to_string_lossy(), line, column).await?;
+                    ide.navigate_to(&path.to_string_lossy(), line, column)
+                        .await?;
                 }
             },
             Effect::IdeShowPreview { preview } => {
@@ -958,7 +1027,8 @@ impl App {
             },
             Effect::IdeShowDiffPreview { path, edits } => {
                 if let Some(ide) = &self.ide {
-                    ide.show_diff_preview(&path.to_string_lossy(), &edits).await?;
+                    ide.show_diff_preview(&path.to_string_lossy(), &edits)
+                        .await?;
                 }
             },
             Effect::IdeClosePreview => {

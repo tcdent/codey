@@ -172,6 +172,8 @@ pub struct ToolExecutor {
     tools: ToolRegistry,
     pending: VecDeque<ToolCall>,
     active: Option<ActivePipeline>,
+    /// Flag to signal cancellation
+    cancelled: bool,
 }
 
 impl ToolExecutor {
@@ -180,6 +182,7 @@ impl ToolExecutor {
             tools,
             pending: VecDeque::new(),
             active: None,
+            cancelled: false,
         }
     }
 
@@ -187,17 +190,37 @@ impl ToolExecutor {
         &self.tools
     }
 
+    /// Cancel any active or pending tool execution
+    pub fn cancel(&mut self) {
+        self.cancelled = true;
+        self.pending.clear();
+        self.active = None;
+    }
+
     pub fn enqueue(&mut self, tool_calls: Vec<ToolCall>) {
         self.pending.extend(tool_calls);
     }
 
     pub async fn next(&mut self) -> Option<ToolEvent> {
+        // Check for cancellation
+        if self.cancelled {
+            self.cancelled = false;
+            return None;
+        }
+
         // Check if active pipeline is waiting for effect or approval
-        if let Some(event) = self.check_pending_effect().await {
+        if let Some(event) = self.check_pending_effect() {
             return Some(event);
         }
-        if let Some(event) = self.check_pending_approval().await {
+        if let Some(event) = self.check_pending_approval() {
             return Some(event);
+        }
+
+        // If still waiting for effect/approval, don't proceed
+        if let Some(active) = &self.active {
+            if active.pending_effect.is_some() || active.pending_approval.is_some() {
+                return None;
+            }
         }
 
         // If no active pipeline, start next pending tool
@@ -220,39 +243,90 @@ impl ToolExecutor {
         }
     }
 
-    /// Await pending effect result, return error event if it failed
-    async fn check_pending_effect(&mut self) -> Option<ToolEvent> {
+    /// Check pending effect - non-blocking poll, put rx back if not ready
+    fn check_pending_effect(&mut self) -> Option<ToolEvent> {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Wake, Waker};
+        use std::sync::Arc;
+        
+        // Noop waker for polling
+        struct NoopWake;
+        impl Wake for NoopWake {
+            fn wake(self: Arc<Self>) {}
+        }
+        
         let active = self.active.as_mut()?;
-        let rx = active.pending_effect.take()?;
-
-        match rx.await {
-            Ok(Ok(())) => None,
-            Ok(Err(msg)) => {
+        let rx = active.pending_effect.as_mut()?;
+        
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut cx = Context::from_waker(&waker);
+        
+        match Pin::new(rx).poll(&mut cx) {
+            Poll::Ready(Ok(Ok(()))) => {
+                active.pending_effect = None;
+                None
+            },
+            Poll::Ready(Ok(Err(msg))) => {
                 let active = self.active.take().unwrap();
                 Some(ToolEvent::error(active, msg))
             },
-            Err(_) => {
+            Poll::Ready(Err(_)) => {
                 let active = self.active.take().unwrap();
                 Some(ToolEvent::error(active, "Effect channel dropped"))
             },
+            Poll::Pending => None,
         }
     }
 
-    /// Await pending approval decision, return error event if denied
-    async fn check_pending_approval(&mut self) -> Option<ToolEvent> {
+    /// Check pending approval - non-blocking poll, put rx back if not ready
+    fn check_pending_approval(&mut self) -> Option<ToolEvent> {
+        use std::future::Future;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Wake, Waker};
+        use std::sync::Arc;
+        
+        // Noop waker for polling
+        struct NoopWake;
+        impl Wake for NoopWake {
+            fn wake(self: Arc<Self>) {}
+        }
+        
         let active = self.active.as_mut()?;
-        let rx = active.pending_approval.take()?;
-
-        match rx.await {
-            Ok(ToolDecision::Approve) => None,
-            Ok(ToolDecision::Deny) => {
+        let rx = active.pending_approval.as_mut()?;
+        
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut cx = Context::from_waker(&waker);
+        
+        let poll_result = Pin::new(rx).poll(&mut cx);
+        tracing::debug!("check_pending_approval: poll_result={:?}", poll_result);
+        
+        match poll_result {
+            Poll::Ready(Ok(ToolDecision::Approve)) => {
+                tracing::debug!("check_pending_approval: Approved");
+                active.pending_approval = None;
+                None
+            },
+            Poll::Ready(Ok(ToolDecision::Deny)) => {
+                tracing::debug!("check_pending_approval: Denied - returning error");
                 let active = self.active.take().unwrap();
                 Some(ToolEvent::error(active, "Denied by user"))
             },
-            Ok(_) => None, // Pending/Requested shouldn't happen, treat as continue
-            Err(_) => {
+            Poll::Ready(Ok(_)) => {
+                // Pending/Requested shouldn't happen
+                tracing::debug!("check_pending_approval: unexpected decision");
+                active.pending_approval = None;
+                None
+            },
+            Poll::Ready(Err(_)) => {
+                tracing::debug!("check_pending_approval: channel error");
+                // Sender dropped - treat as cancellation
                 let active = self.active.take().unwrap();
-                Some(ToolEvent::error(active, "Approval channel dropped"))
+                Some(ToolEvent::error(active, "Approval cancelled"))
+            },
+            Poll::Pending => {
+                tracing::debug!("check_pending_approval: Pending");
+                None
             },
         }
     }
