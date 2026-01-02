@@ -390,3 +390,31 @@ impl EffectHandler for Notify {
         })
     }
 }
+
+// =============================================================================
+// HTML content handlers
+// =============================================================================
+
+/// Fetch HTML content using headless browser and convert to readable markdown
+pub struct FetchHtml {
+    pub url: String,
+    pub max_length: Option<usize>,
+}
+
+#[async_trait::async_trait]
+impl EffectHandler for FetchHtml {
+    async fn call(self: Box<Self>) -> Step {
+        match io::fetch_html(&self.url, self.max_length).await {
+            Ok(result) => {
+                let title_info = result
+                    .title
+                    .as_ref()
+                    .map(|t| format!("[Title: {}]\n", t))
+                    .unwrap_or_default();
+                let header = format!("[URL: {}]\n{}\n", result.url, title_info);
+                Step::Output(header + &result.content)
+            }
+            Err(e) => Step::Error(e),
+        }
+    }
+}

@@ -1,4 +1,5 @@
 mod edit_file;
+mod fetch_html;
 mod fetch_url;
 mod open_file;
 mod read_file;
@@ -11,6 +12,7 @@ pub use super::handlers;
 pub use super::pipeline::{Tool, ToolPipeline};
 
 pub use edit_file::EditFileTool;
+pub use fetch_html::FetchHtmlTool;
 pub use fetch_url::FetchUrlTool;
 pub use open_file::OpenFileTool;
 pub use read_file::ReadFileTool;
