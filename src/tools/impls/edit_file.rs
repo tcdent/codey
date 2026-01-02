@@ -11,8 +11,8 @@
 //!     AwaitApproval,
 //!     ApplyEdits,             // Apply the edits
 //!     Output,
-//!     IdeReloadBuffer,
 //!     IdeClosePreview,
+//!     IdeReloadBuffer,
 //! ]
 //! ```
 
@@ -274,8 +274,8 @@ impl Tool for EditFileTool {
                     edit_count, params.path
                 ),
             })
-            .then(handlers::IdeReloadBuffer { path: abs_path })
             .then(handlers::IdeClosePreview)
+            .then(handlers::IdeReloadBuffer { path: abs_path })
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {

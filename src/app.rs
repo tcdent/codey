@@ -824,6 +824,11 @@ impl App {
             },
         };
 
+        // Transition out of ToolApproval mode immediately so keystrokes aren't dropped
+        self.input_mode = InputMode::Streaming;
+
+        // TODO: Remove this once composable tools have a cleanup/cancellation mechanism.
+        // The pipeline should handle closing previews on both success and denial.
         // Close IDE preview
         if let Some(ide) = &self.ide {
             if let Err(e) = ide.close_preview().await {
