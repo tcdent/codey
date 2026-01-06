@@ -169,11 +169,10 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
-            assert!(is_error);
+        if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next().await {
             assert!(content.contains("Invalid URL"));
         } else {
-            panic!("Expected Completed event");
+            panic!("Expected Error event");
         }
     }
 
@@ -191,11 +190,10 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
-            assert!(is_error);
+        if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next().await {
             assert!(content.contains("Unsupported URL scheme"));
         } else {
-            panic!("Expected Completed event");
+            panic!("Expected Error event");
         }
     }
 }

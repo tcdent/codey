@@ -2,7 +2,7 @@
 
 A terminal-based AI coding assistant built in Rust.
 
-<img width="905" height="1143" alt="Screenshot 2026-01-06 at 4 10 53 PM" src="https://github.com/user-attachments/assets/e23f2009-1e64-4068-8a86-991a655bae10" />
+<img width="905" height="1143" alt="Screenshot 2026-01-06 at 4 10 53 PM" src="https://github.com/user-attachments/assets/e23f2009-1e64-4068-8a86-991a655bae10" />
 
 ## Features
 
@@ -107,7 +107,7 @@ theme = "base16-ocean.dark"
 
 ## Tools
 
-Codey provides eight tools:
+Codey provides nine tools:
 
 | Tool | Description |
 |------|-------------|
@@ -116,6 +116,7 @@ Codey provides eight tools:
 | `edit_file` | Apply search/replace edits to existing files |
 | `shell` | Execute bash commands with optional working directory |
 | `fetch_url` | Fetch content from URLs (HTTP/HTTPS) |
+| `fetch_html` | Fetch web pages as readable markdown using headless browser |
 | `web_search` | Search the web and return results |
 | `open_file` | Open a file in the IDE at a specific line |
 | `task` | Spawn a sub-agent for research/analysis tasks |
@@ -141,6 +142,21 @@ When running inside tmux, Codey auto-discovers Neovim via socket at `/tmp/nvim-{
 - **Navigation**: Jump to specific lines with `open_file`
 
 Start nvim with: `nvim --listen /tmp/nvim-$(tmux display -p '#S').sock`
+
+## Browser Setup (for fetch_html)
+
+The `fetch_html` tool requires Chrome or Chromium:
+
+**macOS:**
+```bash
+brew install --cask chromium
+# or install Google Chrome from https://google.com/chrome
+```
+
+**Debian/Ubuntu:**
+```bash
+sudo apt install chromium-browser
+```
 
 ## Session Persistence
 
