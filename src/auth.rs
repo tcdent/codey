@@ -1,10 +1,11 @@
 //! OAuth authentication for Anthropic API (Claude Max)
 
+use std::path::PathBuf;
+
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
 
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";

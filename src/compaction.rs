@@ -8,8 +8,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde::{Deserialize, Serialize};
 
-use crate::transcript::{Block, BlockType, Status};
 use crate::impl_base_block;
+use crate::transcript::{Block, BlockType, Status};
 
 /// Compaction summary block - shown when context was compacted
 #[derive(Debug, Clone, Serialize, Deserialize)]

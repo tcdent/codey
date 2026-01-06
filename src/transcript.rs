@@ -3,13 +3,14 @@
 //! This module contains the types that represent the conversation transcript.
 //! A Transcript contains Turns, and each Turn contains Blocks.
 
+use std::path::{Path, PathBuf};
+
 use chrono::{DateTime, Utc};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 
 use crate::app::{CODEY_DIR, TRANSCRIPTS_DIR};
 use crate::compaction::CompactionBlock;

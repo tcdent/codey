@@ -10,9 +10,10 @@ mod tools;
 mod transcript;
 mod ui;
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::Parser;
-use std::path::PathBuf;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// Codey - A terminal-based AI coding assistant

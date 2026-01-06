@@ -1,10 +1,12 @@
 //! Configuration loading and validation
 
-use crate::tool_filter::ToolFilterConfig;
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+use crate::tool_filter::ToolFilterConfig;
 
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]

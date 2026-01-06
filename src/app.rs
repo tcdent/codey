@@ -1,6 +1,6 @@
+use std::collections::VecDeque;
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
-use std::collections::VecDeque;
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -18,11 +18,11 @@ use tokio::sync::oneshot;
 
 use crate::commands::Command;
 use crate::config::{AgentRuntimeConfig, Config, ToolAccess};
-use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
-use crate::tools::{Effect, ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
-use crate::tool_filter::ToolFilters;
-use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
 use crate::ide::{Ide, IdeEvent, Nvim};
+use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
+use crate::tool_filter::ToolFilters;
+use crate::tools::{Effect, ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
+use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
 use crate::ui::{Attachment, ChatView, InputBox};
 
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);

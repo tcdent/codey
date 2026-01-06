@@ -7,7 +7,7 @@
 //!     AwaitApproval,    // Wait for user approval
 //!     WriteFile,        // Create the file
 //!     Output,           // Report success
-//!     IdeReloadBuffer,  // Reload buffer in IDE
+//!     IdeClosePreview,  // (finally) Close preview on completion/error/deny
 //! ]
 //! ```
 
@@ -147,7 +147,6 @@ impl Tool for WriteFileTool {
         };
 
         let path = PathBuf::from(&params.path);
-        let abs_path = path.canonicalize().unwrap_or_else(|_| path.clone());
 
         ToolPipeline::new()
             .then(handlers::ValidateFileNotExists {
@@ -173,7 +172,7 @@ impl Tool for WriteFileTool {
                     params.content.len()
                 ),
             })
-            .then(handlers::IdeReloadBuffer { path: abs_path })
+            .finally(handlers::IdeClosePreview)
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {

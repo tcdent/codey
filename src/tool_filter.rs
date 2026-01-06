@@ -28,10 +28,11 @@
 //! 2. If any allow pattern matches → `Some(ToolDecision::Approve)`
 //! 3. Otherwise → `None` (prompt user)
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use fancy_regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 use crate::tools::ToolDecision;
 

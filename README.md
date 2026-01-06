@@ -5,10 +5,12 @@ A terminal-based AI coding assistant built in Rust.
 ## Features
 
 - **Real-time Streaming**: See responses as they're generated with live markdown rendering
-- **Tool Execution**: Execute file operations, shell commands, and web fetches
-- **Permission System**: All tool executions require user approval
-- **Session Persistence**: Continue previous sessions with `--continue` flag
-- **Multi-provider Support**: Works with any LLM provider supported by the `genai` crate
+- **Tool Execution**: File operations, shell commands, web search, and more
+- **Permission System**: Tool executions require approval with configurable auto-approve/deny patterns
+- **IDE Integration**: Neovim integration for diff previews and buffer management
+- **Sub-agents**: Spawn background agents for research tasks
+- **Session Persistence**: Continue previous sessions with full context restoration
+- **OAuth Authentication**: Secure authentication via Anthropic OAuth
 
 ## Installation
 
@@ -44,7 +46,7 @@ sudo cp target/release/codey /usr/local/bin/
 ### Requirements
 
 - **Neovim** (optional, for IDE integration): `brew install neovim`
-- **ANTHROPIC_API_KEY** environment variable set
+- **Authentication**: Either OAuth (`codey --login`) or `ANTHROPIC_API_KEY` environment variable
 
 ## Usage
 
@@ -57,12 +59,17 @@ codey --continue
 
 # Specify a working directory
 codey --working-dir /path/to/project
+```
 
-# Use a specific model
-codey --model claude-sonnet-4-20250514
+### Authentication
 
-# Enable debug logging
-codey --debug
+```bash
+# OAuth login (recommended)
+codey --login              # Prints auth URL
+codey --login <code>       # Exchanges code for token
+
+# Or use API key
+export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
 ## Configuration
@@ -98,26 +105,44 @@ theme = "base16-ocean.dark"
 
 ## Tools
 
-Codey provides five core tools:
+Codey provides eight tools:
 
-### read_file
-Read file contents with optional line ranges.
+| Tool | Description |
+|------|-------------|
+| `read_file` | Read file contents with optional line ranges |
+| `write_file` | Create new files (fails if file exists) |
+| `edit_file` | Apply search/replace edits to existing files |
+| `shell` | Execute bash commands with optional working directory |
+| `fetch_url` | Fetch content from URLs (HTTP/HTTPS) |
+| `web_search` | Search the web and return results |
+| `open_file` | Open a file in the IDE at a specific line |
+| `task` | Spawn a sub-agent for research/analysis tasks |
 
-### write_file
-Create new files (fails if file exists).
+### Tool Filters
 
-### edit_file
-Apply search/replace edits to existing files.
+Configure auto-approve and auto-deny patterns in `config.toml`:
 
-### shell
-Execute bash commands with optional working directory.
+```toml
+[tools.shell]
+allow = ["^ls\\b", "^grep\\b"]  # Auto-approve
+deny = ["rm\\s+-rf\\s+/"]       # Auto-deny (blocked)
+```
 
-### fetch_url
-Fetch content from URLs (HTTP/HTTPS only).
+Evaluation order: deny patterns → allow patterns → prompt user.
+
+## Neovim Integration
+
+When running inside tmux, Codey auto-discovers Neovim via socket at `/tmp/nvim-{session}.sock`. Features:
+
+- **Diff Previews**: See file changes before approving edits
+- **Buffer Reload**: Automatically reload modified files
+- **Navigation**: Jump to specific lines with `open_file`
+
+Start nvim with: `nvim --listen /tmp/nvim-$(tmux display -p '#S').sock`
 
 ## Session Persistence
 
-Sessions are automatically saved to `.codey/transcript.json` in the working directory. Use `codey --continue` to resume a previous session with full context restoration including tool call history.
+Sessions are saved to `.codey/transcripts/` in the working directory. Use `codey --continue` to resume with full context restoration.
 
 ## License
 
