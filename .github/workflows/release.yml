@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+            name: codey-darwin-arm64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            name: codey-darwin-x86_64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            name: codey-linux-x86_64
+
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Build release
+        run: make release
+        env:
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+      
+      - name: Ad-hoc sign (macOS)
+        if: contains(matrix.os, 'macos')
+        run: codesign --force --sign - target/${{ matrix.target }}/release/codey
+      
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/codey dist/${{ matrix.name }}
+          cd dist && tar -czvf ${{ matrix.name }}.tar.gz ${{ matrix.name }}
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.tar.gz
+          generate_release_notes: true

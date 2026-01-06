@@ -16,7 +16,11 @@ run: $(PATCH_DEPS)
 	cargo run
 
 release: $(PATCH_DEPS)
+ifdef CARGO_BUILD_TARGET
+	cargo build --release --target $(CARGO_BUILD_TARGET)
+else
 	cargo build --release
+endif
 
 profile: release
 	samply record ./target/release/codey

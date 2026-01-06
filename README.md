@@ -12,19 +12,39 @@ A terminal-based AI coding assistant built in Rust.
 
 ## Installation
 
+### Homebrew (macOS)
+
+```bash
+brew install tcdent/tap/codey
+```
+
+### Download Binary
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/tcdent/codey/releases):
+
+- **macOS (Apple Silicon)**: `codey-darwin-arm64.tar.gz`
+- **macOS (Intel)**: `codey-darwin-x86_64.tar.gz`
+- **Linux (x86_64)**: `codey-linux-x86_64.tar.gz`
+
+```bash
+# Example for macOS ARM
+tar -xzf codey-darwin-arm64.tar.gz
+sudo mv codey-darwin-arm64 /usr/local/bin/codey
+```
+
 ### From Source
 
 ```bash
-cargo install --path .
+git clone https://github.com/tcdent/codey.git
+cd codey
+make release
+sudo cp target/release/codey /usr/local/bin/
 ```
 
-### Building
+### Requirements
 
-```bash
-cargo build --release
-```
-
-The binary will be at `target/release/codey`.
+- **Neovim** (optional, for IDE integration): `brew install neovim`
+- **ANTHROPIC_API_KEY** environment variable set
 
 ## Usage
 
