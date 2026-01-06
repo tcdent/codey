@@ -190,8 +190,7 @@ mod tests {
         }]);
 
         // Get the completed event
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
-            assert!(!is_error);
+        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
             assert!(content.contains("line 1"));
             assert!(content.contains("line 2"));
             assert!(content.contains("line 3"));
@@ -214,11 +213,10 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
-            assert!(is_error);
+        if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next().await {
             assert!(content.contains("not found") || content.contains("File not found"));
         } else {
-            panic!("Expected Completed event");
+            panic!("Expected Error event");
         }
     }
 
@@ -246,8 +244,8 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { is_error, .. }) = executor.next().await {
-            assert!(!is_error);
+        if let Some(crate::tools::ToolEvent::Completed { .. }) = executor.next().await {
+            // success
         } else {
             panic!("Expected Completed event");
         }

@@ -827,15 +827,6 @@ impl App {
         // Transition out of ToolApproval mode immediately so keystrokes aren't dropped
         self.input_mode = InputMode::Streaming;
 
-        // TODO: Remove this once composable tools have a cleanup/cancellation mechanism.
-        // The pipeline should handle closing previews on both success and denial.
-        // Close IDE preview
-        if let Some(ide) = &self.ide {
-            if let Err(e) = ide.close_preview().await {
-                tracing::warn!("Failed to close IDE preview: {}", e);
-            }
-        }
-
         // Update block status
         self.chat.transcript.mark_active_block(match decision {
             ToolDecision::Approve => Status::Running,
@@ -859,7 +850,8 @@ impl App {
             ToolEvent::AwaitingApproval { name, .. } => format!("AwaitingApproval({})", name),
             ToolEvent::Delegate { effect, .. } => format!("Delegate({:?})", effect),
             ToolEvent::Delta { .. } => "Delta".to_string(),
-            ToolEvent::Completed { is_error, content, .. } => format!("Completed(is_error={}, content_len={})", is_error, content.len()),
+            ToolEvent::Completed { content, .. } => format!("Completed(content_len={})", content.len()),
+            ToolEvent::Error { content, .. } => format!("Error(content_len={})", content.len()),
         });
         
         match event {
@@ -944,7 +936,6 @@ impl App {
                 agent_id,
                 call_id,
                 content,
-                is_error,
             } => {
                 let is_primary = self.agents.primary_id() == Some(agent_id);
 
@@ -955,14 +946,46 @@ impl App {
                     }
 
                     // Update transcript status for primary agent
-                    self.chat.transcript.mark_active_block(if is_error {
-                        Status::Error
-                    } else {
-                        Status::Complete
-                    });
+                    self.chat.transcript.mark_active_block(Status::Complete);
                 }
 
                 // Tell agent about the result - route to the correct agent by ID
+                if let Some(agent_mutex) = self.agents.get(agent_id) {
+                    agent_mutex
+                        .lock()
+                        .await
+                        .submit_tool_result(&call_id, content);
+                }
+
+                if is_primary {
+                    // Tool is done - go back to streaming mode.
+                    // If there's another tool pending, AwaitingApproval will switch back.
+                    self.input_mode = InputMode::Streaming;
+
+                    // Render update
+                    self.chat.render(&mut self.terminal);
+                    self.draw();
+                }
+            },
+
+            ToolEvent::Error {
+                agent_id,
+                call_id,
+                content,
+            } => {
+                let is_primary = self.agents.primary_id() == Some(agent_id);
+
+                if is_primary {
+                    // Set the output on the block before marking error
+                    if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
+                        block.append_text(&content);
+                    }
+
+                    // Update transcript status for primary agent
+                    self.chat.transcript.mark_active_block(Status::Error);
+                }
+
+                // Tell agent about the error - route to the correct agent by ID
                 if let Some(agent_mutex) = self.agents.get(agent_id) {
                     agent_mutex
                         .lock()

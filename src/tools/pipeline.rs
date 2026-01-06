@@ -56,15 +56,26 @@ pub enum Effect {
     Notify { message: String },
 }
 
+/// When an effect should run
+enum EffectTiming {
+    /// Normal effect - skipped on deny/error
+    Normal(Box<dyn EffectHandler>),
+    /// Cleanup effect - always runs
+    Finally(Box<dyn EffectHandler>),
+}
+
 /// A tool defined as a chain of effect handlers
 pub struct ToolPipeline {
-    pub effects: VecDeque<Box<dyn EffectHandler>>,
+    effects: VecDeque<EffectTiming>,
 }
 
 impl std::fmt::Debug for ToolPipeline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let normal = self.effects.iter().filter(|e| matches!(e, EffectTiming::Normal(_))).count();
+        let finally = self.effects.iter().filter(|e| matches!(e, EffectTiming::Finally(_))).count();
         f.debug_struct("ToolPipeline")
-            .field("effects_count", &self.effects.len())
+            .field("normal_effects", &normal)
+            .field("finally_effects", &finally)
             .finish()
     }
 }
@@ -90,7 +101,7 @@ impl ToolPipeline {
 
     /// Add an effect handler to the chain
     pub fn then(mut self, handler: impl EffectHandler + 'static) -> Self {
-        self.effects.push_back(Box::new(handler));
+        self.effects.push_back(EffectTiming::Normal(Box::new(handler)));
         self
     }
 
@@ -100,9 +111,28 @@ impl ToolPipeline {
         self.then(handlers::AwaitApproval)
     }
 
+    /// Add a cleanup effect that always runs (success, error, or deny)
+    pub fn finally(mut self, handler: impl EffectHandler + 'static) -> Self {
+        self.effects.push_back(EffectTiming::Finally(Box::new(handler)));
+        self
+    }
+
     /// Pop the next effect handler
     pub fn pop(&mut self) -> Option<Box<dyn EffectHandler>> {
-        self.effects.pop_front()
+        self.effects.pop_front().map(|e| match e {
+            EffectTiming::Normal(h) | EffectTiming::Finally(h) => h,
+        })
+    }
+
+    /// Skip to finally effects (for deny/error - removes all Normal effects)
+    pub fn skip_to_finally(&mut self) {
+        self.effects.retain(|e| matches!(e, EffectTiming::Finally(_)));
+    }
+
+    /// Number of remaining effects (for testing)
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.effects.len()
     }
 }
 
@@ -127,7 +157,7 @@ mod tests {
             .await_approval()
             .then(handlers::Output { content: "done".into() });
 
-        assert_eq!(pipeline.effects.len(), 3);
+        assert_eq!(pipeline.len(), 3);
     }
 
     #[test]
@@ -135,6 +165,18 @@ mod tests {
         let pipeline = ToolPipeline::new()
             .then(handlers::Output { content: "hello".into() });
 
-        assert_eq!(pipeline.effects.len(), 1);
+        assert_eq!(pipeline.len(), 1);
+    }
+
+    #[test]
+    fn test_skip_to_finally() {
+        let mut pipeline = ToolPipeline::new()
+            .then(handlers::ValidateFile { path: "/tmp/test".into() })
+            .then(handlers::Output { content: "done".into() })
+            .finally(handlers::Output { content: "cleanup".into() });
+
+        assert_eq!(pipeline.len(), 3);
+        pipeline.skip_to_finally();
+        assert_eq!(pipeline.len(), 1);  // only the finally effect remains
     }
 }

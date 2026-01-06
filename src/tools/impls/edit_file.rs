@@ -11,9 +11,8 @@
 //!     AwaitApproval,
 //!     ApplyEdits,             // Apply the edits
 //!     Output,
-//!     IdeClosePreview,
 //!     IdeReloadBuffer,
-//! ]
+//! ] + finally [IdeClosePreview]  // Closes preview on success, deny, or error
 //! ```
 
 use std::path::PathBuf;
@@ -274,8 +273,8 @@ impl Tool for EditFileTool {
                     edit_count, params.path
                 ),
             })
-            .then(handlers::IdeClosePreview)
             .then(handlers::IdeReloadBuffer { path: abs_path })
+            .finally(handlers::IdeClosePreview)
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
@@ -294,7 +293,23 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::tools::{ToolCall, ToolDecision, ToolExecutor, ToolRegistry};
+    use crate::tools::{ToolCall, ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
+
+    /// Helper to run a tool to completion, auto-responding to Delegate events
+    async fn run_to_completion(executor: &mut ToolExecutor) -> ToolEvent {
+        loop {
+            match executor.next().await {
+                Some(ToolEvent::Delegate { responder, .. }) => {
+                    // Auto-respond with Ok to IDE effects
+                    let _ = responder.send(Ok(()));
+                },
+                Some(event @ ToolEvent::Completed { .. }) => return event,
+                Some(event @ ToolEvent::Error { .. }) => return event,
+                Some(_) => continue,
+                None => panic!("Executor returned None before completion"),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_edit_file_single() {
@@ -320,12 +335,12 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { is_error, .. }) = executor.next().await {
-            assert!(!is_error);
-            let content = fs::read_to_string(&file_path).unwrap();
-            assert!(content.contains("hello, world!"));
-        } else {
-            panic!("Expected Completed event");
+        match run_to_completion(&mut executor).await {
+            ToolEvent::Completed { .. } => {
+                let content = fs::read_to_string(&file_path).unwrap();
+                assert!(content.contains("hello, world!"));
+            },
+            other => panic!("Expected Completed event, got {:?}", other),
         }
     }
 
@@ -353,13 +368,13 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { is_error, .. }) = executor.next().await {
-            assert!(!is_error);
-            let content = fs::read_to_string(&file_path).unwrap();
-            assert!(content.contains("fn foo() -> i32 { 1 }"));
-            assert!(content.contains("fn bar() -> i32 { 2 }"));
-        } else {
-            panic!("Expected Completed event");
+        match run_to_completion(&mut executor).await {
+            ToolEvent::Completed { .. } => {
+                let content = fs::read_to_string(&file_path).unwrap();
+                assert!(content.contains("fn foo() -> i32 { 1 }"));
+                assert!(content.contains("fn bar() -> i32 { 2 }"));
+            },
+            other => panic!("Expected Completed event, got {:?}", other),
         }
     }
 
@@ -380,14 +395,11 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed {
-            content, is_error, ..
-        }) = executor.next().await
-        {
-            assert!(is_error);
-            assert!(content.contains("not found"));
-        } else {
-            panic!("Expected Completed event");
+        match run_to_completion(&mut executor).await {
+            ToolEvent::Error { content, .. } => {
+                assert!(content.contains("not found"));
+            },
+            other => panic!("Expected Error event, got {:?}", other),
         }
     }
 
@@ -412,14 +424,11 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed {
-            content, is_error, ..
-        }) = executor.next().await
-        {
-            assert!(is_error);
-            assert!(content.contains("3 times"));
-        } else {
-            panic!("Expected Completed event");
+        match run_to_completion(&mut executor).await {
+            ToolEvent::Error { content, .. } => {
+                assert!(content.contains("3 times"));
+            },
+            other => panic!("Expected Error event, got {:?}", other),
         }
     }
 
@@ -444,14 +453,11 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed {
-            content, is_error, ..
-        }) = executor.next().await
-        {
-            assert!(is_error);
-            assert!(content.contains("not found"));
-        } else {
-            panic!("Expected Completed event");
+        match run_to_completion(&mut executor).await {
+            ToolEvent::Error { content, .. } => {
+                assert!(content.contains("not found"));
+            },
+            other => panic!("Expected Error event, got {:?}", other),
         }
     }
 }

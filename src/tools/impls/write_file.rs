@@ -188,9 +188,24 @@ impl Tool for WriteFileTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
+    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision, ToolEvent};
     use std::fs;
     use tempfile::tempdir;
+
+    /// Helper to run a tool to completion, auto-responding to Delegate events
+    async fn run_to_completion(executor: &mut ToolExecutor) -> ToolEvent {
+        loop {
+            match executor.next().await {
+                Some(ToolEvent::Delegate { responder, .. }) => {
+                    let _ = responder.send(Ok(()));
+                },
+                Some(event @ ToolEvent::Completed { .. }) => return event,
+                Some(event @ ToolEvent::Error { .. }) => return event,
+                Some(_) => continue,
+                None => panic!("Executor returned None before completion"),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn test_write_file() {
@@ -212,12 +227,12 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
-            assert!(!is_error, "Error: {}", content);
-            let file_content = fs::read_to_string(&file_path).unwrap();
-            assert_eq!(file_content, "Hello, World!\nLine 2");
-        } else {
-            panic!("Expected Completed event");
+        match run_to_completion(&mut executor).await {
+            ToolEvent::Completed { content, .. } => {
+                let file_content = fs::read_to_string(&file_path).expect(&format!("Failed to read file, tool output: {}", content));
+                assert_eq!(file_content, "Hello, World!\nLine 2");
+            },
+            other => panic!("Expected Completed event, got {:?}", other),
         }
     }
 
@@ -242,11 +257,11 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
-            assert!(is_error);
-            assert!(content.contains("already exists"));
-        } else {
-            panic!("Expected Completed event");
+        match run_to_completion(&mut executor).await {
+            ToolEvent::Error { content, .. } => {
+                assert!(content.contains("already exists"));
+            },
+            other => panic!("Expected Error event, got {:?}", other),
         }
     }
 
@@ -270,11 +285,11 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { is_error, .. }) = executor.next().await {
-            assert!(!is_error);
-            assert!(file_path.exists());
-        } else {
-            panic!("Expected Completed event");
+        match run_to_completion(&mut executor).await {
+            ToolEvent::Completed { .. } => {
+                assert!(file_path.exists());
+            },
+            other => panic!("Expected Completed event, got {:?}", other),
         }
     }
 }

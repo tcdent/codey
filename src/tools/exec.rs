@@ -66,12 +66,17 @@ pub enum ToolEvent {
         call_id: String,
         content: String,
     },
-    /// Tool execution completed
+    /// Tool execution completed successfully
     Completed {
         agent_id: AgentId,
         call_id: String,
         content: String,
-        is_error: bool,
+    },
+    /// Tool execution failed
+    Error {
+        agent_id: AgentId,
+        call_id: String,
+        content: String,
     },
 }
 
@@ -81,16 +86,14 @@ impl ToolEvent {
             agent_id: active.agent_id,
             call_id: active.call_id,
             content: active.output,
-            is_error: false,
         }
     }
 
     fn error(active: ActivePipeline, content: impl Into<String>) -> Self {
-        Self::Completed {
+        Self::Error {
             agent_id: active.agent_id,
             call_id: active.call_id,
             content: content.into(),
-            is_error: true,
         }
     }
 
@@ -145,6 +148,8 @@ struct ActivePipeline {
     pending_effect: Option<oneshot::Receiver<EffectResult>>,
     /// Waiting for approval decision from app layer
     pending_approval: Option<oneshot::Receiver<ToolDecision>>,
+    /// Original decision from tool call (for pre-approval)
+    original_decision: ToolDecision,
 }
 
 impl ActivePipeline {
@@ -153,6 +158,7 @@ impl ActivePipeline {
             agent_id: tool_call.agent_id,
             call_id: tool_call.call_id,
             name: tool_call.name,
+            original_decision: tool_call.decision,
             params: tool_call.params,
             pipeline,
             output: String::new(),
@@ -226,7 +232,9 @@ impl ToolExecutor {
         // If no active pipeline, start next pending tool
         if self.active.is_none() {
             let tool_call = match self.pending.front() {
-                Some(t) if t.decision == ToolDecision::Pending => self.pending.pop_front().unwrap(),
+                Some(t) if t.decision == ToolDecision::Pending || t.decision == ToolDecision::Approve => {
+                    self.pending.pop_front().unwrap()
+                },
                 _ => return None,
             };
 
@@ -308,9 +316,15 @@ impl ToolExecutor {
                 None
             },
             Poll::Ready(Ok(ToolDecision::Deny)) => {
-                tracing::debug!("check_pending_approval: Denied - returning error");
-                let active = self.active.take().unwrap();
-                Some(ToolEvent::error(active, "Denied by user"))
+                tracing::debug!("check_pending_approval: Denied - emitting error and continuing to finally effects");
+                active.pipeline.skip_to_finally();
+                active.pending_approval = None;
+                // Emit error but keep pipeline active to drain finally effects
+                Some(ToolEvent::Error {
+                    agent_id: active.agent_id,
+                    call_id: active.call_id.clone(),
+                    content: "Denied by user".to_string(),
+                })
             },
             Poll::Ready(Ok(_)) => {
                 // Pending/Requested shouldn't happen
@@ -365,9 +379,14 @@ impl ToolExecutor {
                 Some(event)
             },
             Step::AwaitApproval => {
-                let (event, rx) = ToolEvent::awaiting_approval(active);
-                active.pending_approval = Some(rx);
-                Some(event)
+                // Skip approval if tool was pre-approved
+                if active.original_decision == ToolDecision::Approve {
+                    None  // Continue to next step
+                } else {
+                    let (event, rx) = ToolEvent::awaiting_approval(active);
+                    active.pending_approval = Some(rx);
+                    Some(event)
+                }
             },
             Step::Error(msg) => {
                 let active = self.active.take().unwrap();

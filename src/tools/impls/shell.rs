@@ -190,8 +190,7 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
-            assert!(!is_error);
+        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
             assert!(content.contains("hello world"));
         } else {
             panic!("Expected Completed event");
@@ -215,8 +214,7 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
-            assert!(!is_error);
+        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
             assert!(content.contains("/tmp"));
         } else {
             panic!("Expected Completed event");
@@ -237,8 +235,7 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
-            assert!(is_error);
+        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
             assert!(content.contains("exit code: 1"));
         } else {
             panic!("Expected Completed event");
@@ -284,11 +281,10 @@ mod tests {
             decision: ToolDecision::Approve,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, is_error, .. }) = executor.next().await {
-            assert!(is_error);
+        if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next().await {
             assert!(content.contains("does not exist"));
         } else {
-            panic!("Expected Completed event");
+            panic!("Expected Error event");
         }
     }
 }
