@@ -626,6 +626,9 @@ impl App {
             agent_mutex.lock().await.cancel();
         }
         self.chat.finish_turn(&mut self.terminal);
+        if let Err(e) = self.chat.transcript.save() {
+            tracing::error!("Failed to save transcript on cancel: {}", e);
+        }
         self.input_mode = InputMode::Normal;
         Ok(())
     }
@@ -818,6 +821,9 @@ impl App {
             },
             AgentStep::Error(msg) => {
                 self.chat.transcript.mark_active_block(Status::Error);
+                if let Err(e) = self.chat.transcript.save() {
+                    tracing::error!("Failed to save transcript on error: {}", e);
+                }
                 self.input_mode = InputMode::Normal;
 
                 let alert_msg = if let Some(start) = msg.find('{') {
@@ -910,7 +916,10 @@ impl App {
                             self.decide_pending_tool(decision).await;
                         },
                         None => {
-                            // Ask user for approval
+                            // Ask user for approval - save transcript checkpoint while waiting
+                            if let Err(e) = self.chat.transcript.save() {
+                                tracing::error!("Failed to save transcript before tool approval: {}", e);
+                            }
                             self.input_mode = InputMode::ToolApproval;
                         },
                     }
