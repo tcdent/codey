@@ -16,12 +16,12 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14
             name: codey-darwin-arm64
-          - target: x86_64-apple-darwin
-            os: macos-13
-            name: codey-darwin-x86_64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: codey-linux-x86_64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            name: codey-linux-arm64
 
     runs-on: ${{ matrix.os }}
     
