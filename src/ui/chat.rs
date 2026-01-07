@@ -14,11 +14,11 @@
 // Frozen Turns
 // one that has already passed into scrollback
 
-use std::collections::{HashSet, HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Stdout;
 
 use chrono::Local;
-use ratatui:{
+use ratatui::{
     backend::CrosstermBackend,
     buffer::Buffer,
     layout::Rect,
@@ -30,7 +30,7 @@ use ratatui:{
 
 #[cfg(feature = "profiling")]
 use crate::profile_span;
-use crate::transcript::{Role, Status, Transcript, Turn, Block};
+use crate::transcript::{Block, Role, Status, Transcript, Turn};
 
 /// Chat view with native scrollback support.
 ///
@@ -81,20 +81,13 @@ impl ChatView {
     // ==================== Transcript mutation + render ====================
 
     /// Begin a new turn and render
-    pub fn begin_turn(
-        &mut self,
-        role: Role,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) {
+    pub fn begin_turn(&mut self, role: Role, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
         self.transcript.begin_turn(role);
         self.render(terminal)
     }
 
     /// Finish the current turn and render
-    pub fn finish_turn(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) {
+    pub fn finish_turn(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
         self.transcript.finish_turn();
         self.render(terminal)
     }
@@ -136,10 +129,7 @@ impl ChatView {
 
     /// Render active (non-frozen) turns into the hot zone.
     /// Overflow lines are committed to native scrollback via `insert_before()`.
-    pub fn render(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) {
+    pub fn render(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) {
         #[cfg(feature = "profiling")]
         let _span = profile_span!("ChatView::render");
 
@@ -162,7 +152,9 @@ impl ChatView {
 
         tracing::trace!(
             "render(): hot_lines={}, committed_count={}, max_lines={}",
-            hot_lines.len(), self.committed_count, self.max_lines
+            hot_lines.len(),
+            self.committed_count,
+            self.max_lines
         );
 
         self.lines.clear();
@@ -173,10 +165,14 @@ impl ChatView {
             // Overflow promotes to scrollback
             while self.lines.len() > self.max_lines {
                 let committed = self.lines.pop_front().unwrap();
-                let line_preview: String = committed.spans.iter().map(|s| s.content.as_ref()).collect();
+                let line_preview: String =
+                    committed.spans.iter().map(|s| s.content.as_ref()).collect();
                 tracing::trace!(
                     "Scrollback commit: line={:?}, committed_count={}, lines.len={}, max={}",
-                    line_preview, self.committed_count, self.lines.len(), self.max_lines
+                    line_preview,
+                    self.committed_count,
+                    self.lines.len(),
+                    self.max_lines
                 );
 
                 if let Err(e) = terminal.insert_before(1, |buf| {
@@ -294,5 +290,3 @@ impl Widget for ChatViewWidget<'_> {
         Paragraph::new(visible).render(area, buf);
     }
 }
-
-
