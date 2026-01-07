@@ -193,6 +193,9 @@ fn map_key(mode: InputMode, key: KeyEvent) -> Option<Action> {
 
 /// Keybindings for normal input mode
 fn map_key_normal(key: KeyEvent) -> Option<Action> {
+    // With REPORT_ALTERNATE_KEYS, crossterm gives us the shifted character directly
+    // (e.g., '!' instead of '1' with SHIFT) and clears the SHIFT modifier.
+    // We only need to check modifiers for special key combos.
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -281,7 +284,8 @@ impl App {
             crossterm::terminal::SetTitle(format!("{} v{}", APP_NAME, APP_VERSION)),
             crossterm::event::EnableBracketedPaste,
             crossterm::event::PushKeyboardEnhancementFlags(
-                crossterm::event::KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | crossterm::event::KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                     | crossterm::event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES
             )
         )
