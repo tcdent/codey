@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers},
+    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
@@ -179,6 +179,11 @@ fn map_event(mode: InputMode, event: Event) -> Option<Action> {
 
 /// Map a key event to an action based on the current input mode
 fn map_key(mode: InputMode, key: KeyEvent) -> Option<Action> {
+    // Only handle key press events, not release or repeat
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+
     match mode {
         InputMode::Normal => map_key_normal(key),
         InputMode::Streaming => map_key_streaming(key),
