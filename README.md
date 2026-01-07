@@ -16,7 +16,7 @@ A terminal-based AI coding assistant built in Rust.
 
 ## Installation
 
-### Homebrew (macOS)
+### Homebrew (macOS/Linux)
 
 ```bash
 brew install tcdent/tap/codey
@@ -24,11 +24,11 @@ brew install tcdent/tap/codey
 
 ### Download Binary
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/tcdent/codey/releases):
+Download the latest release for your platform from [GitHub Releases](https://github.com/tcdent/codey/releases/latest):
 
 - **macOS (Apple Silicon)**: `codey-darwin-arm64.tar.gz`
-- **macOS (Intel)**: `codey-darwin-x86_64.tar.gz`
 - **Linux (x86_64)**: `codey-linux-x86_64.tar.gz`
+- **Linux (ARM64)**: `codey-linux-arm64.tar.gz`
 
 ```bash
 # Example for macOS ARM
