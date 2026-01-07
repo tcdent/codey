@@ -164,7 +164,6 @@ enum Action {
     // Tool approval
     ApproveTool,
     DenyTool,
-    ApproveToolSession,
 }
 
 /// Map a terminal event to an action based on the current input mode
@@ -236,7 +235,6 @@ fn map_key_tool_approval(key: KeyEvent) -> Option<Action> {
     match key.code {
         KeyCode::Char('y') | KeyCode::Enter => Some(Action::ApproveTool),
         KeyCode::Char('n') | KeyCode::Esc => Some(Action::DenyTool),
-        KeyCode::Char('a') => Some(Action::ApproveToolSession),
         _ => None,
     }
 }
@@ -547,10 +545,6 @@ impl App {
             },
             Action::DenyTool => {
                 self.decide_pending_tool(ToolDecision::Deny).await;
-            },
-            Action::ApproveToolSession => {
-                // TODO: implement allow for session
-                self.decide_pending_tool(ToolDecision::Approve).await;
             },
             Action::InsertChar(c) => self.input.insert_char(c),
             Action::InsertNewline => self.input.insert_newline(),

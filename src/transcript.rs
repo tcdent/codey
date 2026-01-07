@@ -331,14 +331,7 @@ pub fn render_approval_prompt() -> Line<'static> {
                 .fg(Color::Red)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("]o  [", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            "a",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("]lways", Style::default().fg(Color::DarkGray)),
+        Span::styled("]o", Style::default().fg(Color::DarkGray)),
     ])
 }
 
