@@ -1132,6 +1132,8 @@ dependencies = [
 [[package]]
 name = "genai"
 version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "814c33e79506556ecba6b5f8e39a2fe423262fd3903856377ad2ae6a857c6032"
 dependencies = [
  "bytes 1.11.0",
  "derive_more 2.1.1",
@@ -4840,7 +4842,3 @@ name = "zmij"
 version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fc5a66a20078bf1251bde995aa2fdcc4b800c70b5d92dd2c62abc5c60f679f8"
-
-[[patch.unused]]
-name = "ratatui-core"
-version = "0.1.0-beta.0"
