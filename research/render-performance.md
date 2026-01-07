@@ -191,9 +191,79 @@ The `Cell.skip` flag is for special cases (image protocols) where cells should b
 
 ---
 
-## Profiling Results
+## Profiling
 
-### Methodology
+### Built-in Profiler
+
+Codey includes a built-in performance profiler for detailed analysis of render loops and streaming behavior. Unlike sampling profilers like `samply`, the built-in profiler tracks exact function timings with hierarchical relationships.
+
+#### Usage
+
+Build with profiling support:
+```bash
+cargo build --release --features profiling
+```
+
+Run with profiling enabled:
+```bash
+./target/release/codey --profile profile.json
+```
+
+The profiler will collect timing data during the session and export a JSON file on exit.
+
+#### Analyzing Profile Data
+
+Use the included Python visualization tool:
+
+```bash
+# Summary view
+python tools/profile_viewer.py profile.json
+
+# Detailed analysis with cumulative impact
+python tools/profile_viewer.py profile.json --analyze
+
+# Generate LLM-friendly markdown for AI analysis
+python tools/profile_viewer.py profile.json --llm-summary
+
+# Export SVG flame graph
+python tools/profile_viewer.py profile.json --format svg --output flame.svg
+```
+
+#### LLM Analysis
+
+The `--llm-summary` output is designed for use with AI assistants:
+
+```bash
+python tools/profile_viewer.py profile.json --llm-summary | pbcopy
+# Paste into ChatGPT, Claude, etc. and ask for optimization suggestions
+```
+
+#### Instrumentation
+
+The profiler uses zero-cost abstractions when disabled. Spans are added with macros:
+
+```rust
+use crate::{profile_span, profile_span_count, profile_frame};
+
+fn render_chat() {
+    let _span = profile_span!("render_chat");
+    // ... work ...
+}
+
+fn render_cells(count: usize) {
+    let _span = profile_span_count!("render_cells", count);
+    // ... work ...
+}
+
+fn draw() {
+    profile_frame!();  // Mark frame boundary
+    // ...
+}
+```
+
+### External Profiling (samply)
+
+For sampling-based profiling with full call stacks:
 
 Profiling performed using `samply` on macOS/ARM64:
 
@@ -210,7 +280,7 @@ samply load profile.json.gz
 
 To ensure SIMD functions appear in profiles (they're normally inlined), add `#[inline(never)]` to `find_changed_ranges`, `neon`, and `merge` in `lib/ratatui-core/src/buffer/simd_diff.rs`.
 
-### Results Summary (20,000 samples)
+### samply Results Summary (20,000 samples)
 
 | Samples | % | Function | Notes |
 |---------|---|----------|-------|

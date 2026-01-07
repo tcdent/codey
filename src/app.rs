@@ -20,6 +20,8 @@ use crate::commands::Command;
 use crate::config::{AgentRuntimeConfig, Config, ToolAccess};
 use crate::ide::{Ide, IdeEvent, Nvim};
 use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
+#[cfg(feature = "profiling")]
+use crate::{profile_frame, profile_span};
 use crate::tool_filter::ToolFilters;
 use crate::tools::{Effect, ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
@@ -436,6 +438,11 @@ impl App {
 
     /// Draw the UI
     fn draw(&mut self) {
+        #[cfg(feature = "profiling")]
+        let _span = profile_span!("App::draw");
+        #[cfg(feature = "profiling")]
+        profile_frame!();
+
         use ratatui::style::{Color, Style};
         use ratatui::widgets::Paragraph;
 
