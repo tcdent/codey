@@ -28,7 +28,7 @@ use ratatui::{
 };
 
 #[cfg(feature = "profiling")]
-use crate::{profile_span, profile_span_count};
+use crate::profile_span;
 use crate::transcript::{Role, Status, Transcript, Turn, Block};
 
 /// Chat view with native scrollback support.
@@ -273,7 +273,7 @@ pub struct ChatViewWidget<'a> {
 impl Widget for ChatViewWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         #[cfg(feature = "profiling")]
-        let _span = profile_span_count!("ChatViewWidget::render", area.width as u64 * area.height as u64);
+        let _span = profile_span!("ChatViewWidget::render");
 
         if area.width == 0 || area.height == 0 {
             return;

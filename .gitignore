@@ -30,3 +30,4 @@ lib/genai/
 
 # Profiling
 profile.json.gz
+profile.json

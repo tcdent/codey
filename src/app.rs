@@ -507,6 +507,16 @@ impl App {
         true
     }
 
+    /// Render chat and draw with frame rate limiting
+    /// Use this for streaming updates where we get many deltas per second
+    fn render_and_draw_throttled(&mut self) {
+        if self.last_render.elapsed() < MIN_FRAME_TIME {
+            return;
+        }
+        self.chat.render(&mut self.terminal);
+        self.draw();
+    }
+
     /// Handle an action. Returns the result indicating what the main loop should do.
     async fn handle_action(&mut self, action: Action) -> ActionResult {
         // Clear alert on any input action
@@ -811,9 +821,8 @@ impl App {
             },
         }
 
-        // Update display
-        self.chat.render(&mut self.terminal);
-        self.draw_throttled();
+        // Update display (throttled during streaming)
+        self.render_and_draw_throttled();
 
         Ok(())
     }
@@ -930,9 +939,8 @@ impl App {
                 if is_primary {
                     if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
                         block.append_text(&content);
-                        // Re-render to show the delta
-                        self.chat.render(&mut self.terminal);
-                        self.draw();
+                        // Re-render to show the delta (throttled)
+                        self.render_and_draw_throttled();
                     } else {
                         tracing::warn!("No block found for call_id: {}", call_id);
                     }
