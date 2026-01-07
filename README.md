@@ -135,13 +135,59 @@ Evaluation order: deny patterns → allow patterns → prompt user.
 
 ## Neovim Integration
 
-When running inside tmux, Codey auto-discovers Neovim via socket at `/tmp/nvim-{session}.sock`. Features:
+Codey integrates with Neovim to provide real-time previews, buffer synchronization, and seamless navigation. This requires launching Neovim with an RPC socket.
 
-- **Diff Previews**: See file changes before approving edits
-- **Buffer Reload**: Automatically reload modified files
-- **Navigation**: Jump to specific lines with `open_file`
+### Socket Setup
 
-Start nvim with: `nvim --listen /tmp/nvim-$(tmux display -p '#S').sock`
+Start Neovim with a listening socket:
+
+```bash
+# With tmux (recommended) - socket auto-discovered by Codey
+nvim --listen /tmp/nvim-$(tmux display -p '#S').sock
+
+# Without tmux - set the environment variable
+export NVIM_LISTEN_ADDRESS=/tmp/nvim.sock
+nvim --listen $NVIM_LISTEN_ADDRESS
+```
+
+### Socket Discovery
+
+Codey discovers the Neovim socket in this order:
+
+1. **Explicit config**: `socket` path in `config.toml`
+2. **Tmux auto-discovery**: `/tmp/nvim-{session-name}.sock`
+3. **Environment variable**: `$NVIM_LISTEN_ADDRESS`
+
+### IDE Effect Handlers
+
+When connected, Codey provides these handlers that integrate with the built-in tools:
+
+| Handler | Tool Integration | Description |
+|---------|------------------|-------------|
+| **Diff Preview** | `edit_file` | Opens side-by-side diff view showing original vs. modified content before you approve changes |
+| **File Preview** | `write_file` | Shows new file content in a scratch buffer before creation |
+| **Buffer Reload** | `edit_file`, `write_file` | Automatically reloads open buffers after files are modified |
+| **Navigation** | `open_file` | Jumps to specific file:line:column in the editor |
+| **Selection Context** | Input | Visual selections in Neovim are automatically attached as context for your next prompt |
+| **Unsaved Check** | `edit_file` | Prevents edits to files with unsaved changes in the buffer |
+
+### Preview Controls
+
+When a preview is displayed:
+- Press `q` to close the preview and return to your original buffer
+- Diff views show deletions (left) and additions (right) with syntax highlighting
+
+### Configuration
+
+Add to `~/.config/codey/config.toml`:
+
+```toml
+[ide.nvim]
+enabled = true                          # Enable nvim integration (default: true)
+socket = "/tmp/nvim-custom.sock"        # Explicit socket path (optional)
+show_diffs = true                       # Show diff previews (default: true)
+auto_reload = true                      # Auto-reload buffers (default: true)
+```
 
 ## Browser Setup (for fetch_html)
 

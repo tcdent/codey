@@ -106,3 +106,22 @@ deny = [
     "10\\.",            # No private networks
     "172\\.(1[6-9]|2[0-9]|3[01])\\.",  # No private networks
 ]
+
+# =============================================================================
+# Neovim Integration
+# =============================================================================
+# Codey connects to Neovim via RPC socket for diff previews, buffer management,
+# and navigation. Start nvim with: nvim --listen /tmp/nvim-$(tmux display -p '#S').sock
+
+[ide.nvim]
+# Enable neovim integration
+enabled = true
+
+# Explicit socket path (optional - auto-discovers from tmux or $NVIM_LISTEN_ADDRESS)
+# socket = "/tmp/nvim.sock"
+
+# Show diff/file previews in nvim before approving changes
+show_diffs = true
+
+# Automatically reload buffers after file modifications
+auto_reload = true
