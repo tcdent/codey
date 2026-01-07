@@ -84,3 +84,12 @@ debug = true
 
 [features]
 default = []
+# Enable performance profiling with JSON export
+# Build with: cargo build --release --features profiling
+profiling = ["dep:sysinfo"]
+
+[dependencies.sysinfo]
+version = "0.33"
+optional = true
+default-features = false
+features = ["system"]

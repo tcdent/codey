@@ -5,6 +5,8 @@ mod compaction;
 mod config;
 mod ide;
 mod llm;
+#[cfg(feature = "profiling")]
+mod profiler;
 mod tool_filter;
 mod tools;
 mod transcript;
@@ -32,6 +34,12 @@ struct Args {
     /// OAuth login - without code prints auth URL, with code exchanges for token
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     login: Option<String>,
+
+    /// Enable performance profiling (requires --features profiling)
+    /// Exports profile data to the specified path on exit
+    #[cfg(feature = "profiling")]
+    #[arg(long, value_name = "OUTPUT_PATH")]
+    profile: Option<PathBuf>,
 }
 
 /// Handle the OAuth login flow
@@ -109,7 +117,31 @@ async fn main() -> Result<()> {
         std::env::set_current_dir(working_dir)?;
     }
 
+    // Initialize profiling if enabled
+    #[cfg(feature = "profiling")]
+    let profile_output = args.profile.clone();
+    #[cfg(feature = "profiling")]
+    if profile_output.is_some() {
+        let terminal_size = crossterm::terminal::size().unwrap_or((80, 24));
+        profiler::init(terminal_size);
+        tracing::info!("Performance profiling enabled");
+    }
+
     // Run the application
     let mut app = app::App::new(config, args.r#continue).await?;
-    app.run().await
+    let result = app.run().await;
+
+    // Export profiling data if enabled
+    #[cfg(feature = "profiling")]
+    if let Some(path) = profile_output {
+        profiler::stop();
+        if let Err(e) = profiler::export_json(&path) {
+            tracing::error!("Failed to export profile data: {}", e);
+            eprintln!("Failed to export profile data to {}: {}", path.display(), e);
+        } else {
+            eprintln!("Profile data exported to: {}", path.display());
+        }
+    }
+
+    result
 }

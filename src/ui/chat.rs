@@ -27,6 +27,8 @@ use ratatui::{
     Terminal,
 };
 
+#[cfg(feature = "profiling")]
+use crate::profile_span;
 use crate::transcript::{Role, Status, Transcript, Turn, Block};
 
 /// Chat view with native scrollback support.
@@ -132,6 +134,9 @@ impl ChatView {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) {
+        #[cfg(feature = "profiling")]
+        let _span = profile_span!("ChatView::render");
+
         // Render non-frozen turns to lines
         let mut active_lines: Vec<Line<'static>> = Vec::new();
         for turn in self.transcript.turns() {
@@ -202,6 +207,9 @@ impl ChatView {
 
     /// Render a turn to lines (header + content + separator)
     fn render_turn_to_lines(turn: &Turn, width: u16) -> Vec<Line<'static>> {
+        #[cfg(feature = "profiling")]
+        let _span = profile_span!("ChatView::render_turn_to_lines");
+
         let mut lines = Vec::new();
 
         // Role header
@@ -264,6 +272,9 @@ pub struct ChatViewWidget<'a> {
 
 impl Widget for ChatViewWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        #[cfg(feature = "profiling")]
+        let _span = profile_span!("ChatViewWidget::render");
+
         if area.width == 0 || area.height == 0 {
             return;
         }
