@@ -580,9 +580,11 @@ impl App {
                     self.input.set_content(&completed);
                 }
             },
-            Action::Resize(_w, _h) => {
-                // TODO trigger redraw with new dimensions
-                return ActionResult::NoOp;
+            Action::Resize(w, _h) => {
+                // Update chat view width for text wrapping
+                self.chat.set_width(w);
+                // Re-render and draw with new dimensions
+                self.chat.render(&mut self.terminal);
             },
         }
 
