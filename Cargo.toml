@@ -23,6 +23,11 @@ genai = "0.4.4"
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
 futures = "0.3"
 
+# Web content extraction (reader view)
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+readability = "0.3"
+htmd = "0.1"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

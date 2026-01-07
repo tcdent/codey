@@ -10,7 +10,7 @@ mod pipeline;
 
 pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
 pub use impls::{
-    EditFileTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, TaskTool,
+    EditFileTool, FetchHtmlTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, TaskTool,
     WebSearchTool, WriteFileTool,
 };
 pub use pipeline::{Tool, Effect};
@@ -36,6 +36,7 @@ impl ToolRegistry {
         registry.register(Arc::new(EditFileTool));
         registry.register(Arc::new(ShellTool::new()));
         registry.register(Arc::new(FetchUrlTool));
+        registry.register(Arc::new(FetchHtmlTool));
         registry.register(Arc::new(WebSearchTool));
         registry.register(Arc::new(OpenFileTool));
         registry.register(Arc::new(TaskTool));
@@ -51,6 +52,7 @@ impl ToolRegistry {
         registry.register(Arc::new(ReadFileTool));
         registry.register(Arc::new(ShellTool::new()));
         registry.register(Arc::new(FetchUrlTool));
+        registry.register(Arc::new(FetchHtmlTool));
         registry.register(Arc::new(WebSearchTool));
         registry.register(Arc::new(OpenFileTool));
 
