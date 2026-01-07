@@ -3,15 +3,18 @@
 //! Fetches web pages using a headless browser, extracts readable content
 //! using the readability algorithm, and converts to markdown.
 
-use super::{handlers, Tool, ToolPipeline};
-use crate::impl_base_block;
-use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+use super::{handlers, Tool, ToolPipeline};
+use crate::impl_base_block;
+use crate::transcript::{
+    render_approval_prompt, render_result, Block, BlockType, Status, ToolBlock,
+};
 
 /// Fetch HTML display block
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,7 +27,11 @@ pub struct FetchHtmlBlock {
 }
 
 impl FetchHtmlBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value) -> Self {
+    pub fn new(
+        call_id: impl Into<String>,
+        tool_name: impl Into<String>,
+        params: serde_json::Value,
+    ) -> Self {
         Self {
             call_id: call_id.into(),
             tool_name: tool_name.into(),
@@ -104,10 +111,8 @@ impl Tool for FetchHtmlTool {
 
     fn description(&self) -> &'static str {
         "Fetch a web page and extract readable content as markdown. \
-         Uses a headless browser to render JavaScript-heavy pages (SPAs). \
-         Applies the readability algorithm (like Safari Reader View) to extract main content, \
-         removing navigation, ads, and clutter. Returns token-optimized markdown. \
-         Requires Chrome or Chromium to be installed."
+        Use this tool when you encounter html pages or SPA applicaitons to extract the main content. \
+        Save context by using this tool whenever you encounter URLs you expect to be html pages."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -153,7 +158,7 @@ impl Tool for FetchHtmlTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
+    use crate::tools::{ToolCall, ToolDecision, ToolExecutor, ToolRegistry};
 
     #[tokio::test]
     async fn test_fetch_html_invalid_url() {
