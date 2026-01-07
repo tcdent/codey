@@ -2,6 +2,8 @@
 
 A terminal-based AI coding assistant built in Rust.
 
+<img width="905" height="1143" alt="Screenshot 2026-01-06 at 4 10 53 PM" src="https://github.com/user-attachments/assets/e23f2009-1e64-4068-8a86-991a655bae10" />
+
 ## Features
 
 - **Real-time Streaming**: See responses as they're generated with live markdown rendering
