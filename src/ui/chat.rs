@@ -113,6 +113,11 @@ impl ChatView {
         self.transcript.add_turn(role, block)
     }
 
+    /// Update the terminal width (e.g., on resize)
+    pub fn set_width(&mut self, width: u16) {
+        self.width = width;
+    }
+
     /// Replace the transcript and reset view state (used after compaction rotation)
     /// Renders the new transcript fully to scrollback
     pub fn reset_transcript(
