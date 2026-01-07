@@ -17,7 +17,8 @@
 use std::collections::{HashSet, HashMap, VecDeque};
 use std::io::Stdout;
 
-use ratatui::{
+use chrono::Local;
+use ratatui:{
     backend::CrosstermBackend,
     buffer::Buffer,
     layout::Rect,
@@ -239,10 +240,12 @@ impl ChatView {
             ),
         };
 
+        // Convert UTC timestamp to local time for display
+        let local_time = turn.timestamp.with_timezone(&Local);
         let header = Line::from(vec![
             Span::styled(role_text, role_style),
             Span::styled(
-                format!(" ({})", turn.timestamp.format("%H:%M:%S")),
+                format!(" ({})", local_time.format("%H:%M:%S")),
                 Style::default().fg(Color::DarkGray),
             ),
         ]);
