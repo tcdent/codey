@@ -109,9 +109,13 @@ struct ReadFileParams {
     end_line: Option<i32>,
 }
 
+impl ReadFileTool {
+    pub const NAME: &'static str = "mcp_read_file";
+}
+
 impl Tool for ReadFileTool {
     fn name(&self) -> &'static str {
-        "read_file"
+        Self::NAME
     }
 
     fn description(&self) -> &'static str {
@@ -184,7 +188,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "read_file".to_string(),
+            name: ReadFileTool::NAME.to_string(),
             params: json!({ "path": file_path.to_str().unwrap() }),
             decision: ToolDecision::Approve,
         }]);
@@ -208,7 +212,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "read_file".to_string(),
+            name: ReadFileTool::NAME.to_string(),
             params: json!({ "path": "/nonexistent/file.txt" }),
             decision: ToolDecision::Approve,
         }]);
@@ -235,7 +239,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "read_file".to_string(),
+            name: ReadFileTool::NAME.to_string(),
             params: json!({
                 "path": file_path.to_str().unwrap(),
                 "start_line": 2,

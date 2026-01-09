@@ -35,6 +35,9 @@ use fancy_regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::tools::ToolDecision;
+use crate::tools::{
+    EditFileTool, FetchUrlTool, ReadFileTool, ShellTool, WebSearchTool, WriteFileTool,
+};
 
 /// Filter configuration with allow and deny pattern lists
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -94,12 +97,12 @@ impl CompiledToolFilter {
 /// Get the primary parameter name for a tool
 fn primary_param(tool_name: &str) -> &'static str {
     match tool_name {
-        "shell" => "command",
-        "read_file" => "path",
-        "write_file" => "path",
-        "edit_file" => "path",
-        "fetch_url" => "url",
-        "web_search" => "query",
+        x if x == ShellTool::NAME => "command",
+        x if x == ReadFileTool::NAME => "path",
+        x if x == WriteFileTool::NAME => "path",
+        x if x == EditFileTool::NAME => "path",
+        x if x == FetchUrlTool::NAME => "url",
+        x if x == WebSearchTool::NAME => "query",
         _ => "command", // Default fallback
     }
 }
@@ -158,7 +161,7 @@ mod tests {
             allow: vec![r"^ls\b".to_string(), r"^cat\b".to_string()],
             deny: vec![],
         };
-        let filter = CompiledToolFilter::compile("shell", &config).unwrap();
+        let filter = CompiledToolFilter::compile(ShellTool::NAME, &config).unwrap();
 
         assert_eq!(filter.evaluate("ls -la"), Some(ToolDecision::Approve));
         assert_eq!(filter.evaluate("cat file.txt"), Some(ToolDecision::Approve));
@@ -171,7 +174,7 @@ mod tests {
             allow: vec![],
             deny: vec![r"rm\s+-rf\s+/".to_string(), r"sudo\s+rm".to_string()],
         };
-        let filter = CompiledToolFilter::compile("shell", &config).unwrap();
+        let filter = CompiledToolFilter::compile(ShellTool::NAME, &config).unwrap();
 
         assert_eq!(filter.evaluate("rm -rf /"), Some(ToolDecision::Deny));
         assert_eq!(filter.evaluate("sudo rm -rf"), Some(ToolDecision::Deny));
@@ -184,7 +187,7 @@ mod tests {
             allow: vec![r"^ls".to_string()],
             deny: vec![r"sudo".to_string()],
         };
-        let filter = CompiledToolFilter::compile("shell", &config).unwrap();
+        let filter = CompiledToolFilter::compile(ShellTool::NAME, &config).unwrap();
 
         // "sudo ls" matches both allow (^ls) and deny (sudo), deny wins
         assert_eq!(filter.evaluate("sudo ls"), Some(ToolDecision::Deny));
@@ -199,19 +202,19 @@ mod tests {
         };
 
         let mut configs = HashMap::new();
-        configs.insert("shell".to_string(), config);
+        configs.insert(ShellTool::NAME.to_string(), config);
         let filters = ToolFilters::compile(&configs).unwrap();
 
         assert_eq!(
-            filters.evaluate("shell", &json!({"command": "ls -la"})),
+            filters.evaluate(ShellTool::NAME, &json!({"command": "ls -la"})),
             Some(ToolDecision::Approve)
         );
         assert_eq!(
-            filters.evaluate("shell", &json!({"command": "rm -rf /"})),
+            filters.evaluate(ShellTool::NAME, &json!({"command": "rm -rf /"})),
             Some(ToolDecision::Deny)
         );
         assert_eq!(
-            filters.evaluate("shell", &json!({"command": "echo hello"})),
+            filters.evaluate(ShellTool::NAME, &json!({"command": "echo hello"})),
             None
         );
     }
@@ -224,19 +227,19 @@ mod tests {
         };
 
         let mut configs = HashMap::new();
-        configs.insert("read_file".to_string(), config);
+        configs.insert(ReadFileTool::NAME.to_string(), config);
         let filters = ToolFilters::compile(&configs).unwrap();
 
         assert_eq!(
-            filters.evaluate("read_file", &json!({"path": "src/main.rs"})),
+            filters.evaluate(ReadFileTool::NAME, &json!({"path": "src/main.rs"})),
             Some(ToolDecision::Approve)
         );
         assert_eq!(
-            filters.evaluate("read_file", &json!({"path": ".env"})),
+            filters.evaluate(ReadFileTool::NAME, &json!({"path": ".env"})),
             Some(ToolDecision::Deny)
         );
         assert_eq!(
-            filters.evaluate("read_file", &json!({"path": "README.md"})),
+            filters.evaluate(ReadFileTool::NAME, &json!({"path": "README.md"})),
             None
         );
     }
@@ -249,12 +252,12 @@ mod tests {
         };
 
         let mut configs = HashMap::new();
-        configs.insert("shell".to_string(), config);
+        configs.insert(ShellTool::NAME.to_string(), config);
         let filters = ToolFilters::compile(&configs).unwrap();
 
         // Missing "command" param should result in None
         assert_eq!(
-            filters.evaluate("shell", &json!({"other_param": "value"})),
+            filters.evaluate(ShellTool::NAME, &json!({"other_param": "value"})),
             None
         );
     }
@@ -265,7 +268,7 @@ mod tests {
             allow: vec![r"[invalid".to_string()],
             deny: vec![],
         };
-        let result = CompiledToolFilter::compile("shell", &config);
+        let result = CompiledToolFilter::compile(ShellTool::NAME, &config);
         assert!(result.is_err());
     }
 
@@ -277,7 +280,7 @@ mod tests {
         };
 
         let mut configs = HashMap::new();
-        configs.insert("shell".to_string(), config);
+        configs.insert(ShellTool::NAME.to_string(), config);
         let filters = ToolFilters::compile(&configs).unwrap();
 
         // Unknown tool returns None
@@ -290,12 +293,12 @@ mod tests {
     #[test]
     fn test_empty_config_skipped() {
         let mut configs = HashMap::new();
-        configs.insert("shell".to_string(), ToolFilterConfig::default());
+        configs.insert(ShellTool::NAME.to_string(), ToolFilterConfig::default());
         let filters = ToolFilters::compile(&configs).unwrap();
 
         // Empty config means no filter registered
         assert_eq!(
-            filters.evaluate("shell", &json!({"command": "ls"})),
+            filters.evaluate(ShellTool::NAME, &json!({"command": "ls"})),
             None
         );
     }

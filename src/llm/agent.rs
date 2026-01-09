@@ -18,11 +18,11 @@ use crate::tools::{ToolCall, ToolDecision, ToolRegistry};
 const ANTHROPIC_BETA_HEADER: &str = concat!(
     "oauth-2025-04-20,",
     "claude-code-20250219,",
-    "interleaved-thinking-2025-05-14,",
-    "fine-grained-tool-streaming-2025-05-14",
+    "interleaved-thinking-2025-05-14",
+    // Removed: causes OAuth rejection before tool calls are processed
+    // "fine-grained-tool-streaming-2025-05-14",
 );
-const ANTHROPIC_USER_AGENT: &str =
-    "ai-sdk/anthropic/2.0.50 ai-sdk/provider-utils/3.0.18 runtime/bun/1.3.4";
+const ANTHROPIC_USER_AGENT: &str = "claude-cli/2.1.2 (external, cli)";
 
 // Only expose internal ToolCall
 // Note: agent_id is set to 0 here - the caller (App) should set the correct ID

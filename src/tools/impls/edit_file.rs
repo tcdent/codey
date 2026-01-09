@@ -185,9 +185,13 @@ struct SearchReplace {
     new_string: String,
 }
 
+impl EditFileTool {
+    pub const NAME: &'static str = "mcp_edit_file";
+}
+
 impl Tool for EditFileTool {
     fn name(&self) -> &'static str {
-        "edit_file"
+        Self::NAME
     }
 
     fn description(&self) -> &'static str {
@@ -324,7 +328,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "edit_file".to_string(),
+            name: EditFileTool::NAME.to_string(),
             params: json!({
                 "path": file_path.to_str().unwrap(),
                 "edits": [{
@@ -357,7 +361,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "edit_file".to_string(),
+            name: EditFileTool::NAME.to_string(),
             params: json!({
                 "path": file_path.to_str().unwrap(),
                 "edits": [
@@ -387,7 +391,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "edit_file".to_string(),
+            name: EditFileTool::NAME.to_string(),
             params: json!({
                 "path": "/nonexistent/file.rs",
                 "edits": [{ "old_string": "foo", "new_string": "bar" }]
@@ -416,7 +420,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "edit_file".to_string(),
+            name: EditFileTool::NAME.to_string(),
             params: json!({
                 "path": file_path.to_str().unwrap(),
                 "edits": [{ "old_string": "foo", "new_string": "bar" }]
@@ -445,7 +449,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "edit_file".to_string(),
+            name: EditFileTool::NAME.to_string(),
             params: json!({
                 "path": file_path.to_str().unwrap(),
                 "edits": [{ "old_string": "goodbye", "new_string": "farewell" }]

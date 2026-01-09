@@ -118,9 +118,13 @@ struct ShellParams {
     working_dir: Option<String>,
 }
 
+impl ShellTool {
+    pub const NAME: &'static str = "mcp_shell";
+}
+
 impl Tool for ShellTool {
     fn name(&self) -> &'static str {
-        "shell"
+        Self::NAME
     }
 
     fn description(&self) -> &'static str {
@@ -185,7 +189,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "shell".to_string(),
+            name: ShellTool::NAME.to_string(),
             params: json!({ "command": "echo 'hello world'" }),
             decision: ToolDecision::Approve,
         }]);
@@ -206,7 +210,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "shell".to_string(),
+            name: ShellTool::NAME.to_string(),
             params: json!({
                 "command": "pwd",
                 "working_dir": "/tmp"
@@ -230,7 +234,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "shell".to_string(),
+            name: ShellTool::NAME.to_string(),
             params: json!({ "command": "exit 1" }),
             decision: ToolDecision::Approve,
         }]);
@@ -251,7 +255,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "shell".to_string(),
+            name: ShellTool::NAME.to_string(),
             params: json!({ "command": "echo 'error message' >&2" }),
             decision: ToolDecision::Approve,
         }]);
@@ -273,7 +277,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "shell".to_string(),
+            name: ShellTool::NAME.to_string(),
             params: json!({
                 "command": "ls",
                 "working_dir": "/nonexistent/directory"

@@ -105,9 +105,13 @@ struct TaskParams {
     context: Option<String>,
 }
 
+impl TaskTool {
+    pub const NAME: &'static str = "mcp_task";
+}
+
 impl Tool for TaskTool {
     fn name(&self) -> &'static str {
-        "task"
+        Self::NAME
     }
 
     fn description(&self) -> &'static str {

@@ -101,9 +101,13 @@ fn default_count() -> u32 {
     10
 }
 
+impl WebSearchTool {
+    pub const NAME: &'static str = "mcp_web_search";
+}
+
 impl Tool for WebSearchTool {
     fn name(&self) -> &'static str {
-        "web_search"
+        Self::NAME
     }
 
     fn description(&self) -> &'static str {

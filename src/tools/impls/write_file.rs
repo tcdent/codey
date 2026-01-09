@@ -110,9 +110,13 @@ struct WriteFileParams {
     content: String,
 }
 
+impl WriteFileTool {
+    pub const NAME: &'static str = "mcp_write_file";
+}
+
 impl Tool for WriteFileTool {
     fn name(&self) -> &'static str {
-        "write_file"
+        Self::NAME
     }
 
     fn description(&self) -> &'static str {
@@ -218,7 +222,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "write_file".to_string(),
+            name: WriteFileTool::NAME.to_string(),
             params: json!({
                 "path": file_path.to_str().unwrap(),
                 "content": "Hello, World!\nLine 2"
@@ -248,7 +252,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "write_file".to_string(),
+            name: WriteFileTool::NAME.to_string(),
             params: json!({
                 "path": file_path.to_str().unwrap(),
                 "content": "new content"
@@ -276,7 +280,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "write_file".to_string(),
+            name: WriteFileTool::NAME.to_string(),
             params: json!({
                 "path": file_path.to_str().unwrap(),
                 "content": "nested content"

@@ -95,9 +95,13 @@ struct FetchUrlParams {
     max_length: Option<usize>,
 }
 
+impl FetchUrlTool {
+    pub const NAME: &'static str = "mcp_fetch_url";
+}
+
 impl Tool for FetchUrlTool {
     fn name(&self) -> &'static str {
-        "fetch_url"
+        Self::NAME
     }
 
     fn description(&self) -> &'static str {
@@ -160,7 +164,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "fetch_url".to_string(),
+            name: FetchUrlTool::NAME.to_string(),
             params: json!({ "url": "not a valid url" }),
             decision: ToolDecision::Approve,
         }]);
@@ -181,7 +185,7 @@ mod tests {
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "test".to_string(),
-            name: "fetch_url".to_string(),
+            name: FetchUrlTool::NAME.to_string(),
             params: json!({ "url": "ftp://example.com/file" }),
             decision: ToolDecision::Approve,
         }]);

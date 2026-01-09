@@ -19,9 +19,13 @@ struct OpenFileParams {
     line: Option<u32>,
 }
 
+impl OpenFileTool {
+    pub const NAME: &'static str = "mcp_open_file";
+}
+
 impl Tool for OpenFileTool {
     fn name(&self) -> &'static str {
-        "open_file"
+        Self::NAME
     }
 
     fn description(&self) -> &'static str {

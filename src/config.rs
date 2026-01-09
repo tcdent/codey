@@ -7,6 +7,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::tool_filter::ToolFilterConfig;
+use crate::tools::{
+    EditFileTool, FetchUrlTool, ReadFileTool, ShellTool, WebSearchTool, WriteFileTool,
+};
 
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,12 +230,12 @@ impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
             enabled: vec![
-                "read_file".to_string(),
-                "write_file".to_string(),
-                "edit_file".to_string(),
-                "shell".to_string(),
-                "fetch_url".to_string(),
-                "web_search".to_string(),
+                ReadFileTool::NAME.to_string(),
+                WriteFileTool::NAME.to_string(),
+                EditFileTool::NAME.to_string(),
+                ShellTool::NAME.to_string(),
+                FetchUrlTool::NAME.to_string(),
+                WebSearchTool::NAME.to_string(),
             ],
             shell: ToolFilterConfig::default(),
             read_file: ToolFilterConfig::default(),
@@ -248,12 +251,12 @@ impl ToolsConfig {
     /// Build a HashMap of tool filters for compilation
     pub fn filters(&self) -> HashMap<String, ToolFilterConfig> {
         let mut map = HashMap::new();
-        map.insert("shell".to_string(), self.shell.clone());
-        map.insert("read_file".to_string(), self.read_file.clone());
-        map.insert("write_file".to_string(), self.write_file.clone());
-        map.insert("edit_file".to_string(), self.edit_file.clone());
-        map.insert("fetch_url".to_string(), self.fetch_url.clone());
-        map.insert("web_search".to_string(), self.web_search.clone());
+        map.insert(ShellTool::NAME.to_string(), self.shell.clone());
+        map.insert(ReadFileTool::NAME.to_string(), self.read_file.clone());
+        map.insert(WriteFileTool::NAME.to_string(), self.write_file.clone());
+        map.insert(EditFileTool::NAME.to_string(), self.edit_file.clone());
+        map.insert(FetchUrlTool::NAME.to_string(), self.fetch_url.clone());
+        map.insert(WebSearchTool::NAME.to_string(), self.web_search.clone());
         map
     }
 }
@@ -331,7 +334,7 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.agents.foreground.model, "claude-opus-4-5-20251101");
-        assert!(config.tools.enabled.contains(&"read_file".to_string()));
+        assert!(config.tools.enabled.contains(&ReadFileTool::NAME.to_string()));
     }
 
     #[test]
