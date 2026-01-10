@@ -91,7 +91,7 @@ impl AgentConfig {
         Self {
             model: "claude-opus-4-5-20251101".to_string(),
             max_tokens: 4096,
-            thinking_budget: 1_000,
+            thinking_budget: 1_024,  // Anthropic minimum is 1024
             tool_access: ToolAccess::ReadOnly,
         }
     }
@@ -370,7 +370,7 @@ tool_access = "full"
 [agents.background]
 model = "claude-sonnet-4-20250514"
 max_tokens = 4096
-thinking_budget = 1000
+thinking_budget = 1024
 tool_access = "read_only"
 "#;
         let config: Config = toml::from_str(toml).unwrap();

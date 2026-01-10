@@ -13,7 +13,7 @@ pub use impls::{
     EditFileTool, FetchHtmlTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, TaskTool,
     WebSearchTool, WriteFileTool,
 };
-pub use pipeline::{Tool, Effect};
+pub use pipeline::{Tool, Effect, Step};
 
 use std::collections::HashMap;
 use std::sync::Arc;

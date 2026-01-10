@@ -143,15 +143,13 @@ impl Tool for TaskTool {
             Err(e) => return ToolPipeline::error(format!("Invalid params: {}", e)),
         };
 
-        let message = format!("Spawning background agent for task: {}", parsed.task);
-
+        // SpawnAgent effect runs the background agent and returns its output
         ToolPipeline::new()
             .await_approval()
             .then(handlers::SpawnAgent {
                 task: parsed.task,
                 context: parsed.context,
             })
-            .then(handlers::Output { content: message })
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {

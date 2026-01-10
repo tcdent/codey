@@ -342,6 +342,11 @@ impl Agent {
         Ok(false)
     }
 
+    /// Set OAuth credentials (used when credentials are refreshed externally)
+    pub fn set_oauth(&mut self, oauth: Option<OAuthCredentials>) {
+        self.oauth = oauth;
+    }
+
     /// Get total usage statistics
     pub fn total_usage(&self) -> Usage {
         self.total_usage
