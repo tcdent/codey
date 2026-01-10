@@ -11,7 +11,10 @@ use crate::tools::pipeline::{Effect, Step, ToolPipeline};
 use crate::tools::ToolRegistry;
 
 /// Result of executing a delegated effect
-pub type EffectResult = Result<(), String>;
+/// Ok(None) = success, continue pipeline
+/// Ok(Some(output)) = success, set this as pipeline output
+/// Err(msg) = failure, abort pipeline
+pub type EffectResult = Result<Option<String>, String>;
 
 /// A tool call pending execution
 #[derive(Debug, Clone)]
@@ -271,8 +274,15 @@ impl ToolExecutor {
         let mut cx = Context::from_waker(&waker);
         
         match Pin::new(rx).poll(&mut cx) {
-            Poll::Ready(Ok(Ok(()))) => {
+            Poll::Ready(Ok(Ok(None))) => {
+                // Effect completed, no output - continue pipeline
                 active.pending_effect = None;
+                None
+            },
+            Poll::Ready(Ok(Ok(Some(output)))) => {
+                // Effect completed with output - inject into pipeline
+                active.pending_effect = None;
+                active.output = output;
                 None
             },
             Poll::Ready(Ok(Err(msg))) => {

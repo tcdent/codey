@@ -673,15 +673,35 @@ impl App {
         }
     }
 
-    /// Start processing a message request
-    async fn handle_message(&mut self, request: MessageRequest) -> Result<()> {
-        // Refresh OAuth token for primary agent if needed
-        if let Some(agent_mutex) = self.agents.primary() {
-            let mut agent = agent_mutex.lock().await;
-            if let Err(e) = agent.refresh_oauth_if_needed().await {
-                tracing::warn!("Failed to refresh OAuth token: {}", e);
+    /// Refresh OAuth credentials if expired, updating both App and primary agent
+    async fn refresh_oauth(&mut self) {
+        if let Some(ref oauth) = self.oauth {
+            if oauth.is_expired() {
+                tracing::info!("Refreshing expired OAuth token");
+                match crate::auth::refresh_token(oauth).await {
+                    Ok(new_creds) => {
+                        if let Err(e) = new_creds.save() {
+                            tracing::warn!("Failed to save refreshed OAuth credentials: {}", e);
+                        }
+                        // Update App's copy
+                        self.oauth = Some(new_creds.clone());
+                        // Update primary agent's copy
+                        if let Some(agent_mutex) = self.agents.primary() {
+                            agent_mutex.lock().await.set_oauth(Some(new_creds));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to refresh OAuth token: {}", e);
+                    }
+                }
             }
         }
+    }
+
+    /// Start processing a message request
+    async fn handle_message(&mut self, request: MessageRequest) -> Result<()> {
+        // Refresh OAuth token if needed
+        self.refresh_oauth().await;
 
         match request {
             MessageRequest::Command(name, turn_id) => {
@@ -936,7 +956,7 @@ impl App {
                 ..
             } => {
                 let result = match self.apply_effect(agent_id, effect).await {
-                    Ok(()) => Ok(()),
+                    Ok(output) => Ok(output),
                     Err(e) => Err(e.to_string()),
                 };
                 // Send result back to executor (ignore if receiver dropped)
@@ -1036,14 +1056,18 @@ impl App {
         Ok(())
     }
 
-    /// Apply a tool effect. Returns Err to fail the pipeline.
-    async fn apply_effect(&mut self, _agent_id: AgentId, effect: Effect) -> Result<()> {
+    /// Apply a tool effect. Returns Ok(Some(output)) to set pipeline output.
+    async fn apply_effect(&mut self, _agent_id: AgentId, effect: Effect) -> Result<Option<String>> {
         tracing::debug!("Applying effect: {:?}", effect);
         match effect {
             Effect::SpawnAgent { task, context } => {
                 tracing::info!("SpawnAgent effect: task={}, context={:?}", task, context);
 
-                let tools = match self.config.agents.background.tool_access {
+                // Ensure OAuth is fresh before spawning sub-agent
+                self.refresh_oauth().await;
+
+                // Helper to create tool registry based on config
+                let create_tools = || match self.config.agents.background.tool_access {
                     ToolAccess::Full => ToolRegistry::new(),
                     ToolAccess::ReadOnly => ToolRegistry::read_only(),
                     ToolAccess::None => ToolRegistry::empty(),
@@ -1055,46 +1079,55 @@ impl App {
                     SUB_AGENT_PROMPT.to_string()
                 };
 
+                // Create agent with its own tool registry
                 let mut sub_agent = Agent::with_tools(
                     AgentRuntimeConfig::background(&self.config),
                     &system_prompt,
                     self.oauth.clone(),
-                    tools,
+                    create_tools(),
                 );
                 sub_agent.send_request(&task, RequestMode::Normal);
 
-                let sub_agent_id = self.agents.register(sub_agent);
-                tracing::info!("Spawned sub-agent {} for task: {}", sub_agent_id, task);
+                // Run the background agent to completion with separate tool registry
+                let output = crate::llm::background::run_agent(sub_agent, create_tools()).await?;
+                tracing::info!("Background agent completed, output length: {}", output.len());
+                Ok(Some(output))
             },
             Effect::IdeReloadBuffer { path } => {
                 if let Some(ide) = &self.ide {
                     ide.reload_buffer(&path.to_string_lossy()).await?;
                 }
+                Ok(None)
             },
             Effect::IdeOpen { path, line, column } => {
                 if let Some(ide) = &self.ide {
                     ide.navigate_to(&path.to_string_lossy(), line, column)
                         .await?;
                 }
+                Ok(None)
             },
             Effect::IdeShowPreview { preview } => {
                 if let Some(ide) = &self.ide {
                     ide.show_preview(&preview).await?;
                 }
+                Ok(None)
             },
             Effect::IdeShowDiffPreview { path, edits } => {
                 if let Some(ide) = &self.ide {
                     ide.show_diff_preview(&path.to_string_lossy(), &edits)
                         .await?;
                 }
+                Ok(None)
             },
             Effect::IdeClosePreview => {
                 if let Some(ide) = &self.ide {
                     ide.close_preview().await?;
                 }
+                Ok(None)
             },
             Effect::Notify { message } => {
                 self.alert = Some(message);
+                Ok(None)
             },
             Effect::IdeCheckUnsavedEdits { path } => {
                 if let Some(ide) = &self.ide {
@@ -1105,9 +1138,9 @@ impl App {
                         );
                     }
                 }
+                Ok(None)
             },
         }
-        Ok(())
     }
 }
 
