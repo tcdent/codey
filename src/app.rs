@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 
@@ -269,8 +269,10 @@ pub struct App {
     tool_executor: ToolExecutor,
     /// OAuth credentials for agent creation
     oauth: Option<crate::auth::OAuthCredentials>,
-    /// Pending approval responder (when tool is awaiting user decision)
-    pending_approval: Option<oneshot::Sender<ToolDecision>>,
+    /// Pending approval responders keyed by call_id (when tools are awaiting user decision)
+    pending_approvals: HashMap<String, oneshot::Sender<ToolDecision>>,
+    /// Call ID of the currently displayed tool awaiting approval (for UI)
+    active_approval: Option<String>,
 }
 
 impl App {
@@ -379,7 +381,8 @@ impl App {
             agents: AgentRegistry::new(),
             tool_executor: ToolExecutor::new(ToolRegistry::new()),
             oauth: None,
-            pending_approval: None,
+            pending_approvals: HashMap::new(),
+            active_approval: None,
         })
     }
 
@@ -859,18 +862,39 @@ impl App {
         Ok(())
     }
 
-    /// Execute a tool decision (approve/deny) for the current tool
+    /// Execute a tool decision (approve/deny) for the currently active tool
     async fn decide_pending_tool(&mut self, decision: ToolDecision) {
         tracing::debug!("decide_pending_tool: decision={:?}", decision);
 
-        // Take the responder
-        let responder = match self.pending_approval.take() {
-            Some(r) => r,
+        // Get the call_id of the tool we're deciding on
+        let call_id = match self.active_approval.take() {
+            Some(id) => id,
             None => {
-                tracing::warn!("No tool awaiting approval");
+                tracing::warn!("No active tool awaiting approval");
                 return;
             },
         };
+
+        self.send_tool_decision(&call_id, decision).await;
+    }
+
+    /// Send a tool decision for a specific call_id
+    async fn send_tool_decision(&mut self, call_id: &str, decision: ToolDecision) {
+        tracing::debug!("send_tool_decision: call_id={}, decision={:?}", call_id, decision);
+
+        // Take the responder for this specific call_id
+        let responder = match self.pending_approvals.remove(call_id) {
+            Some(r) => r,
+            None => {
+                tracing::warn!("No responder found for call_id: {}", call_id);
+                return;
+            },
+        };
+
+        // If this was the active approval, clear it
+        if self.active_approval.as_deref() == Some(call_id) {
+            self.active_approval = None;
+        }
 
         // Transition out of ToolApproval mode immediately so keystrokes aren't dropped
         self.input_mode = InputMode::Streaming;
@@ -885,12 +909,25 @@ impl App {
         self.draw();
 
         // Send decision to executor
-        tracing::debug!("decide_pending_tool: sending decision to executor");
+        tracing::debug!("send_tool_decision: sending decision for {} to executor", call_id);
         match responder.send(decision) {
-            Ok(()) => tracing::debug!("decide_pending_tool: decision sent successfully"),
+            Ok(()) => tracing::debug!("send_tool_decision: decision sent successfully"),
             Err(_) => {
-                tracing::warn!("decide_pending_tool: failed to send decision (receiver dropped)")
+                tracing::warn!("send_tool_decision: failed to send decision (receiver dropped)")
             },
+        }
+
+        // Check if there are more pending approvals
+        if let Some(next_call_id) = self.pending_approvals.keys().next().cloned() {
+            tracing::debug!("send_tool_decision: more pending approvals, next={}", next_call_id);
+            self.active_approval = Some(next_call_id.clone());
+            self.input_mode = InputMode::ToolApproval;
+            // Update the next tool's block status from Queued to Pending
+            if let Some(block) = self.chat.transcript.find_tool_block_mut(&next_call_id) {
+                block.set_status(Status::Pending);
+            }
+            self.chat.render(&mut self.terminal);
+            self.draw();
         }
     }
 
@@ -933,13 +970,23 @@ impl App {
                     );
                     self.draw();
 
-                    // Store responder for later decision
-                    self.pending_approval = Some(responder);
+                    // Store responder in map keyed by call_id
+                    self.pending_approvals.insert(call_id.clone(), responder);
+                    // Track which tool is currently being shown for approval
+                    // Only set if there isn't already an active approval (first-come-first-serve)
+                    if self.active_approval.is_none() {
+                        self.active_approval = Some(call_id.clone());
+                    } else {
+                        // Another tool is already active for approval - mark this one as queued
+                        if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
+                            block.set_status(Status::Queued);
+                        }
+                    }
 
                     match self.tool_filters.evaluate(&name, &params) {
                         Some(decision) => {
-                            // Auto-approve/deny based on filters
-                            self.decide_pending_tool(decision).await;
+                            // Auto-approve/deny based on filters - use specific call_id
+                            self.send_tool_decision(&call_id, decision).await;
                         },
                         None => {
                             // Ask user for approval - save transcript checkpoint while waiting
@@ -1022,9 +1069,10 @@ impl App {
                 }
 
                 if is_primary {
-                    // Tool is done - go back to streaming mode.
-                    // If there's another tool pending, AwaitingApproval will switch back.
-                    self.input_mode = InputMode::Streaming;
+                    // Tool is done - only switch to streaming if no more approvals pending
+                    if self.active_approval.is_none() {
+                        self.input_mode = InputMode::Streaming;
+                    }
 
                     // Render update
                     self.chat.render(&mut self.terminal);
@@ -1058,9 +1106,10 @@ impl App {
                 }
 
                 if is_primary {
-                    // Tool is done - go back to streaming mode.
-                    // If there's another tool pending, AwaitingApproval will switch back.
-                    self.input_mode = InputMode::Streaming;
+                    // Tool is done - only switch to streaming if no more approvals pending
+                    if self.active_approval.is_none() {
+                        self.input_mode = InputMode::Streaming;
+                    }
 
                     // Render update
                     self.chat.render(&mut self.terminal);

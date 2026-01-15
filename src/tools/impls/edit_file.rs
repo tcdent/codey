@@ -29,7 +29,7 @@ use crate::ide::Edit;
 use crate::impl_base_block;
 use crate::tools::pipeline::{EffectHandler, Step};
 use crate::transcript::{
-    render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
+    render_approval_prompt, render_queued_message, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
 };
 
 // =============================================================================
@@ -146,6 +146,8 @@ impl Block for EditFileBlock {
 
         if self.status == Status::Pending {
             lines.push(render_approval_prompt());
+        } else if self.status == Status::Queued {
+            lines.push(render_queued_message());
         }
 
         if !self.text.is_empty() {

@@ -2,7 +2,7 @@
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
-use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, ToolBlock, Status};
+use crate::transcript::{render_approval_prompt, render_queued_message, render_prefix, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -66,6 +66,8 @@ impl Block for TaskBlock {
 
         if self.status == Status::Pending {
             lines.push(render_approval_prompt());
+        } else if self.status == Status::Queued {
+            lines.push(render_queued_message());
         }
 
         if !self.text.is_empty() {

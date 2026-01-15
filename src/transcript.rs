@@ -30,6 +30,8 @@ pub enum Role {
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Pending,
+    /// Queued for approval (waiting behind another pending approval)
+    Queued,
     Running,
     Complete,
     Error,
@@ -97,6 +99,7 @@ pub trait Block: Send + Sync {
     fn render_status(&self) -> Span<'static> {
         let (icon, color) = match self.status() {
             Status::Pending => ("? ", Color::Yellow),
+            Status::Queued => ("… ", Color::DarkGray),
             Status::Running => ("⚙ ", Color::Blue),
             Status::Complete => ("✓ ", Color::Green),
             Status::Error => ("✗ ", Color::Red),
@@ -285,9 +288,11 @@ impl Block for ToolBlock {
             )));
         }
 
-        // Approval prompt if pending
+        // Approval prompt if pending, or "queued" message if waiting
         if self.status == Status::Pending {
             lines.push(render_approval_prompt());
+        } else if self.status == Status::Queued {
+            lines.push(render_queued_message());
         }
 
         // Result if completed
@@ -347,6 +352,14 @@ pub fn render_approval_prompt() -> Line<'static> {
         ),
         Span::styled("]o", Style::default().fg(Color::DarkGray)),
     ])
+}
+
+/// Helper: render queued message (for tools waiting behind another approval)
+pub fn render_queued_message() -> Line<'static> {
+    Line::from(Span::styled(
+        "  (queued)",
+        Style::default().fg(Color::DarkGray),
+    ))
 }
 
 /// Helper: render result with line limit
