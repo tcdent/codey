@@ -74,6 +74,7 @@ textwrap = "0.16.2"
 tokio-test = "0.4"
 tempfile = "3"
 pretty_assertions = "1"
+insta = "1.40"
 
 [profile.release]
 lto = true

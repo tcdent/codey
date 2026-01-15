@@ -758,6 +758,348 @@ fn cursor_position_in_wrapped(content: &str, byte_pos: usize, wrapped_lines: &[S
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// Helper to render InputBox to a TestBackend buffer and return the buffer content
+    fn render_input_box(input: &InputBox, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| {
+            let widget = input.widget("test-model", 1000);
+            frame.render_widget(widget, frame.area());
+        }).unwrap();
+
+        // Convert buffer to string representation
+        let buffer = terminal.backend().buffer();
+        let mut result = String::new();
+        for y in 0..height {
+            for x in 0..width {
+                let cell = buffer.cell((x, y)).unwrap();
+                result.push_str(cell.symbol());
+            }
+            result.push('\n');
+        }
+        result
+    }
+
+    /// Helper to get just the content area (inside the border)
+    fn render_input_content(input: &InputBox, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| {
+            let widget = input.widget("test-model", 1000);
+            frame.render_widget(widget, frame.area());
+        }).unwrap();
+
+        // Extract just the inner content (skip border)
+        let buffer = terminal.backend().buffer();
+        let mut result = String::new();
+        for y in 1..(height - 1) {
+            for x in 1..(width - 1) {
+                let cell = buffer.cell((x, y)).unwrap();
+                result.push_str(cell.symbol());
+            }
+            result.push('\n');
+        }
+        result
+    }
+
+    // ==================== Render Tests ====================
+
+    #[test]
+    fn test_render_empty_input_shows_placeholder() {
+        let input = InputBox::new();
+        let rendered = render_input_content(&input, 40, 5);
+
+        assert!(rendered.contains("Type your message here..."),
+            "Empty input should show placeholder text");
+    }
+
+    #[test]
+    fn test_render_typed_text_appears() {
+        let mut input = InputBox::new();
+        input.insert_char('H');
+        input.insert_char('e');
+        input.insert_char('l');
+        input.insert_char('l');
+        input.insert_char('o');
+
+        let rendered = render_input_content(&input, 40, 5);
+
+        assert!(rendered.contains("Hello"),
+            "Typed text 'Hello' should appear in rendered output. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_render_after_backspace() {
+        let mut input = InputBox::new();
+
+        // Type "Hello"
+        for c in "Hello".chars() {
+            input.insert_char(c);
+        }
+        assert_eq!(input.content(), "Hello");
+
+        // Backspace twice to get "Hel"
+        input.delete_char();
+        input.delete_char();
+        assert_eq!(input.content(), "Hel");
+
+        let rendered = render_input_content(&input, 40, 5);
+
+        assert!(rendered.contains("Hel"),
+            "After backspace, 'Hel' should appear. Got:\n{}", rendered);
+        assert!(!rendered.contains("Hello"),
+            "After backspace, 'Hello' should NOT appear. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_render_special_characters() {
+        let mut input = InputBox::new();
+
+        // Test various special characters
+        for c in "!@#$%^&*()".chars() {
+            input.insert_char(c);
+        }
+
+        let rendered = render_input_content(&input, 40, 5);
+
+        assert!(rendered.contains("!@#$%^&*()"),
+            "Special characters should render correctly. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_render_unicode_characters() {
+        let mut input = InputBox::new();
+
+        // Test unicode: emoji, CJK, accented chars
+        for c in "Hello".chars() {
+            input.insert_char(c);
+        }
+        input.insert_char(' ');
+        for c in "cafe".chars() {
+            input.insert_char(c);
+        }
+
+        let rendered = render_input_content(&input, 40, 5);
+
+        assert!(rendered.contains("Hello"),
+            "Unicode text should render. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_render_cursor_position_at_end() {
+        let mut input = InputBox::new();
+        for c in "Test".chars() {
+            input.insert_char(c);
+        }
+
+        // Cursor should be at position 4 (after "Test")
+        assert_eq!(input.cursor(), (0, 4));
+
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| {
+            let widget = input.widget("model", 1000);
+            frame.render_widget(widget, frame.area());
+        }).unwrap();
+
+        // The cursor cell should have inverted colors (bg=White, fg=Black)
+        let buffer = terminal.backend().buffer();
+        // Content starts at x=1, y=1 (inside border)
+        // Cursor should be at x=1+4=5, y=1
+        let cursor_cell = buffer.cell((5, 1)).unwrap();
+
+        assert_eq!(cursor_cell.bg, ratatui::style::Color::White,
+            "Cursor position should have White background");
+    }
+
+    #[test]
+    fn test_render_cursor_position_middle() {
+        let mut input = InputBox::new();
+        for c in "Hello".chars() {
+            input.insert_char(c);
+        }
+
+        // Move cursor to middle (after "He")
+        input.move_cursor_left(); // after "Hell"
+        input.move_cursor_left(); // after "Hel"
+        input.move_cursor_left(); // after "He"
+
+        assert_eq!(input.cursor(), (0, 2));
+
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| {
+            let widget = input.widget("model", 1000);
+            frame.render_widget(widget, frame.area());
+        }).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        // Cursor should be at x=1+2=3, y=1 (on the 'l')
+        let cursor_cell = buffer.cell((3, 1)).unwrap();
+
+        assert_eq!(cursor_cell.bg, ratatui::style::Color::White,
+            "Cursor at middle should have White background");
+        assert_eq!(cursor_cell.symbol(), "l",
+            "Cursor should be on 'l' character");
+    }
+
+    #[test]
+    fn test_render_backspace_at_different_positions() {
+        let mut input = InputBox::new();
+        for c in "ABCDE".chars() {
+            input.insert_char(c);
+        }
+
+        // Delete from end: "ABCDE" -> "ABCD"
+        input.delete_char();
+        assert_eq!(input.content(), "ABCD");
+
+        // Move to middle and delete: "ABCD" with cursor after B, delete B -> "ACD"
+        input.move_cursor_start();
+        input.move_cursor_right(); // after A
+        input.move_cursor_right(); // after B
+        input.delete_char();       // delete B
+        assert_eq!(input.content(), "ACD");
+
+        let rendered = render_input_content(&input, 40, 5);
+        assert!(rendered.contains("ACD"),
+            "Content should be 'ACD' after middle deletion. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_render_newline_wrapping() {
+        let mut input = InputBox::new();
+        for c in "Line1".chars() {
+            input.insert_char(c);
+        }
+        input.insert_newline();
+        for c in "Line2".chars() {
+            input.insert_char(c);
+        }
+
+        let rendered = render_input_content(&input, 40, 6);
+
+        // Both lines should be present
+        assert!(rendered.contains("Line1"),
+            "First line should appear. Got:\n{}", rendered);
+        assert!(rendered.contains("Line2"),
+            "Second line should appear. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_render_long_text_wraps() {
+        let mut input = InputBox::new();
+        let long_text = "This is a very long line that should wrap around";
+        for c in long_text.chars() {
+            input.insert_char(c);
+        }
+
+        // Render in a narrow box (20 chars wide, minus 2 for borders = 18 inner)
+        let rendered = render_input_content(&input, 20, 6);
+
+        // The text should be split across multiple lines
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert!(lines.len() >= 2,
+            "Long text should wrap to multiple lines. Got {} lines:\n{}", lines.len(), rendered);
+    }
+
+    #[test]
+    fn test_render_border_and_title() {
+        let input = InputBox::new();
+        let rendered = render_input_box(&input, 40, 5);
+
+        // Should contain the model name in title
+        assert!(rendered.contains("test-model"),
+            "Border should show model name. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_render_token_count_display() {
+        let input = InputBox::new();
+
+        // Render with 5000 tokens (should show "5k")
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| {
+            let widget = input.widget("model", 5000);
+            frame.render_widget(widget, frame.area());
+        }).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let mut full_render = String::new();
+        for y in 0..5 {
+            for x in 0..40 {
+                full_render.push_str(buffer.cell((x, y)).unwrap().symbol());
+            }
+            full_render.push('\n');
+        }
+
+        assert!(full_render.contains("5k"),
+            "Should display '5k' for 5000 tokens. Got:\n{}", full_render);
+    }
+
+    // ==================== Snapshot Tests ====================
+
+    #[test]
+    fn test_snapshot_empty_input() {
+        let input = InputBox::new();
+        let rendered = render_input_box(&input, 50, 5);
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn test_snapshot_with_text() {
+        let mut input = InputBox::new();
+        for c in "Hello, world!".chars() {
+            input.insert_char(c);
+        }
+        let rendered = render_input_box(&input, 50, 5);
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn test_snapshot_multiline() {
+        let mut input = InputBox::new();
+        for c in "First line".chars() {
+            input.insert_char(c);
+        }
+        input.insert_newline();
+        for c in "Second line".chars() {
+            input.insert_char(c);
+        }
+        let rendered = render_input_box(&input, 50, 6);
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn test_snapshot_special_chars() {
+        let mut input = InputBox::new();
+        for c in "Special: !@#$%^&*() <>[]{} '\"`~".chars() {
+            input.insert_char(c);
+        }
+        let rendered = render_input_box(&input, 50, 5);
+        insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn test_snapshot_wrapped_long_text() {
+        let mut input = InputBox::new();
+        let text = "This is a much longer piece of text that will definitely need to wrap across multiple lines when rendered in a narrow terminal window";
+        for c in text.chars() {
+            input.insert_char(c);
+        }
+        let rendered = render_input_box(&input, 40, 8);
+        insta::assert_snapshot!(rendered);
+    }
+
+    // ==================== Original Logic Tests ====================
 
     #[test]
     fn test_input_box_basic() {
