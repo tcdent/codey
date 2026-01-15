@@ -109,9 +109,7 @@ pub struct ReadFileTool;
 #[derive(Debug, Deserialize)]
 struct ReadFileParams {
     path: String,
-    #[allow(dead_code)]
     start_line: Option<i32>,
-    #[allow(dead_code)]
     end_line: Option<i32>,
 }
 
@@ -166,7 +164,11 @@ impl Tool for ReadFileTool {
         ToolPipeline::new()
             .then(handlers::ValidateFile { path: path.clone() })
             .await_approval()
-            .then(handlers::ReadFile { path })
+            .then(handlers::ReadFile {
+                path,
+                start_line: parsed.start_line,
+                end_line: parsed.end_line,
+            })
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value, background: bool) -> Box<dyn Block> {
@@ -242,8 +244,6 @@ mod tests {
         let file_path = dir.path().join("test.txt");
         fs::write(&file_path, "line 1\nline 2\nline 3\nline 4\nline 5\n").unwrap();
 
-        // Note: Line range filtering is not yet implemented in the effect interpreter
-        // This test just verifies the pipeline executes successfully
         let mut registry = ToolRegistry::empty();
         registry.register(std::sync::Arc::new(ReadFileTool));
         let mut executor = ToolExecutor::new(registry);
@@ -261,8 +261,53 @@ mod tests {
             background: false,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { .. }) = executor.next().await {
-            // success
+        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
+            // Should contain lines 2-4 only
+            assert!(content.contains("line 2"), "Should contain line 2");
+            assert!(content.contains("line 3"), "Should contain line 3");
+            assert!(content.contains("line 4"), "Should contain line 4");
+            // Should NOT contain lines 1 or 5
+            assert!(!content.contains("line 1"), "Should not contain line 1");
+            assert!(!content.contains("line 5"), "Should not contain line 5");
+            // Line numbers should be correct (2, 3, 4 not 1, 2, 3)
+            assert!(content.contains("   2│line 2"), "Line 2 should be numbered as 2");
+            assert!(content.contains("   3│line 3"), "Line 3 should be numbered as 3");
+            assert!(content.contains("   4│line 4"), "Line 4 should be numbered as 4");
+        } else {
+            panic!("Expected Completed event");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_read_file_with_end_of_file_marker() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "line 1\nline 2\nline 3\nline 4\nline 5\n").unwrap();
+
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ReadFileTool));
+        let mut executor = ToolExecutor::new(registry);
+
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "test".to_string(),
+            name: ReadFileTool::NAME.to_string(),
+            params: json!({
+                "path": file_path.to_str().unwrap(),
+                "start_line": 3,
+                "end_line": -1  // Read to end of file
+            }),
+            decision: ToolDecision::Approve,
+        }]);
+
+        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
+            // Should contain lines 3-5
+            assert!(content.contains("line 3"), "Should contain line 3");
+            assert!(content.contains("line 4"), "Should contain line 4");
+            assert!(content.contains("line 5"), "Should contain line 5");
+            // Should NOT contain lines 1 or 2
+            assert!(!content.contains("line 1"), "Should not contain line 1");
+            assert!(!content.contains("line 2"), "Should not contain line 2");
         } else {
             panic!("Expected Completed event");
         }

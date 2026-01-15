@@ -693,10 +693,10 @@ impl App {
                         if let Some(agent_mutex) = self.agents.primary() {
                             agent_mutex.lock().await.set_oauth(Some(new_creds));
                         }
-                    },
+                    }
                     Err(e) => {
                         tracing::warn!("Failed to refresh OAuth token: {}", e);
-                    },
+                    }
                 }
             }
         }
