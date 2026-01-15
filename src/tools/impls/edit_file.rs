@@ -305,7 +305,7 @@ mod tests {
             match executor.next().await {
                 Some(ToolEvent::Delegate { responder, .. }) => {
                     // Auto-respond with Ok to IDE effects
-                    let _ = responder.send(Ok(()));
+                    let _ = responder.send(Ok(None));
                 },
                 Some(event @ ToolEvent::Completed { .. }) => return event,
                 Some(event @ ToolEvent::Error { .. }) => return event,

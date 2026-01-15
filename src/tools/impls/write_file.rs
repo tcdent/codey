@@ -200,7 +200,7 @@ mod tests {
         loop {
             match executor.next().await {
                 Some(ToolEvent::Delegate { responder, .. }) => {
-                    let _ = responder.send(Ok(()));
+                    let _ = responder.send(Ok(None));
                 },
                 Some(event @ ToolEvent::Completed { .. }) => return event,
                 Some(event @ ToolEvent::Error { .. }) => return event,

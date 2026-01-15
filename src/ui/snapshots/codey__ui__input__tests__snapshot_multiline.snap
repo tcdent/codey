@@ -1,0 +1,11 @@
+---
+source: src/ui/input.rs
+assertion_line: 1078
+expression: rendered
+---
+┌ test-model ──────────────────────────────── 1k ┐
+│First line                                      │
+│Second line                                     │
+│                                                │
+│                                                │
+└────────────────────────────────────────────────┘
