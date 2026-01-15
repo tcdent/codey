@@ -37,7 +37,15 @@ pub struct SearchResult {
 }
 
 /// Read a file and format with line numbers
-pub fn read_file(path: &Path) -> Result<String, String> {
+///
+/// If `start_line` and/or `end_line` are provided, only the specified line range is returned.
+/// Line numbers are 1-indexed. Use -1 for `end_line` to read to the end of the file.
+/// The output line numbers always reflect the actual line numbers in the file.
+pub fn read_file(
+    path: &Path,
+    start_line: Option<i32>,
+    end_line: Option<i32>,
+) -> Result<String, String> {
     if !path.exists() {
         return Err(format!("File not found: {}", path.display()));
     }
@@ -50,13 +58,36 @@ pub fn read_file(path: &Path) -> Result<String, String> {
 
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
-    let line_num_width = total_lines.to_string().len().max(4);
+
+    // Convert to 0-indexed range, handling optional bounds
+    let start_idx = match start_line {
+        Some(s) if s > 0 => (s as usize).saturating_sub(1),
+        Some(s) if s < 0 => 0, // Negative start treated as beginning
+        _ => 0,
+    };
+
+    let end_idx = match end_line {
+        Some(e) if e == -1 => total_lines, // -1 means end of file
+        Some(e) if e > 0 => (e as usize).min(total_lines),
+        Some(e) if e < 0 => total_lines, // Other negative values also mean end
+        _ => total_lines,
+    };
+
+    // Validate range
+    if start_idx >= total_lines {
+        return Ok(String::new()); // Start is past end of file
+    }
+
+    let end_idx = end_idx.max(start_idx); // Ensure end >= start
+
+    // Calculate line number width based on the highest line number we'll show
+    let line_num_width = end_idx.to_string().len().max(4);
 
     let mut output = String::new();
-    for (i, line) in lines.iter().enumerate() {
+    for (i, line) in lines.iter().enumerate().skip(start_idx).take(end_idx - start_idx) {
         output.push_str(&format!(
             "{:>width$}│{}\n",
-            i + 1,
+            i + 1, // Line numbers are 1-indexed
             line,
             width = line_num_width
         ));

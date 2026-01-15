@@ -166,12 +166,14 @@ impl EffectHandler for Error {
 /// Read a file with line numbers
 pub struct ReadFile {
     pub path: PathBuf,
+    pub start_line: Option<i32>,
+    pub end_line: Option<i32>,
 }
 
 #[async_trait::async_trait]
 impl EffectHandler for ReadFile {
     async fn call(self: Box<Self>) -> Step {
-        match io::read_file(&self.path) {
+        match io::read_file(&self.path, self.start_line, self.end_line) {
             Ok(content) => Step::Output(content),
             Err(e) => Step::Error(e),
         }
