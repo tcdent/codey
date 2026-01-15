@@ -54,6 +54,10 @@ pub enum Effect {
     // === Agents ===
     SpawnAgent { task: String, context: Option<String> },
     Notify { message: String },
+    
+    // === Background Tasks ===
+    ListBackgroundTasks,
+    GetBackgroundTask { task_id: String },
 }
 
 /// When an effect should run
@@ -128,6 +132,11 @@ impl ToolPipeline {
     pub fn skip_to_finally(&mut self) {
         self.effects.retain(|e| matches!(e, EffectTiming::Finally(_)));
     }
+    
+    /// Check if pipeline has no more effects
+    pub fn is_empty(&self) -> bool {
+        self.effects.is_empty()
+    }
 
     /// Number of remaining effects (for testing)
     #[cfg(test)]
@@ -142,7 +151,7 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     fn schema(&self) -> serde_json::Value;
     fn compose(&self, params: serde_json::Value) -> ToolPipeline;
-    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block>;
+    fn create_block(&self, call_id: &str, params: serde_json::Value, background: bool) -> Box<dyn Block>;
 }
 
 #[cfg(test)]

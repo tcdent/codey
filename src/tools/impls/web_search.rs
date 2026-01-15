@@ -2,7 +2,7 @@
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
-use crate::transcript::{render_approval_prompt, render_result, Block, BlockType, Status, ToolBlock};
+use crate::transcript::{render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -18,22 +18,25 @@ pub struct WebSearchBlock {
     pub params: serde_json::Value,
     pub status: Status,
     pub text: String,
+    #[serde(default)]
+    pub background: bool,
 }
 
 impl WebSearchBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value) -> Self {
+    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
         Self {
             call_id: call_id.into(),
             tool_name: tool_name.into(),
             params,
             status: Status::Pending,
             text: String::new(),
+            background,
         }
     }
 
-    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value) -> Option<Self> {
+    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value, background: bool) -> Option<Self> {
         let _: WebSearchParams = serde_json::from_value(params.clone()).ok()?;
-        Some(Self::new(call_id, tool_name, params))
+        Some(Self::new(call_id, tool_name, params, background))
     }
 }
 
@@ -49,6 +52,7 @@ impl Block for WebSearchBlock {
         // Format: web_search(query)
         lines.push(Line::from(vec![
             self.render_status(),
+            render_prefix(self.background),
             Span::styled("web_search", Style::default().fg(Color::Magenta)),
             Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("\"{}\"", query), Style::default().fg(Color::Green)),
@@ -125,6 +129,10 @@ impl Tool for WebSearchTool {
                 "count": {
                     "type": "integer",
                     "description": "Number of results to return (default: 10, max: 20)"
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run in background. Returns immediately with a task_id; use list_background_tasks/get_background_task to check status and retrieve results."
                 }
             },
             "required": ["query"]
@@ -145,11 +153,11 @@ impl Tool for WebSearchTool {
             })
     }
 
-    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
-        if let Some(block) = WebSearchBlock::from_params(call_id, self.name(), params.clone()) {
+    fn create_block(&self, call_id: &str, params: serde_json::Value, background: bool) -> Box<dyn Block> {
+        if let Some(block) = WebSearchBlock::from_params(call_id, self.name(), params.clone(), background) {
             Box::new(block)
         } else {
-            Box::new(ToolBlock::new(call_id, self.name(), params))
+            Box::new(ToolBlock::new(call_id, self.name(), params, background))
         }
     }
 }

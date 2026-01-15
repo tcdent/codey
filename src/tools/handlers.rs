@@ -392,6 +392,34 @@ impl EffectHandler for Notify {
 }
 
 // =============================================================================
+// Background task handlers (delegate to app)
+// =============================================================================
+
+/// List all background tasks
+pub struct ListBackgroundTasks;
+
+#[async_trait::async_trait]
+impl EffectHandler for ListBackgroundTasks {
+    async fn call(self: Box<Self>) -> Step {
+        Step::Delegate(Effect::ListBackgroundTasks)
+    }
+}
+
+/// Get a specific background task result
+pub struct GetBackgroundTask {
+    pub task_id: String,
+}
+
+#[async_trait::async_trait]
+impl EffectHandler for GetBackgroundTask {
+    async fn call(self: Box<Self>) -> Step {
+        Step::Delegate(Effect::GetBackgroundTask {
+            task_id: self.task_id,
+        })
+    }
+}
+
+// =============================================================================
 // HTML content handlers
 // =============================================================================
 

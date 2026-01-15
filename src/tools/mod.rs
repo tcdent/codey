@@ -8,19 +8,18 @@ mod impls;
 mod io;
 mod pipeline;
 
-pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
-pub use impls::{
-    EditFileTool, FetchHtmlTool, FetchUrlTool, OpenFileTool, ReadFileTool, ShellTool, TaskTool,
-    WebSearchTool, WriteFileTool,
-};
-pub use pipeline::{Tool, Effect, Step};
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
-
+pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
+pub use impls::{
+    EditFileTool, FetchHtmlTool, FetchUrlTool, GetBackgroundTaskTool, ListBackgroundTasksTool,
+    OpenFileTool, ReadFileTool, ShellTool, TaskTool, WebSearchTool, WriteFileTool,
+};
+pub use pipeline::{Effect, Step, Tool};
 
 /// Registry of available tools
+#[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn Tool>>,
 }
@@ -40,6 +39,8 @@ impl ToolRegistry {
         registry.register(Arc::new(WebSearchTool));
         registry.register(Arc::new(OpenFileTool));
         registry.register(Arc::new(TaskTool));
+        registry.register(Arc::new(ListBackgroundTasksTool));
+        registry.register(Arc::new(GetBackgroundTaskTool));
 
         registry
     }
@@ -85,11 +86,5 @@ impl ToolRegistry {
 
     pub fn values(&self) -> impl Iterator<Item = &dyn Tool> {
         self.tools.values().map(|t| t.as_ref())
-    }
-}
-
-impl Default for ToolRegistry {
-    fn default() -> Self {
-        Self::new()
     }
 }

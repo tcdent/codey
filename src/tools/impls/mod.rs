@@ -1,3 +1,4 @@
+mod background_tasks;
 mod edit_file;
 mod fetch_html;
 mod fetch_url;
@@ -11,6 +12,7 @@ mod write_file;
 pub use super::handlers;
 pub use super::pipeline::{Tool, ToolPipeline};
 
+pub use background_tasks::{GetBackgroundTaskTool, ListBackgroundTasksTool};
 pub use edit_file::EditFileTool;
 pub use fetch_html::FetchHtmlTool;
 pub use fetch_url::FetchUrlTool;

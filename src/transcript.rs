@@ -233,16 +233,20 @@ pub struct ToolBlock {
     pub params: serde_json::Value,
     pub status: Status,
     pub text: String,
+    /// If true, tool runs in background
+    #[serde(default)]
+    pub background: bool,
 }
 
 impl ToolBlock {
-    pub fn new(call_id: impl Into<String>, name: impl Into<String>, params: serde_json::Value) -> Self {
+    pub fn new(call_id: impl Into<String>, name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
         Self {
             call_id: call_id.into(),
             name: name.into(),
             params,
             status: Status::Pending,
             text: String::new(),
+            background,
         }
     }
 }
@@ -254,9 +258,10 @@ impl Block for ToolBlock {
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
-        // Tool name with status icon
+        // Tool name with status icon and optional [bg] prefix
         lines.push(Line::from(vec![
             self.render_status(),
+            render_prefix(self.background),
             Span::styled(
                 &self.name,
                 Style::default()
@@ -311,6 +316,15 @@ impl Block for ToolBlock {
 
     fn params(&self) -> Option<&serde_json::Value> {
         Some(&self.params)
+    }
+}
+
+/// Helper: render prefix for background tools - "[bg] " if true, empty otherwise
+pub fn render_prefix(background: bool) -> Span<'static> {
+    if background {
+        Span::styled("[bg] ", Style::default().fg(Color::Cyan))
+    } else {
+        Span::raw("")
     }
 }
 
@@ -687,7 +701,7 @@ mod tests {
 
     #[test]
     fn test_tool_block_status() {
-        let mut block = ToolBlock::new("call_1", "test", serde_json::json!({}));
+        let mut block = ToolBlock::new("call_1", "test", serde_json::json!({}), false);
         assert_eq!(block.status(), Status::Pending);
 
         block.set_status(Status::Running);
@@ -762,7 +776,7 @@ mod tests {
         transcript.add_turn(Role::User, TextBlock::new("Run ls"));
         
         // Add an assistant turn with a tool block
-        let mut tool_block = ToolBlock::new("call_123", "shell", serde_json::json!({"command": "ls"}));
+        let mut tool_block = ToolBlock::new("call_123", "shell", serde_json::json!({"command": "ls"}), false);
         tool_block.set_status(Status::Complete);
         tool_block.append_text("file1.txt\nfile2.txt");
         transcript.add_turn(Role::Assistant, tool_block);
