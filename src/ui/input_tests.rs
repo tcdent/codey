@@ -79,7 +79,7 @@ fn test_render_empty_input_shows_placeholder() {
     let input = InputBox::new();
     let rendered = render_input_content(&input, 40, 5);
 
-    assert_eq!(rendered, "Type your message here...\n\n");
+    assert_eq!(rendered, expected_content(&["Type your message here..."], 40, 5));
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn test_render_typed_text_appears() {
 
     let rendered = render_input_content(&input, 40, 5);
 
-    assert_eq!(rendered, "Hello\n\n");
+    assert_eq!(rendered, expected_content(&["Hello"], 40, 5));
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn test_render_after_backspace() {
 
     let rendered = render_input_content(&input, 40, 5);
 
-    assert_eq!(rendered, "Hel\n\n");
+    assert_eq!(rendered, expected_content(&["Hel"], 40, 5));
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn test_render_special_characters() {
 
     let rendered = render_input_content(&input, 40, 5);
 
-    assert_eq!(rendered, "!@#$%^&*()\n\n");
+    assert_eq!(rendered, expected_content(&["!@#$%^&*()"], 40, 5));
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn test_render_unicode_characters() {
 
     let rendered = render_input_content(&input, 40, 5);
 
-    assert_eq!(rendered, "Hello cafe\n\n");
+    assert_eq!(rendered, expected_content(&["Hello cafe"], 40, 5));
 }
 
 #[test]
@@ -227,7 +227,7 @@ fn test_render_backspace_at_different_positions() {
     assert_eq!(input.content(), "ACD");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert_eq!(rendered, "ACD\n\n");
+    assert_eq!(rendered, expected_content(&["ACD"], 40, 5));
 }
 
 #[test]
@@ -243,7 +243,7 @@ fn test_render_newline_wrapping() {
 
     let rendered = render_input_content(&input, 40, 6);
 
-    assert_eq!(rendered, "Line1\nLine2\n\n");
+    assert_eq!(rendered, expected_content(&["Line1", "Line2"], 40, 6));
 }
 
 #[test]
@@ -372,7 +372,7 @@ fn test_insert_in_middle_of_text() {
     assert_eq!(input.cursor(), (0, 2)); // cursor after B
 
     let rendered = render_input_content(&input, 40, 5);
-    assert_eq!(rendered, "ABC\n\n");
+    assert_eq!(rendered, expected_content(&["ABC"], 40, 5));
 }
 
 #[test]
@@ -407,7 +407,7 @@ fn test_multiple_insertions_at_different_positions() {
     assert_eq!(input.cursor(), (0, 7));
 
     let rendered = render_input_content(&input, 40, 5);
-    assert_eq!(rendered, "0123456\n\n");
+    assert_eq!(rendered, expected_content(&["0123456"], 40, 5));
 }
 
 #[test]
@@ -430,7 +430,7 @@ fn test_delete_after_navigation() {
     assert_eq!(input.content(), "ADE");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert_eq!(rendered, "ADE\n\n");
+    assert_eq!(rendered, expected_content(&["ADE"], 40, 5));
 }
 
 #[test]
@@ -470,7 +470,7 @@ fn test_interleaved_navigation_insert_delete() {
     assert_eq!(input.content(), "Help!");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert_eq!(rendered, "Help!\n\n");
+    assert_eq!(rendered, expected_content(&["Help!"], 40, 5));
 }
 
 #[test]
@@ -525,7 +525,7 @@ fn test_rapid_insert_delete_cycle() {
     assert_eq!(input.content(), "aaaaa");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert_eq!(rendered, "aaaaa\n\n");
+    assert_eq!(rendered, expected_content(&["aaaaa"], 40, 5));
 }
 
 #[test]
@@ -548,7 +548,7 @@ fn test_navigate_and_overwrite_pattern() {
     assert_eq!(input.content(), "12345");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert_eq!(rendered, "12345\n\n");
+    assert_eq!(rendered, expected_content(&["12345"], 40, 5));
 }
 
 #[test]
@@ -613,7 +613,7 @@ fn test_delete_entire_content_and_retype() {
     assert_eq!(input.content(), "World");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert_eq!(rendered, "World\n\n");
+    assert_eq!(rendered, expected_content(&["World"], 40, 5));
 }
 
 #[test]
@@ -729,7 +729,7 @@ fn test_render_pasted_text_pill() {
 
     let rendered = render_input_content(&input, 50, 5);
 
-    assert_eq!(rendered, "[¶ pasted (19 chars)]\n\n");
+    assert_eq!(rendered, expected_content(&["[¶ pasted (19 chars)]"], 50, 5));
 }
 
 #[test]
@@ -744,7 +744,7 @@ fn test_render_ide_selection_pill() {
 
     let rendered = render_input_content(&input, 50, 5);
 
-    assert_eq!(rendered, "[§ file.rs:10-15]\n\n");
+    assert_eq!(rendered, expected_content(&["[§ file.rs:10-15]"], 50, 5));
 }
 
 #[test]
@@ -760,7 +760,7 @@ fn test_render_ide_selection_single_line() {
     let rendered = render_input_content(&input, 50, 5);
 
     // Single line should show just the line number, not a range
-    assert_eq!(rendered, "[§ lib.rs:42]\n\n");
+    assert_eq!(rendered, expected_content(&["[§ lib.rs:42]"], 50, 5));
 }
 
 #[test]
@@ -778,7 +778,7 @@ fn test_render_text_with_pasted_attachment() {
 
     let rendered = render_input_content(&input, 60, 5);
 
-    assert_eq!(rendered, "Before [¶ pasted (6 chars)]  After\n\n");
+    assert_eq!(rendered, expected_content(&["Before [¶ pasted (6 chars)]  After"], 60, 5));
 }
 
 #[test]
@@ -793,7 +793,7 @@ fn test_render_multiple_attachments() {
 
     let rendered = render_input_content(&input, 80, 5);
 
-    assert_eq!(rendered, "[¶ pasted (11 chars)]  middle [¶ pasted (12 chars)]\n\n");
+    assert_eq!(rendered, expected_content(&["[¶ pasted (11 chars)]  middle [¶ pasted (12 chars)]"], 80, 5));
 }
 
 #[test]
@@ -806,7 +806,8 @@ fn test_render_attachment_with_navigation() {
         input.insert_char(c);
     }
 
-    // Navigate before attachment and add text there
+    // Navigate to start and add text - attachment stays at beginning
+    // (cursor starts after attachment, not before it)
     input.move_cursor_start();
     for c in "prefix ".chars() {
         input.insert_char(c);
@@ -814,7 +815,8 @@ fn test_render_attachment_with_navigation() {
 
     let rendered = render_input_content(&input, 60, 5);
 
-    assert_eq!(rendered, "prefix [¶ pasted (7 chars)] typed\n\n");
+    // Attachment remains first, prefix inserted after it
+    assert_eq!(rendered, expected_content(&["[¶ pasted (7 chars)] prefix typed"], 60, 5));
 }
 
 #[test]
@@ -842,7 +844,7 @@ fn test_render_delete_attachment() {
 
     let rendered = render_input_content(&input, 60, 5);
 
-    assert_eq!(rendered, "beforeafter\n\n");
+    assert_eq!(rendered, expected_content(&["beforeafter"], 60, 5));
 }
 
 #[test]
@@ -888,7 +890,7 @@ fn test_set_ide_selection_updates_existing() {
     )));
 
     let rendered1 = render_input_content(&input, 50, 5);
-    assert_eq!(rendered1, "[§ old.rs:1]\n\n");
+    assert_eq!(rendered1, expected_content(&["[§ old.rs:1]"], 50, 5));
 
     // Update selection
     input.set_ide_selection(Some(Attachment::ide_selection(
@@ -898,7 +900,7 @@ fn test_set_ide_selection_updates_existing() {
     )));
 
     let rendered2 = render_input_content(&input, 50, 5);
-    assert_eq!(rendered2, "[§ new.rs:10-20]\n\n");
+    assert_eq!(rendered2, expected_content(&["[§ new.rs:10-20]"], 50, 5));
 
     // Only one IDE selection should exist
     let ide_count = input.segments().iter().filter(|s| {
@@ -918,11 +920,11 @@ fn test_clear_ide_selection() {
     )));
 
     let rendered1 = render_input_content(&input, 50, 5);
-    assert_eq!(rendered1, "[§ file.rs:1]\n\n");
+    assert_eq!(rendered1, expected_content(&["[§ file.rs:1]"], 50, 5));
 
     // Clear it
     input.set_ide_selection(None);
 
     let rendered2 = render_input_content(&input, 50, 5);
-    assert_eq!(rendered2, "Type your message here...\n\n");
+    assert_eq!(rendered2, expected_content(&["Type your message here..."], 50, 5));
 }
