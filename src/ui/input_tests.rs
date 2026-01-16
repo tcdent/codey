@@ -52,6 +52,26 @@ fn render_input_content(input: &InputBox, width: u16, height: u16) -> String {
     result
 }
 
+/// Create expected content string with proper padding
+/// Content area width is widget_width - 2 (for borders)
+fn expected_content(lines: &[&str], width: u16, height: u16) -> String {
+    let content_width = (width - 2) as usize;
+    let content_height = (height - 2) as usize;
+    let mut result = String::new();
+
+    for i in 0..content_height {
+        let line = lines.get(i).copied().unwrap_or("");
+        result.push_str(line);
+        // Pad with spaces to fill the width
+        for _ in line.chars().count()..content_width {
+            result.push(' ');
+        }
+        result.push('\n');
+    }
+    result
+}
+
+
 // ==================== Render Tests ====================
 
 #[test]
@@ -59,8 +79,7 @@ fn test_render_empty_input_shows_placeholder() {
     let input = InputBox::new();
     let rendered = render_input_content(&input, 40, 5);
 
-    assert!(rendered.contains("Type your message here..."),
-        "Empty input should show placeholder text");
+    assert_eq!(rendered, "Type your message here...\n\n");
 }
 
 #[test]
@@ -74,8 +93,7 @@ fn test_render_typed_text_appears() {
 
     let rendered = render_input_content(&input, 40, 5);
 
-    assert!(rendered.contains("Hello"),
-        "Typed text 'Hello' should appear in rendered output. Got:\n{}", rendered);
+    assert_eq!(rendered, "Hello\n\n");
 }
 
 #[test]
@@ -95,10 +113,7 @@ fn test_render_after_backspace() {
 
     let rendered = render_input_content(&input, 40, 5);
 
-    assert!(rendered.contains("Hel"),
-        "After backspace, 'Hel' should appear. Got:\n{}", rendered);
-    assert!(!rendered.contains("Hello"),
-        "After backspace, 'Hello' should NOT appear. Got:\n{}", rendered);
+    assert_eq!(rendered, "Hel\n\n");
 }
 
 #[test]
@@ -112,15 +127,14 @@ fn test_render_special_characters() {
 
     let rendered = render_input_content(&input, 40, 5);
 
-    assert!(rendered.contains("!@#$%^&*()"),
-        "Special characters should render correctly. Got:\n{}", rendered);
+    assert_eq!(rendered, "!@#$%^&*()\n\n");
 }
 
 #[test]
 fn test_render_unicode_characters() {
     let mut input = InputBox::new();
 
-    // Test unicode: emoji, CJK, accented chars
+    // Test unicode
     for c in "Hello".chars() {
         input.insert_char(c);
     }
@@ -131,8 +145,7 @@ fn test_render_unicode_characters() {
 
     let rendered = render_input_content(&input, 40, 5);
 
-    assert!(rendered.contains("Hello"),
-        "Unicode text should render. Got:\n{}", rendered);
+    assert_eq!(rendered, "Hello cafe\n\n");
 }
 
 #[test]
@@ -214,8 +227,7 @@ fn test_render_backspace_at_different_positions() {
     assert_eq!(input.content(), "ACD");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert!(rendered.contains("ACD"),
-        "Content should be 'ACD' after middle deletion. Got:\n{}", rendered);
+    assert_eq!(rendered, "ACD\n\n");
 }
 
 #[test]
@@ -231,11 +243,7 @@ fn test_render_newline_wrapping() {
 
     let rendered = render_input_content(&input, 40, 6);
 
-    // Both lines should be present
-    assert!(rendered.contains("Line1"),
-        "First line should appear. Got:\n{}", rendered);
-    assert!(rendered.contains("Line2"),
-        "Second line should appear. Got:\n{}", rendered);
+    assert_eq!(rendered, "Line1\nLine2\n\n");
 }
 
 #[test]
@@ -364,8 +372,7 @@ fn test_insert_in_middle_of_text() {
     assert_eq!(input.cursor(), (0, 2)); // cursor after B
 
     let rendered = render_input_content(&input, 40, 5);
-    assert!(rendered.contains("ABC"),
-        "Should render 'ABC' after mid-insert. Got:\n{}", rendered);
+    assert_eq!(rendered, "ABC\n\n");
 }
 
 #[test]
@@ -400,8 +407,7 @@ fn test_multiple_insertions_at_different_positions() {
     assert_eq!(input.cursor(), (0, 7));
 
     let rendered = render_input_content(&input, 40, 5);
-    assert!(rendered.contains("0123456"),
-        "Should render '0123456'. Got:\n{}", rendered);
+    assert_eq!(rendered, "0123456\n\n");
 }
 
 #[test]
@@ -424,8 +430,7 @@ fn test_delete_after_navigation() {
     assert_eq!(input.content(), "ADE");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert!(rendered.contains("ADE"),
-        "Should render 'ADE'. Got:\n{}", rendered);
+    assert_eq!(rendered, "ADE\n\n");
 }
 
 #[test]
@@ -465,8 +470,7 @@ fn test_interleaved_navigation_insert_delete() {
     assert_eq!(input.content(), "Help!");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert!(rendered.contains("Help!"),
-        "Should render 'Help!'. Got:\n{}", rendered);
+    assert_eq!(rendered, "Help!\n\n");
 }
 
 #[test]
@@ -521,8 +525,7 @@ fn test_rapid_insert_delete_cycle() {
     assert_eq!(input.content(), "aaaaa");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert!(rendered.contains("aaaaa"),
-        "Should render 'aaaaa'. Got:\n{}", rendered);
+    assert_eq!(rendered, "aaaaa\n\n");
 }
 
 #[test]
@@ -545,8 +548,7 @@ fn test_navigate_and_overwrite_pattern() {
     assert_eq!(input.content(), "12345");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert!(rendered.contains("12345"),
-        "Should render '12345'. Got:\n{}", rendered);
+    assert_eq!(rendered, "12345\n\n");
 }
 
 #[test]
@@ -611,10 +613,7 @@ fn test_delete_entire_content_and_retype() {
     assert_eq!(input.content(), "World");
 
     let rendered = render_input_content(&input, 40, 5);
-    assert!(rendered.contains("World"),
-        "Should render 'World' after delete-all and retype. Got:\n{}", rendered);
-    assert!(!rendered.contains("Hello"),
-        "Should NOT contain 'Hello'. Got:\n{}", rendered);
+    assert_eq!(rendered, "World\n\n");
 }
 
 #[test]
@@ -730,13 +729,7 @@ fn test_render_pasted_text_pill() {
 
     let rendered = render_input_content(&input, 50, 5);
 
-    // Should show the pilcrow icon and char count
-    assert!(rendered.contains("¶"),
-        "Pasted text should show pilcrow (¶) icon. Got:\n{}", rendered);
-    assert!(rendered.contains("pasted"),
-        "Should show 'pasted' label. Got:\n{}", rendered);
-    assert!(rendered.contains("19 chars"),
-        "Should show char count. Got:\n{}", rendered);
+    assert_eq!(rendered, "[¶ pasted (19 chars)]\n\n");
 }
 
 #[test]
@@ -751,13 +744,7 @@ fn test_render_ide_selection_pill() {
 
     let rendered = render_input_content(&input, 50, 5);
 
-    // Should show section icon, filename, and line range
-    assert!(rendered.contains("§"),
-        "IDE selection should show section (§) icon. Got:\n{}", rendered);
-    assert!(rendered.contains("file.rs"),
-        "Should show filename. Got:\n{}", rendered);
-    assert!(rendered.contains("10-15"),
-        "Should show line range. Got:\n{}", rendered);
+    assert_eq!(rendered, "[§ file.rs:10-15]\n\n");
 }
 
 #[test]
@@ -773,10 +760,7 @@ fn test_render_ide_selection_single_line() {
     let rendered = render_input_content(&input, 50, 5);
 
     // Single line should show just the line number, not a range
-    assert!(rendered.contains("lib.rs:42"),
-        "Single line should show 'filename:line'. Got:\n{}", rendered);
-    assert!(!rendered.contains("42-42"),
-        "Should NOT show range for single line. Got:\n{}", rendered);
+    assert_eq!(rendered, "[§ lib.rs:42]\n\n");
 }
 
 #[test]
@@ -794,12 +778,7 @@ fn test_render_text_with_pasted_attachment() {
 
     let rendered = render_input_content(&input, 60, 5);
 
-    assert!(rendered.contains("Before"),
-        "Should contain text before attachment. Got:\n{}", rendered);
-    assert!(rendered.contains("After"),
-        "Should contain text after attachment. Got:\n{}", rendered);
-    assert!(rendered.contains("¶"),
-        "Should contain paste indicator. Got:\n{}", rendered);
+    assert_eq!(rendered, "Before [¶ pasted (6 chars)]  After\n\n");
 }
 
 #[test]
@@ -814,12 +793,7 @@ fn test_render_multiple_attachments() {
 
     let rendered = render_input_content(&input, 80, 5);
 
-    // Count pilcrow occurrences
-    let pilcrow_count = rendered.matches("¶").count();
-    assert_eq!(pilcrow_count, 2,
-        "Should have 2 paste indicators. Got {} in:\n{}", pilcrow_count, rendered);
-    assert!(rendered.contains("middle"),
-        "Should contain middle text. Got:\n{}", rendered);
+    assert_eq!(rendered, "[¶ pasted (11 chars)]  middle [¶ pasted (12 chars)]\n\n");
 }
 
 #[test]
@@ -840,10 +814,7 @@ fn test_render_attachment_with_navigation() {
 
     let rendered = render_input_content(&input, 60, 5);
 
-    assert!(rendered.contains("prefix"),
-        "Should contain prefix text. Got:\n{}", rendered);
-    assert!(rendered.contains("typed"),
-        "Should contain typed text after attachment. Got:\n{}", rendered);
+    assert_eq!(rendered, "prefix [¶ pasted (7 chars)] typed\n\n");
 }
 
 #[test]
@@ -871,12 +842,7 @@ fn test_render_delete_attachment() {
 
     let rendered = render_input_content(&input, 60, 5);
 
-    assert!(!rendered.contains("¶"),
-        "Attachment should be deleted. Got:\n{}", rendered);
-    assert!(rendered.contains("before"),
-        "Should still have 'before'. Got:\n{}", rendered);
-    assert!(rendered.contains("after"),
-        "Should still have 'after'. Got:\n{}", rendered);
+    assert_eq!(rendered, "beforeafter\n\n");
 }
 
 #[test]
@@ -922,8 +888,7 @@ fn test_set_ide_selection_updates_existing() {
     )));
 
     let rendered1 = render_input_content(&input, 50, 5);
-    assert!(rendered1.contains("old.rs"),
-        "Should show old filename. Got:\n{}", rendered1);
+    assert_eq!(rendered1, "[§ old.rs:1]\n\n");
 
     // Update selection
     input.set_ide_selection(Some(Attachment::ide_selection(
@@ -933,10 +898,7 @@ fn test_set_ide_selection_updates_existing() {
     )));
 
     let rendered2 = render_input_content(&input, 50, 5);
-    assert!(rendered2.contains("new.rs"),
-        "Should show new filename. Got:\n{}", rendered2);
-    assert!(!rendered2.contains("old.rs"),
-        "Should NOT show old filename. Got:\n{}", rendered2);
+    assert_eq!(rendered2, "[§ new.rs:10-20]\n\n");
 
     // Only one IDE selection should exist
     let ide_count = input.segments().iter().filter(|s| {
@@ -956,12 +918,11 @@ fn test_clear_ide_selection() {
     )));
 
     let rendered1 = render_input_content(&input, 50, 5);
-    assert!(rendered1.contains("§"), "Should have IDE selection");
+    assert_eq!(rendered1, "[§ file.rs:1]\n\n");
 
     // Clear it
     input.set_ide_selection(None);
 
     let rendered2 = render_input_content(&input, 50, 5);
-    assert!(!rendered2.contains("§"),
-        "IDE selection should be cleared. Got:\n{}", rendered2);
+    assert_eq!(rendered2, "Type your message here...\n\n");
 }
