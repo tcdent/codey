@@ -1099,6 +1099,315 @@ mod tests {
         insta::assert_snapshot!(rendered);
     }
 
+    // ==================== Navigation + Edit Tests ====================
+
+    #[test]
+    fn test_insert_in_middle_of_text() {
+        let mut input = InputBox::new();
+
+        // Type "AC"
+        input.insert_char('A');
+        input.insert_char('C');
+        assert_eq!(input.content(), "AC");
+
+        // Move left and insert B -> "ABC"
+        input.move_cursor_left();
+        input.insert_char('B');
+
+        assert_eq!(input.content(), "ABC");
+        assert_eq!(input.cursor(), (0, 2)); // cursor after B
+
+        let rendered = render_input_content(&input, 40, 5);
+        assert!(rendered.contains("ABC"),
+            "Should render 'ABC' after mid-insert. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_multiple_insertions_at_different_positions() {
+        let mut input = InputBox::new();
+
+        // Type "15"
+        input.insert_char('1');
+        input.insert_char('5');
+
+        // Go to start, insert "0" -> "015"
+        input.move_cursor_start();
+        input.insert_char('0');
+        assert_eq!(input.content(), "015");
+
+        // Go to end, insert "6" -> "0156"
+        input.move_cursor_end();
+        input.insert_char('6');
+        assert_eq!(input.content(), "0156");
+
+        // Navigate to middle (after "01"), insert "234" -> "0123456"
+        input.move_cursor_start();
+        input.move_cursor_right(); // after 0
+        input.move_cursor_right(); // after 1
+        input.insert_char('2');
+        input.insert_char('3');
+        input.insert_char('4');
+        assert_eq!(input.content(), "0123456");
+
+        // Move to end and verify
+        input.move_cursor_end();
+        assert_eq!(input.cursor(), (0, 7));
+
+        let rendered = render_input_content(&input, 40, 5);
+        assert!(rendered.contains("0123456"),
+            "Should render '0123456'. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_delete_after_navigation() {
+        let mut input = InputBox::new();
+
+        // Type "ABCDE"
+        for c in "ABCDE".chars() {
+            input.insert_char(c);
+        }
+
+        // Navigate to after C, delete C -> "ABDE"
+        input.move_cursor_left(); // after D
+        input.move_cursor_left(); // after C
+        input.delete_char();
+        assert_eq!(input.content(), "ABDE");
+
+        // Delete B -> "ADE"
+        input.delete_char();
+        assert_eq!(input.content(), "ADE");
+
+        let rendered = render_input_content(&input, 40, 5);
+        assert!(rendered.contains("ADE"),
+            "Should render 'ADE'. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_interleaved_navigation_insert_delete() {
+        let mut input = InputBox::new();
+
+        // Build "Hello" via mixed operations
+        input.insert_char('H');
+        input.insert_char('l');     // "Hl"
+        input.move_cursor_left();
+        input.insert_char('e');     // "Hel"
+        input.move_cursor_end();
+        input.insert_char('l');     // "Hell"
+        input.insert_char('o');     // "Hello"
+
+        assert_eq!(input.content(), "Hello");
+
+        // Now transform to "Help" via navigation and edits
+        input.move_cursor_left();   // before 'o'
+        input.delete_char();        // delete 'l' -> "Helo"
+        input.move_cursor_left();   // before 'o'
+        input.delete_char();        // delete 'l' -> "Heo"
+
+        // Oops, that's wrong. Let's fix it differently.
+        // Start fresh
+        input.clear();
+        for c in "Hello".chars() {
+            input.insert_char(c);
+        }
+
+        // Transform "Hello" -> "Help!"
+        input.delete_char();        // "Hell"
+        input.delete_char();        // "Hel"
+        input.insert_char('p');     // "Help"
+        input.insert_char('!');     // "Help!"
+
+        assert_eq!(input.content(), "Help!");
+
+        let rendered = render_input_content(&input, 40, 5);
+        assert!(rendered.contains("Help!"),
+            "Should render 'Help!'. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_cursor_boundaries() {
+        let mut input = InputBox::new();
+
+        // Empty input - cursor should stay at 0
+        input.move_cursor_left();
+        assert_eq!(input.cursor(), (0, 0));
+        input.move_cursor_left();
+        assert_eq!(input.cursor(), (0, 0));
+
+        // Type "AB"
+        input.insert_char('A');
+        input.insert_char('B');
+
+        // At end, move right should stay at end
+        input.move_cursor_right();
+        assert_eq!(input.cursor(), (0, 2));
+        input.move_cursor_right();
+        assert_eq!(input.cursor(), (0, 2));
+
+        // At start, move left should stay at start
+        input.move_cursor_start();
+        input.move_cursor_left();
+        assert_eq!(input.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn test_delete_at_start_does_nothing() {
+        let mut input = InputBox::new();
+
+        input.insert_char('X');
+        input.move_cursor_start();
+        input.delete_char(); // Should do nothing - nothing before cursor
+
+        assert_eq!(input.content(), "X");
+        assert_eq!(input.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn test_rapid_insert_delete_cycle() {
+        let mut input = InputBox::new();
+
+        // Rapid typing and deleting
+        for _ in 0..5 {
+            input.insert_char('a');
+            input.insert_char('b');
+            input.delete_char();
+        }
+        // Should have "aaaaa"
+        assert_eq!(input.content(), "aaaaa");
+
+        let rendered = render_input_content(&input, 40, 5);
+        assert!(rendered.contains("aaaaa"),
+            "Should render 'aaaaa'. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_navigate_and_overwrite_pattern() {
+        let mut input = InputBox::new();
+
+        // Type "XXXXX"
+        for _ in 0..5 {
+            input.insert_char('X');
+        }
+
+        // Replace each X with a digit by navigating and delete+insert
+        input.move_cursor_start();
+        for i in 1..=5 {
+            input.move_cursor_right(); // move past current char
+            input.delete_char();       // delete the char we just passed
+            input.insert_char(char::from_digit(i, 10).unwrap());
+        }
+
+        assert_eq!(input.content(), "12345");
+
+        let rendered = render_input_content(&input, 40, 5);
+        assert!(rendered.contains("12345"),
+            "Should render '12345'. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_cursor_position_after_complex_edits() {
+        let mut input = InputBox::new();
+
+        // Type "abcdef"
+        for c in "abcdef".chars() {
+            input.insert_char(c);
+        }
+
+        // Navigate to middle (after 'c')
+        input.move_cursor_start();
+        input.move_cursor_right(); // after a
+        input.move_cursor_right(); // after b
+        input.move_cursor_right(); // after c
+
+        // Insert "123" -> "abc123def"
+        input.insert_char('1');
+        input.insert_char('2');
+        input.insert_char('3');
+
+        assert_eq!(input.content(), "abc123def");
+        assert_eq!(input.cursor(), (0, 6)); // after "abc123"
+
+        // Verify cursor renders at correct position
+        let backend = TestBackend::new(40, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            f.render_widget(input.widget("m", 0), f.area());
+        }).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        // Cursor at x=1+6=7, y=1
+        let cursor_cell = buffer.cell((7, 1)).unwrap();
+        assert_eq!(cursor_cell.bg, ratatui::style::Color::White,
+            "Cursor should be at position 6 (after '3')");
+        assert_eq!(cursor_cell.symbol(), "d",
+            "Cursor should be on 'd'");
+    }
+
+    #[test]
+    fn test_delete_entire_content_and_retype() {
+        let mut input = InputBox::new();
+
+        // Type "Hello"
+        for c in "Hello".chars() {
+            input.insert_char(c);
+        }
+
+        // Delete everything
+        for _ in 0..5 {
+            input.delete_char();
+        }
+        assert_eq!(input.content(), "");
+        assert!(input.is_empty());
+
+        // Retype "World"
+        for c in "World".chars() {
+            input.insert_char(c);
+        }
+        assert_eq!(input.content(), "World");
+
+        let rendered = render_input_content(&input, 40, 5);
+        assert!(rendered.contains("World"),
+            "Should render 'World' after delete-all and retype. Got:\n{}", rendered);
+        assert!(!rendered.contains("Hello"),
+            "Should NOT contain 'Hello'. Got:\n{}", rendered);
+    }
+
+    #[test]
+    fn test_snapshot_after_complex_edits() {
+        let mut input = InputBox::new();
+
+        // Complex edit sequence
+        for c in "The quick brown".chars() {
+            input.insert_char(c);
+        }
+        // Insert " fox" at end
+        for c in " fox".chars() {
+            input.insert_char(c);
+        }
+        // Go back and fix "brown" to "red"
+        // Current: "The quick brown fox"
+        // Navigate to after "quick "
+        input.move_cursor_start();
+        for _ in 0..10 { // "The quick "
+            input.move_cursor_right();
+        }
+        // Delete "brown" (5 chars)
+        for _ in 0..5 {
+            input.move_cursor_right();
+        }
+        for _ in 0..5 {
+            input.delete_char();
+        }
+        // Insert "red"
+        for c in "red".chars() {
+            input.insert_char(c);
+        }
+
+        assert_eq!(input.content(), "The quick red fox");
+
+        let rendered = render_input_box(&input, 40, 5);
+        insta::assert_snapshot!(rendered);
+    }
+
     // ==================== Original Logic Tests ====================
 
     #[test]
