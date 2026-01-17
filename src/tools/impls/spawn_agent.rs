@@ -24,6 +24,12 @@ use tokio::sync::RwLock;
 // Agent Context - global state for spawning sub-agents
 // =============================================================================
 
+// TODO: Refactor to avoid global state. We use OnceLock here because tool handlers
+// (EffectHandler::call) don't have access to app-level context like config and OAuth
+// credentials. Ideally we'd pass this context through the tool pipeline, but that
+// would require changes to the Tool/EffectHandler traits. For now, the app initializes
+// this at startup and updates OAuth after refresh.
+
 /// Context needed to spawn sub-agents, initialized at app startup
 pub struct AgentContext {
     pub runtime_config: AgentRuntimeConfig,
