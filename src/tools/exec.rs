@@ -355,10 +355,11 @@ impl ToolExecutor {
             // Check if this tool will need user approval (not pre-approved)
             let needs_approval = tool_call.decision != ToolDecision::Approve;
             
-            // If it needs approval, only start if no active tool also needs approval
+            // If it needs approval, only start if no active tool is still running and needs approval
+            // (Denied/Error pipelines running finally handlers shouldn't block new tools)
             if needs_approval {
                 let any_active_needs_approval = self.active.values().any(|p| {
-                    p.original_decision != ToolDecision::Approve
+                    p.original_decision != ToolDecision::Approve && p.status == Status::Running
                 });
                 if any_active_needs_approval {
                     break; // Wait for current tool to complete before starting next
