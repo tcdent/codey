@@ -293,6 +293,10 @@ impl ToolExecutor {
     pub fn tools(&self) -> &ToolRegistry {
         &self.tools
     }
+    
+    pub fn tools_mut(&mut self) -> &mut ToolRegistry {
+        &mut self.tools
+    }
 
     /// Cancel any active or pending tool execution
     pub fn cancel(&mut self) {
