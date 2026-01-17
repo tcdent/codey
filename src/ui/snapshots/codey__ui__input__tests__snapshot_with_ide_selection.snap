@@ -1,0 +1,10 @@
+---
+source: src/ui/input.rs
+assertion_line: 1664
+expression: rendered
+---
+┌ test-model ────────────────────────────────────────── 1k ┐
+│[§ main.rs:1-3]  fix this function                        │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
