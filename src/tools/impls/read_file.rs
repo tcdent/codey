@@ -296,6 +296,7 @@ mod tests {
                 "end_line": -1  // Read to end of file
             }),
             decision: ToolDecision::Approve,
+            background: false,
         }]);
 
         if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
