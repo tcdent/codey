@@ -344,11 +344,27 @@ impl ToolExecutor {
             return None;
         }
 
-        // Start ALL pending tools (don't emit BackgroundStarted yet - wait for approval)
+        // Start pending tools, but only one approval-requiring tool at a time.
+        // This prevents IDE previews from overwriting each other when multiple
+        // tools are queued. Pre-approved tools can run in parallel.
         while let Some(tool_call) = self.pending.front() {
             if tool_call.decision != ToolDecision::Pending && tool_call.decision != ToolDecision::Approve {
                 break;
             }
+            
+            // Check if this tool will need user approval (not pre-approved)
+            let needs_approval = tool_call.decision != ToolDecision::Approve;
+            
+            // If it needs approval, only start if no active tool also needs approval
+            if needs_approval {
+                let any_active_needs_approval = self.active.values().any(|p| {
+                    p.original_decision != ToolDecision::Approve
+                });
+                if any_active_needs_approval {
+                    break; // Wait for current tool to complete before starting next
+                }
+            }
+            
             let tool_call = self.pending.pop_front().unwrap();
             let call_id = tool_call.call_id.clone();
             
@@ -376,7 +392,11 @@ impl ToolExecutor {
                 let (should_step, is_handler_wait) = {
                     match self.active.get(call_id) {
                         Some(active) => (
-                            !active.is_waiting() && active.status == Status::Running,
+                            // Step if not waiting and either:
+                            // - Running (including when empty, to trigger completion)
+                            // - Denied/Error with finally handlers still remaining
+                            !active.is_waiting() && 
+                                (active.status == Status::Running || !active.pipeline.is_empty()),
                             active.is_waiting_for_handler(),
                         ),
                         None => (false, false),
@@ -567,7 +587,13 @@ impl ToolExecutor {
             match active.pipeline.pop() {
                 Some(h) => h,
                 None => {
-                    // Pipeline complete
+                    // Pipeline complete - finally handlers have run
+                    // For denied/errored pipelines, we already emitted the event, just cleanup
+                    if active.status == Status::Denied || active.status == Status::Error {
+                        self.active.remove(call_id);
+                        return None;
+                    }
+                    
                     if active.background {
                         active.set_complete();
                         return Some(ToolEvent::BackgroundCompleted {
