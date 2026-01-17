@@ -107,7 +107,7 @@ theme = "base16-ocean.dark"
 
 ## Tools
 
-Codey provides nine tools:
+Codey provides eleven tools:
 
 | Tool | Description |
 |------|-------------|
@@ -119,7 +119,9 @@ Codey provides nine tools:
 | `fetch_html` | Fetch web pages as readable markdown using headless browser |
 | `web_search` | Search the web and return results |
 | `open_file` | Open a file in the IDE at a specific line |
-| `task` | Spawn a sub-agent for research/analysis tasks |
+| `spawn_agent` | Spawn a sub-agent for research/analysis tasks |
+| `list_background_tasks` | List all background tasks and their status |
+| `get_background_task` | Retrieve the result of a completed background task |
 
 ### Tool Filters
 
