@@ -13,7 +13,7 @@ use serde_json::json;
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{
-    render_approval_prompt, render_queued_message, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
+    render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
 };
 
 /// Fetch HTML display block
@@ -71,8 +71,6 @@ impl Block for FetchHtmlBlock {
 
         if self.status == Status::Pending {
             lines.push(render_approval_prompt());
-        } else if self.status == Status::Queued {
-            lines.push(render_queued_message());
         }
 
         if !self.text.is_empty() {

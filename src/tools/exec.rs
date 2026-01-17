@@ -3,6 +3,10 @@
 //! Executes tool pipelines with approval flow and streaming output.
 
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll, Wake, Waker};
 
 use tokio::sync::oneshot;
 
@@ -11,11 +15,42 @@ use crate::transcript::Status;
 use crate::tools::pipeline::{Effect, Step, ToolPipeline};
 use crate::tools::ToolRegistry;
 
+// =============================================================================
+// Polling helpers
+// =============================================================================
+
+/// Noop waker for manual polling
+struct NoopWaker;
+impl Wake for NoopWaker {
+    fn wake(self: Arc<Self>) {}
+}
+
+/// Poll a oneshot receiver without blocking
+fn poll_receiver<T>(rx: &mut oneshot::Receiver<T>) -> Poll<Result<T, oneshot::error::RecvError>> {
+    let waker = Waker::from(Arc::new(NoopWaker));
+    let mut cx = Context::from_waker(&waker);
+    Pin::new(rx).poll(&mut cx)
+}
+
+// =============================================================================
+// Types
+// =============================================================================
+
 /// Result of executing a delegated effect
 /// Ok(None) = success, continue pipeline
 /// Ok(Some(output)) = success, set this as pipeline output
 /// Err(msg) = failure, abort pipeline
 pub type EffectResult = Result<Option<String>, String>;
+
+/// What an active pipeline is waiting for (mutually exclusive states)
+enum WaitingFor {
+    /// Not waiting - ready to execute next step
+    Nothing,
+    /// Waiting for delegated effect to complete
+    Effect(oneshot::Receiver<EffectResult>),
+    /// Waiting for user approval
+    Approval(oneshot::Receiver<ToolDecision>),
+}
 
 /// A tool call pending execution
 #[derive(Debug, Clone)]
@@ -165,10 +200,8 @@ struct ActivePipeline {
     params: serde_json::Value,
     pipeline: ToolPipeline,
     output: String,
-    /// Waiting for effect result from app layer
-    pending_effect: Option<oneshot::Receiver<EffectResult>>,
-    /// Waiting for approval decision from app layer
-    pending_approval: Option<oneshot::Receiver<ToolDecision>>,
+    /// What we're currently waiting for (if anything)
+    waiting: WaitingFor,
     /// Original decision from tool call (for pre-approval)
     original_decision: ToolDecision,
     /// If true, this is a background task
@@ -188,15 +221,14 @@ impl ActivePipeline {
             background: tool_call.background,
             pipeline,
             output: String::new(),
-            pending_effect: None,
-            pending_approval: None,
+            waiting: WaitingFor::Nothing,
             status: Status::Running,
         }
     }
     
     /// Check if pipeline is waiting for something
     fn is_waiting(&self) -> bool {
-        self.pending_effect.is_some() || self.pending_approval.is_some()
+        !matches!(self.waiting, WaitingFor::Nothing)
     }
     
     /// Check if pipeline is complete (no more steps)
@@ -210,22 +242,19 @@ impl ActivePipeline {
     fn set_error(&mut self, msg: impl Into<String>) {
         self.status = Status::Error;
         self.output = msg.into();
-        self.pending_effect = None;
-        self.pending_approval = None;
+        self.waiting = WaitingFor::Nothing;
     }
     
     /// Transition to complete state
     fn set_complete(&mut self) {
         self.status = Status::Complete;
-        self.pending_effect = None;
-        self.pending_approval = None;
+        self.waiting = WaitingFor::Nothing;
     }
     
     /// Transition to denied state
     fn set_denied(&mut self) {
         self.status = Status::Denied;
-        self.pending_effect = None;
-        self.pending_approval = None;
+        self.waiting = WaitingFor::Nothing;
     }
 }
 
@@ -309,15 +338,10 @@ impl ToolExecutor {
             self.active.insert(call_id.clone(), ActivePipeline::new(tool_call, pipeline));
         }
 
-        // Poll all active pipelines for pending effects/approvals
+        // Poll all active pipelines for pending results
         let call_ids: Vec<String> = self.active.keys().cloned().collect();
         for call_id in &call_ids {
-            // Check pending effect
-            if let Some(event) = self.check_pending_effect(call_id) {
-                return Some(event);
-            }
-            // Check pending approval
-            if let Some(event) = self.check_pending_approval(call_id) {
+            if let Some(event) = self.poll_waiting(call_id) {
                 return Some(event);
             }
         }
@@ -353,135 +377,109 @@ impl ToolExecutor {
         None
     }
 
-    /// Check pending effect for a specific pipeline
-    fn check_pending_effect(&mut self, call_id: &str) -> Option<ToolEvent> {
-        use std::future::Future;
-        use std::pin::Pin;
-        use std::task::{Context, Poll, Wake, Waker};
-        use std::sync::Arc;
-        
-        // Noop waker for polling
-        struct NoopWake;
-        impl Wake for NoopWake {
-            fn wake(self: Arc<Self>) {}
-        }
-        
+    /// Poll the waiting state for a specific pipeline
+    fn poll_waiting(&mut self, call_id: &str) -> Option<ToolEvent> {
         let active = self.active.get_mut(call_id)?;
-        let rx = active.pending_effect.as_mut()?;
         
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
+        // Take ownership of waiting state to poll it
+        let waiting = std::mem::replace(&mut active.waiting, WaitingFor::Nothing);
         
-        match Pin::new(rx).poll(&mut cx) {
-            Poll::Ready(Ok(Ok(None))) => {
-                // Effect completed, no output - continue pipeline
-                active.pending_effect = None;
-                None
-            },
-            Poll::Ready(Ok(Ok(Some(output)))) => {
-                // Effect completed with output - inject into pipeline
-                active.pending_effect = None;
-                active.output = output;
-                None
-            },
-            Poll::Ready(Ok(Err(msg))) => {
-                let mut active = self.active.remove(call_id).unwrap();
-                if active.background {
-                    // Background task error - keep for retrieval
-                    active.set_error(msg);
-                    let event = ToolEvent::BackgroundCompleted {
-                        agent_id: active.agent_id,
-                        call_id: active.call_id.clone(),
-                        name: active.name.clone(),
-                    };
-                    self.active.insert(active.call_id.clone(), active);
-                    Some(event)
-                } else {
-                    Some(ToolEvent::error(active, msg))
+        match waiting {
+            WaitingFor::Nothing => None,
+            
+            WaitingFor::Effect(mut rx) => {
+                match poll_receiver(&mut rx) {
+                    Poll::Ready(Ok(Ok(None))) => {
+                        // Effect completed, no output - continue pipeline
+                        None
+                    },
+                    Poll::Ready(Ok(Ok(Some(output)))) => {
+                        // Effect completed with output - inject into pipeline
+                        active.output = output;
+                        None
+                    },
+                    Poll::Ready(Ok(Err(msg))) => {
+                        let mut active = self.active.remove(call_id).unwrap();
+                        if active.background {
+                            active.set_error(msg);
+                            let event = ToolEvent::BackgroundCompleted {
+                                agent_id: active.agent_id,
+                                call_id: active.call_id.clone(),
+                                name: active.name.clone(),
+                            };
+                            self.active.insert(active.call_id.clone(), active);
+                            Some(event)
+                        } else {
+                            Some(ToolEvent::error(active, msg))
+                        }
+                    },
+                    Poll::Ready(Err(_)) => {
+                        let mut active = self.active.remove(call_id).unwrap();
+                        if active.background {
+                            active.set_error("Effect channel dropped");
+                            let event = ToolEvent::BackgroundCompleted {
+                                agent_id: active.agent_id,
+                                call_id: active.call_id.clone(),
+                                name: active.name.clone(),
+                            };
+                            self.active.insert(active.call_id.clone(), active);
+                            Some(event)
+                        } else {
+                            Some(ToolEvent::error(active, "Effect channel dropped"))
+                        }
+                    },
+                    Poll::Pending => {
+                        // Put it back - still waiting
+                        self.active.get_mut(call_id).unwrap().waiting = WaitingFor::Effect(rx);
+                        None
+                    },
                 }
             },
-            Poll::Ready(Err(_)) => {
-                let mut active = self.active.remove(call_id).unwrap();
-                if active.background {
-                    active.set_error("Effect channel dropped");
-                    let event = ToolEvent::BackgroundCompleted {
-                        agent_id: active.agent_id,
-                        call_id: active.call_id.clone(),
-                        name: active.name.clone(),
-                    };
-                    self.active.insert(active.call_id.clone(), active);
-                    Some(event)
-                } else {
-                    Some(ToolEvent::error(active, "Effect channel dropped"))
+            
+            WaitingFor::Approval(mut rx) => {
+                let poll_result = poll_receiver(&mut rx);
+                tracing::debug!("poll_waiting Approval: poll_result={:?}", poll_result);
+                
+                match poll_result {
+                    Poll::Ready(Ok(ToolDecision::Approve)) => {
+                        tracing::debug!("poll_waiting: Approved");
+                        // For background tools, emit BackgroundStarted now
+                        if active.background {
+                            Some(ToolEvent::BackgroundStarted {
+                                agent_id: active.agent_id,
+                                call_id: active.call_id.clone(),
+                                name: active.name.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    },
+                    Poll::Ready(Ok(ToolDecision::Deny)) => {
+                        tracing::debug!("poll_waiting: Denied");
+                        active.pipeline.skip_to_finally();
+                        active.set_denied();
+                        Some(ToolEvent::Error {
+                            agent_id: active.agent_id,
+                            call_id: active.call_id.clone(),
+                            content: "Denied by user".to_string(),
+                        })
+                    },
+                    Poll::Ready(Ok(_)) => {
+                        tracing::debug!("poll_waiting: unexpected decision");
+                        None
+                    },
+                    Poll::Ready(Err(_)) => {
+                        tracing::debug!("poll_waiting: channel error");
+                        let active = self.active.remove(call_id).unwrap();
+                        Some(ToolEvent::error(active, "Approval cancelled"))
+                    },
+                    Poll::Pending => {
+                        tracing::debug!("poll_waiting: Pending");
+                        // Put it back - still waiting
+                        self.active.get_mut(call_id).unwrap().waiting = WaitingFor::Approval(rx);
+                        None
+                    },
                 }
-            },
-            Poll::Pending => None,
-        }
-    }
-
-    /// Check pending approval for a specific pipeline
-    fn check_pending_approval(&mut self, call_id: &str) -> Option<ToolEvent> {
-        use std::future::Future;
-        use std::pin::Pin;
-        use std::task::{Context, Poll, Wake, Waker};
-        use std::sync::Arc;
-        
-        // Noop waker for polling
-        struct NoopWake;
-        impl Wake for NoopWake {
-            fn wake(self: Arc<Self>) {}
-        }
-        
-        let active = self.active.get_mut(call_id)?;
-        let rx = active.pending_approval.as_mut()?;
-        
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut cx = Context::from_waker(&waker);
-        
-        let poll_result = Pin::new(rx).poll(&mut cx);
-        tracing::debug!("check_pending_approval: poll_result={:?}", poll_result);
-        
-        match poll_result {
-            Poll::Ready(Ok(ToolDecision::Approve)) => {
-                tracing::debug!("check_pending_approval: Approved");
-                active.pending_approval = None;
-                // For background tools, emit BackgroundStarted now that approval is granted
-                if active.background {
-                    Some(ToolEvent::BackgroundStarted {
-                        agent_id: active.agent_id,
-                        call_id: active.call_id.clone(),
-                        name: active.name.clone(),
-                    })
-                } else {
-                    None
-                }
-            },
-            Poll::Ready(Ok(ToolDecision::Deny)) => {
-                tracing::debug!("check_pending_approval: Denied - emitting error and continuing to finally effects");
-                active.pipeline.skip_to_finally();
-                active.set_denied();
-                // Emit error but keep pipeline active to drain finally effects
-                Some(ToolEvent::Error {
-                    agent_id: active.agent_id,
-                    call_id: active.call_id.clone(),
-                    content: "Denied by user".to_string(),
-                })
-            },
-            Poll::Ready(Ok(_)) => {
-                // Pending/Requested shouldn't happen
-                tracing::debug!("check_pending_approval: unexpected decision");
-                active.pending_approval = None;
-                None
-            },
-            Poll::Ready(Err(_)) => {
-                tracing::debug!("check_pending_approval: channel error");
-                // Sender dropped - treat as cancellation
-                let active = self.active.remove(call_id).unwrap();
-                Some(ToolEvent::error(active, "Approval cancelled"))
-            },
-            Poll::Pending => {
-                tracing::debug!("check_pending_approval: Pending");
-                None
             },
         }
     }
@@ -526,7 +524,7 @@ impl ToolExecutor {
             },
             Step::Delegate(effect) => {
                 let (event, rx) = ToolEvent::delegate(active, effect);
-                active.pending_effect = Some(rx);
+                active.waiting = WaitingFor::Effect(rx);
                 Some(event)
             },
             Step::AwaitApproval => {
@@ -544,7 +542,7 @@ impl ToolExecutor {
                     }
                 } else {
                     let (event, rx) = ToolEvent::awaiting_approval(active);
-                    active.pending_approval = Some(rx);
+                    active.waiting = WaitingFor::Approval(rx);
                     Some(event)
                 }
             },

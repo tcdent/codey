@@ -1,7 +1,7 @@
 //! Open file tool - opens a file in the IDE at a specific line
 
 use super::{handlers, Tool, ToolPipeline};
-use crate::transcript::{render_approval_prompt, render_queued_message, render_prefix, Block, BlockType, Status};
+use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -133,8 +133,6 @@ impl Block for OpenFileBlock {
 
         if self.status == Status::Pending {
             lines.push(render_approval_prompt());
-        } else if self.status == Status::Queued {
-            lines.push(render_queued_message());
         }
 
         if self.status == Status::Denied {
