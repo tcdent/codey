@@ -224,6 +224,10 @@ pub struct ToolsConfig {
     pub fetch_url: ToolFilterConfig,
     /// Filter patterns for web_search tool (matches against query)
     pub web_search: ToolFilterConfig,
+    /// Filter patterns for list_background_tasks tool (no params - use ".*" to auto-approve)
+    pub list_background_tasks: ToolFilterConfig,
+    /// Filter patterns for get_background_task tool (matches against task_id)
+    pub get_background_task: ToolFilterConfig,
 }
 
 impl Default for ToolsConfig {
@@ -243,6 +247,8 @@ impl Default for ToolsConfig {
             edit_file: ToolFilterConfig::default(),
             fetch_url: ToolFilterConfig::default(),
             web_search: ToolFilterConfig::default(),
+            list_background_tasks: ToolFilterConfig::default(),
+            get_background_task: ToolFilterConfig::default(),
         }
     }
 }
@@ -250,6 +256,7 @@ impl Default for ToolsConfig {
 impl ToolsConfig {
     /// Build a HashMap of tool filters for compilation
     pub fn filters(&self) -> HashMap<String, ToolFilterConfig> {
+        use crate::tools::{GetBackgroundTaskTool, ListBackgroundTasksTool};
         let mut map = HashMap::new();
         map.insert(ShellTool::NAME.to_string(), self.shell.clone());
         map.insert(ReadFileTool::NAME.to_string(), self.read_file.clone());
@@ -257,6 +264,8 @@ impl ToolsConfig {
         map.insert(EditFileTool::NAME.to_string(), self.edit_file.clone());
         map.insert(FetchUrlTool::NAME.to_string(), self.fetch_url.clone());
         map.insert(WebSearchTool::NAME.to_string(), self.web_search.clone());
+        map.insert(ListBackgroundTasksTool::NAME.to_string(), self.list_background_tasks.clone());
+        map.insert(GetBackgroundTaskTool::NAME.to_string(), self.get_background_task.clone());
         map
     }
 }

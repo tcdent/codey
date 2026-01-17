@@ -29,12 +29,21 @@ const ANTHROPIC_USER_AGENT: &str = "claude-cli/2.1.2 (external, cli)";
 // after receiving the ToolRequest from the registry
 impl From<&GenaiToolCall> for ToolCall {
     fn from(tc: &GenaiToolCall) -> Self {
+        // Extract and remove `background` from params if present
+        let mut params = tc.fn_arguments.clone();
+        let background = params
+            .as_object_mut()
+            .and_then(|obj| obj.remove("background"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        
         Self {
             agent_id: 0, // Placeholder - set by App when handling ToolRequest
             call_id: tc.call_id.clone(),
             name: tc.fn_name.clone(),
-            params: tc.fn_arguments.clone(),
+            params,
             decision: ToolDecision::Pending,
+            background,
         }
     }
 }
@@ -170,17 +179,8 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Create a new agent with initial messages and default tools
-    pub fn new(
-        config: AgentRuntimeConfig,
-        system_prompt: &str,
-        oauth: Option<OAuthCredentials>,
-    ) -> Self {
-        Self::with_tools(config, system_prompt, oauth, ToolRegistry::new())
-    }
-
     /// Create a new agent with a custom tool registry
-    pub fn with_tools(
+    pub fn new(
         config: AgentRuntimeConfig,
         system_prompt: &str,
         oauth: Option<OAuthCredentials>,

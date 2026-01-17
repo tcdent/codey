@@ -1,7 +1,7 @@
 //! Open file tool - opens a file in the IDE at a specific line
 
 use super::{handlers, Tool, ToolPipeline};
-use crate::transcript::{render_approval_prompt, Block, BlockType, Status};
+use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -44,6 +44,10 @@ impl Tool for OpenFileTool {
                 "line": {
                     "type": "integer",
                     "description": "Line number to navigate to (1-indexed, optional)"
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run in background. Returns immediately with a task_id; use list_background_tasks/get_background_task to check status and retrieve results."
                 }
             },
             "required": ["path"]
@@ -75,8 +79,8 @@ impl Tool for OpenFileTool {
             .then(handlers::Output { content: message })
     }
 
-    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
-        Box::new(OpenFileBlock::new(call_id, self.name(), params))
+    fn create_block(&self, call_id: &str, params: serde_json::Value, background: bool) -> Box<dyn Block> {
+        Box::new(OpenFileBlock::new(call_id, self.name(), params, background))
     }
 }
 
@@ -88,16 +92,19 @@ pub struct OpenFileBlock {
     pub params: serde_json::Value,
     pub status: Status,
     pub text: String,
+    #[serde(default)]
+    pub background: bool,
 }
 
 impl OpenFileBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value) -> Self {
+    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
         Self {
             call_id: call_id.into(),
             tool_name: tool_name.into(),
             params,
             status: Status::Pending,
             text: String::new(),
+            background,
         }
     }
 }
@@ -117,6 +124,7 @@ impl Block for OpenFileBlock {
 
         let mut lines = vec![Line::from(vec![
             self.render_status(),
+            render_prefix(self.background),
             Span::styled("open_file", Style::default().fg(Color::Magenta)),
             Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(location, Style::default().fg(Color::Cyan)),

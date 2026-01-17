@@ -23,7 +23,7 @@ use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
 #[cfg(feature = "profiling")]
 use crate::{profile_frame, profile_span};
 use crate::tool_filter::ToolFilters;
-use crate::tools::{Effect, ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
+use crate::tools::{Effect, ToolCall, ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
 use crate::ui::{Attachment, ChatView, InputBox};
 
@@ -69,9 +69,9 @@ You have access to the following tools:
 - Use `ls` for directory exploration
 - Use `grep` or `rg` for searching code
 
-### Bad Habits
-- Be mindful of your bad habits, they include:
-  - Using cd to change directories unnecessarily before running commands, ususally with &&. You are probably already in the working directory you need to be in. 
+### Background Execution
+For long-running operations, you can execute tools in the background by adding `"background": true` to the tool call. This returns immediately with a task ID while the tool runs asynchronously.
+Use `list_background_tasks` to check status and `get_background_task` to retrieve results when complete.
 
 ### General
 - Be concise but thorough
@@ -269,8 +269,8 @@ pub struct App {
     tool_executor: ToolExecutor,
     /// OAuth credentials for agent creation
     oauth: Option<crate::auth::OAuthCredentials>,
-    /// Pending approval responder (when tool is awaiting user decision)
-    pending_approval: Option<oneshot::Sender<ToolDecision>>,
+    /// Queue of tools awaiting approval - front is currently displayed
+    pending_approvals: VecDeque<(ToolCall, oneshot::Sender<ToolDecision>)>,
 }
 
 impl App {
@@ -379,7 +379,7 @@ impl App {
             agents: AgentRegistry::new(),
             tool_executor: ToolExecutor::new(ToolRegistry::new()),
             oauth: None,
-            pending_approval: None,
+            pending_approvals: VecDeque::new(),
         })
     }
 
@@ -391,6 +391,7 @@ impl App {
             AgentRuntimeConfig::foreground(&self.config),
             SYSTEM_PROMPT,
             self.oauth.clone(),
+            self.tool_executor.tools().clone(),
         );
 
         if self.continue_session {
@@ -858,88 +859,126 @@ impl App {
         Ok(())
     }
 
-    /// Execute a tool decision (approve/deny) for the current tool
+    /// Execute a tool decision (approve/deny) for the currently active tool
     async fn decide_pending_tool(&mut self, decision: ToolDecision) {
         tracing::debug!("decide_pending_tool: decision={:?}", decision);
-        
-        // Take the responder
-        let responder = match self.pending_approval.take() {
-            Some(r) => r,
+
+        // Pop the front of the queue (the currently displayed tool)
+        let (tool_call, responder) = match self.pending_approvals.pop_front() {
+            Some(t) => t,
             None => {
                 tracing::warn!("No tool awaiting approval");
                 return;
             },
         };
 
-        // Transition out of ToolApproval mode immediately so keystrokes aren't dropped
-        self.input_mode = InputMode::Streaming;
-
-        // Update block status
-        self.chat.transcript.mark_active_block(match decision {
-            ToolDecision::Approve => Status::Running,
-            ToolDecision::Deny => Status::Denied,
-            _ => Status::Pending,
-        });
-        self.chat.render(&mut self.terminal);
-        self.draw();
+        // Update block status based on decision
+        if let Some(block) = self.chat.transcript.find_tool_block_mut(&tool_call.call_id) {
+            block.set_status(match decision {
+                ToolDecision::Approve => Status::Running,
+                ToolDecision::Deny => Status::Denied,
+                _ => Status::Pending,
+            });
+        }
 
         // Send decision to executor
-        tracing::debug!("decide_pending_tool: sending decision to executor");
-        match responder.send(decision) {
-            Ok(()) => tracing::debug!("decide_pending_tool: decision sent successfully"),
-            Err(_) => tracing::warn!("decide_pending_tool: failed to send decision (receiver dropped)"),
+        tracing::debug!("decide_pending_tool: sending decision for {}", tool_call.call_id);
+        if responder.send(decision).is_err() {
+            tracing::warn!("Failed to send decision (receiver dropped)");
         }
+
+        // If there are more tools queued, activate the next one
+        if let Some((next_call, _)) = self.pending_approvals.front() {
+            tracing::debug!("decide_pending_tool: activating next tool {}", next_call.call_id);
+            // Create block for the next tool
+            let tool = self.tool_executor.tools().get(&next_call.name);
+            self.chat.start_block(
+                tool.create_block(&next_call.call_id, next_call.params.clone(), next_call.background),
+                &mut self.terminal,
+            );
+            self.draw(); // flush block before showing approval UI
+            self.input_mode = InputMode::ToolApproval;
+        } else {
+            // No more pending - switch to streaming mode
+            self.input_mode = InputMode::Streaming;
+        }
+
+        self.chat.render(&mut self.terminal);
+        self.draw();
     }
 
     /// Handle events from the tool executor
     async fn handle_tool_event(&mut self, event: ToolEvent) -> Result<()> {
-        tracing::debug!("handle_tool_event: {:?}", match &event {
-            ToolEvent::AwaitingApproval { name, .. } => format!("AwaitingApproval({})", name),
-            ToolEvent::Delegate { effect, .. } => format!("Delegate({:?})", effect),
-            ToolEvent::Delta { .. } => "Delta".to_string(),
-            ToolEvent::Completed { content, .. } => format!("Completed(content_len={})", content.len()),
-            ToolEvent::Error { content, .. } => format!("Error(content_len={})", content.len()),
-        });
-        
+        tracing::debug!(
+            "handle_tool_event: {:?}",
+            match &event {
+                ToolEvent::AwaitingApproval { name, .. } => format!("AwaitingApproval({})", name),
+                ToolEvent::Delegate { effect, .. } => format!("Delegate({:?})", effect),
+                ToolEvent::Delta { .. } => "Delta".to_string(),
+                ToolEvent::Completed { content, .. } =>
+                    format!("Completed(content_len={})", content.len()),
+                ToolEvent::Error { content, .. } => format!("Error(content_len={})", content.len()),
+                ToolEvent::BackgroundStarted { name, call_id, .. } =>
+                    format!("BackgroundStarted({}, {})", name, call_id),
+                ToolEvent::BackgroundCompleted { name, call_id, .. } =>
+                    format!("BackgroundCompleted({}, {})", name, call_id),
+            }
+        );
+
         match event {
             ToolEvent::AwaitingApproval {
                 agent_id,
                 call_id,
                 name,
                 params,
+                background,
                 responder,
             } => {
                 let is_primary = self.agents.primary_id() == Some(agent_id);
 
                 if is_primary {
-                    // Display tool in transcript for primary agent
-                    self.draw(); // there's sometimes a missing token otherwise
-                    let tool = self.tool_executor.tools().get(&name);
-                    self.chat.start_block(
-                        tool.create_block(&call_id, params.clone()),
-                        &mut self.terminal,
-                    );
-                    self.draw();
+                    // Create ToolCall and add to queue
+                    let tool_call = ToolCall {
+                        agent_id,
+                        call_id: call_id.clone(),
+                        name: name.clone(),
+                        params: params.clone(),
+                        decision: ToolDecision::Pending,
+                        background,
+                    };
+                    let is_first = self.pending_approvals.is_empty();
+                    self.pending_approvals.push_back((tool_call, responder));
 
-                    // Store responder for later decision
-                    self.pending_approval = Some(responder);
+                    // Only create block and show UI for the first tool in queue
+                    if is_first {
+                        self.draw(); // flush any pending text
+                        let tool = self.tool_executor.tools().get(&name);
+                        self.chat.start_block(
+                            tool.create_block(&call_id, params.clone(), background),
+                            &mut self.terminal,
+                        );
+                        self.draw();
 
-                    match self.tool_filters.evaluate(&name, &params) {
-                        Some(decision) => {
-                            // Auto-approve/deny based on filters
-                            self.decide_pending_tool(decision).await;
-                        },
-                        None => {
-                            // Ask user for approval - save transcript checkpoint while waiting
-                            if let Err(e) = self.chat.transcript.save() {
-                                tracing::error!("Failed to save transcript before tool approval: {}", e);
-                            }
-                            self.input_mode = InputMode::ToolApproval;
-                        },
+                        // Check filters for auto-approve/deny
+                        match self.tool_filters.evaluate(&name, &params) {
+                            Some(decision) => {
+                                self.decide_pending_tool(decision).await;
+                            },
+                            None => {
+                                // Wait for user approval
+                                if let Err(e) = self.chat.transcript.save() {
+                                    tracing::error!(
+                                        "Failed to save transcript before tool approval: {}",
+                                        e
+                                    );
+                                }
+                                self.input_mode = InputMode::ToolApproval;
+                            },
+                        }
                     }
+                    // If not first, it's queued - no UI needed yet
                 } else {
-                    // TODO: Review auto-approve behavior for background agents
-                    // Background agents: auto-approve tools without UI interaction
+                    // Background agents: auto-approve without UI
                     tracing::debug!(
                         "Auto-approving tool {} for background agent {}",
                         name,
@@ -989,13 +1028,11 @@ impl App {
                 let is_primary = self.agents.primary_id() == Some(agent_id);
 
                 if is_primary {
-                    // Set the output on the block before marking complete
+                    // Set the output on the block and mark it complete (by call_id, not active block)
                     if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
                         block.append_text(&content);
+                        block.set_status(Status::Complete);
                     }
-
-                    // Update transcript status for primary agent
-                    self.chat.transcript.mark_active_block(Status::Complete);
                 }
 
                 // Tell agent about the result - route to the correct agent by ID
@@ -1007,9 +1044,10 @@ impl App {
                 }
 
                 if is_primary {
-                    // Tool is done - go back to streaming mode.
-                    // If there's another tool pending, AwaitingApproval will switch back.
-                    self.input_mode = InputMode::Streaming;
+                    // Tool is done - only switch to streaming if no more approvals pending
+                    if self.pending_approvals.is_empty() {
+                        self.input_mode = InputMode::Streaming;
+                    }
 
                     // Render update
                     self.chat.render(&mut self.terminal);
@@ -1043,14 +1081,45 @@ impl App {
                 }
 
                 if is_primary {
-                    // Tool is done - go back to streaming mode.
-                    // If there's another tool pending, AwaitingApproval will switch back.
-                    self.input_mode = InputMode::Streaming;
+                    // Tool is done - only switch to streaming if no more approvals pending
+                    if self.pending_approvals.is_empty() {
+                        self.input_mode = InputMode::Streaming;
+                    }
 
                     // Render update
                     self.chat.render(&mut self.terminal);
                     self.draw();
                 }
+            },
+
+            ToolEvent::BackgroundStarted {
+                agent_id,
+                call_id,
+                name,
+            } => {
+                // Background task started - send placeholder result to agent
+                let placeholder = format!("Running in background (task_id: {})", call_id);
+                if let Some(agent_mutex) = self.agents.get(agent_id) {
+                    agent_mutex
+                        .lock()
+                        .await
+                        .submit_tool_result(&call_id, placeholder);
+                }
+                tracing::info!("Background task started: {} ({})", name, call_id);
+            },
+
+            ToolEvent::BackgroundCompleted {
+                agent_id,
+                call_id,
+                name,
+            } => {
+                // Background task completed - status available via list_background_tasks
+                tracing::info!(
+                    "Background task completed: {} ({}) for agent {}",
+                    name,
+                    call_id,
+                    agent_id
+                );
             },
         }
         Ok(())
@@ -1080,7 +1149,7 @@ impl App {
                 };
 
                 // Create agent with its own tool registry
-                let mut sub_agent = Agent::with_tools(
+                let mut sub_agent = Agent::new(
                     AgentRuntimeConfig::background(&self.config),
                     &system_prompt,
                     self.oauth.clone(),
@@ -1090,7 +1159,10 @@ impl App {
 
                 // Run the background agent to completion with separate tool registry
                 let output = crate::llm::background::run_agent(sub_agent, create_tools()).await?;
-                tracing::info!("Background agent completed, output length: {}", output.len());
+                tracing::info!(
+                    "Background agent completed, output length: {}",
+                    output.len()
+                );
                 Ok(Some(output))
             },
             Effect::IdeReloadBuffer { path } => {
@@ -1139,6 +1211,30 @@ impl App {
                     }
                 }
                 Ok(None)
+            },
+            Effect::ListBackgroundTasks => {
+                let tasks = self.tool_executor.list_tasks();
+                if tasks.is_empty() {
+                    Ok(Some("No background tasks".to_string()))
+                } else {
+                    let output = tasks
+                        .iter()
+                        .map(|(call_id, name, status)| {
+                            format!("{} ({}) [{:?}]", call_id, name, status)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Ok(Some(output))
+                }
+            },
+            Effect::GetBackgroundTask { task_id } => {
+                match self.tool_executor.take_result(&task_id) {
+                    Some((tool_name, output, status)) => Ok(Some(format!(
+                        "Task {} ({}) [{:?}]:\n{}",
+                        task_id, tool_name, status, output
+                    ))),
+                    None => Ok(Some(format!("Task {} not found or still running", task_id))),
+                }
             },
         }
     }

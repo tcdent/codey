@@ -13,7 +13,7 @@ use serde_json::json;
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{
-    render_approval_prompt, render_result, Block, BlockType, Status, ToolBlock,
+    render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
 };
 
 /// Fetch HTML display block
@@ -24,6 +24,8 @@ pub struct FetchHtmlBlock {
     pub params: serde_json::Value,
     pub status: Status,
     pub text: String,
+    #[serde(default)]
+    pub background: bool,
 }
 
 impl FetchHtmlBlock {
@@ -31,6 +33,7 @@ impl FetchHtmlBlock {
         call_id: impl Into<String>,
         tool_name: impl Into<String>,
         params: serde_json::Value,
+        background: bool,
     ) -> Self {
         Self {
             call_id: call_id.into(),
@@ -38,12 +41,13 @@ impl FetchHtmlBlock {
             params,
             status: Status::Pending,
             text: String::new(),
+            background,
         }
     }
 
-    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value) -> Option<Self> {
+    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value, background: bool) -> Option<Self> {
         let _: FetchHtmlParams = serde_json::from_value(params.clone()).ok()?;
-        Some(Self::new(call_id, tool_name, params))
+        Some(Self::new(call_id, tool_name, params, background))
     }
 }
 
@@ -58,6 +62,7 @@ impl Block for FetchHtmlBlock {
 
         lines.push(Line::from(vec![
             self.render_status(),
+            render_prefix(self.background),
             Span::styled("fetch_html", Style::default().fg(Color::Magenta)),
             Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(url, Style::default().fg(Color::Blue)),
@@ -130,6 +135,10 @@ impl Tool for FetchHtmlTool {
                 "max_length": {
                     "type": "integer",
                     "description": "Maximum content length in characters (default: 100000)"
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run in background. Returns immediately with a task_id; use list_background_tasks/get_background_task to check status and retrieve results."
                 }
             },
             "required": ["url"]
@@ -150,11 +159,11 @@ impl Tool for FetchHtmlTool {
             })
     }
 
-    fn create_block(&self, call_id: &str, params: serde_json::Value) -> Box<dyn Block> {
-        if let Some(block) = FetchHtmlBlock::from_params(call_id, self.name(), params.clone()) {
+    fn create_block(&self, call_id: &str, params: serde_json::Value, background: bool) -> Box<dyn Block> {
+        if let Some(block) = FetchHtmlBlock::from_params(call_id, self.name(), params.clone(), background) {
             Box::new(block)
         } else {
-            Box::new(ToolBlock::new(call_id, self.name(), params))
+            Box::new(ToolBlock::new(call_id, self.name(), params, background))
         }
     }
 }
@@ -176,6 +185,7 @@ mod tests {
             name: FetchHtmlTool::NAME.to_string(),
             params: json!({ "url": "not a valid url" }),
             decision: ToolDecision::Approve,
+            background: false,
         }]);
 
         if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next().await {
@@ -197,6 +207,7 @@ mod tests {
             name: FetchHtmlTool::NAME.to_string(),
             params: json!({ "url": "ftp://example.com/file" }),
             decision: ToolDecision::Approve,
+            background: false,
         }]);
 
         if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next().await {
