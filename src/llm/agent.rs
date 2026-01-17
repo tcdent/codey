@@ -406,7 +406,12 @@ impl Agent {
     }
 
     /// Execute a chat request with retry and exponential backoff
-    async fn exec_chat_with_retry(&self) -> Result<ChatStreamResponse, AgentStep> {
+    /// 
+    /// Takes &mut self (even though it only reads) because for the future to be
+    /// Send, we need &mut Agent (which requires Agent: Send) rather than &Agent
+    /// (which requires Agent: Sync). Agent is Send but not Sync due to the
+    /// internal stream being `dyn Stream + Send` but not `+ Sync`.
+    async fn exec_chat_with_retry(&mut self) -> Result<ChatStreamResponse, AgentStep> {
         // Clone messages and add cache_control to the last message
         // Per Anthropic docs: mark the final message to enable incremental caching
         let mut messages = self.messages.clone();

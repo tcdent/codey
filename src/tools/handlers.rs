@@ -360,40 +360,6 @@ impl EffectHandler for IdeClosePreview {
 }
 
 // =============================================================================
-// Agent handlers (delegate to app)
-// =============================================================================
-
-/// Spawn a background agent
-pub struct SpawnAgent {
-    pub task: String,
-    pub context: Option<String>,
-}
-
-#[async_trait::async_trait]
-impl EffectHandler for SpawnAgent {
-    async fn call(self: Box<Self>) -> Step {
-        Step::Delegate(Effect::SpawnAgent {
-            task: self.task,
-            context: self.context,
-        })
-    }
-}
-
-/// Send a notification
-pub struct Notify {
-    pub message: String,
-}
-
-#[async_trait::async_trait]
-impl EffectHandler for Notify {
-    async fn call(self: Box<Self>) -> Step {
-        Step::Delegate(Effect::Notify {
-            message: self.message,
-        })
-    }
-}
-
-// =============================================================================
 // Background task handlers (delegate to app)
 // =============================================================================
 

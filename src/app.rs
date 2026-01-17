@@ -17,13 +17,16 @@ use ratatui::{
 use tokio::sync::oneshot;
 
 use crate::commands::Command;
-use crate::config::{AgentRuntimeConfig, Config, ToolAccess};
+use crate::config::{AgentRuntimeConfig, Config};
 use crate::ide::{Ide, IdeEvent, Nvim};
 use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
 #[cfg(feature = "profiling")]
 use crate::{profile_frame, profile_span};
 use crate::tool_filter::ToolFilters;
-use crate::tools::{Effect, ToolCall, ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
+use crate::tools::{
+    init_agent_context, update_agent_oauth, Effect, ToolCall, ToolDecision, ToolEvent,
+    ToolExecutor, ToolRegistry,
+};
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
 use crate::ui::{Attachment, ChatView, InputBox};
 
@@ -94,7 +97,7 @@ Please provide a comprehensive summary of our conversation so far in markdown fo
 
 Be thorough but concise - this summary will seed a fresh conversation context."#;
 
-const SUB_AGENT_PROMPT: &str = r#"You are a background research agent. Your task is to investigate, explore, or analyze as directed.
+pub const SUB_AGENT_PROMPT: &str = r#"You are a background research agent. Your task is to investigate, explore, or analyze as directed.
 
 ## Capabilities
 You have read-only access to:
@@ -386,6 +389,12 @@ impl App {
     /// Run the main event loop - purely event-driven rendering
     pub async fn run(&mut self) -> Result<()> {
         self.oauth = crate::auth::OAuthCredentials::load().ok().flatten();
+
+        // Initialize agent context for sub-agent spawning
+        init_agent_context(
+            AgentRuntimeConfig::background(&self.config),
+            self.oauth.clone(),
+        );
 
         let mut agent = Agent::new(
             AgentRuntimeConfig::foreground(&self.config),
@@ -686,6 +695,8 @@ impl App {
                         }
                         // Update App's copy
                         self.oauth = Some(new_creds.clone());
+                        // Update agent context for sub-agents
+                        update_agent_oauth(self.oauth.clone()).await;
                         // Update primary agent's copy
                         if let Some(agent_mutex) = self.agents.primary() {
                             agent_mutex.lock().await.set_oauth(Some(new_creds));
@@ -1129,42 +1140,6 @@ impl App {
     async fn apply_effect(&mut self, _agent_id: AgentId, effect: Effect) -> Result<Option<String>> {
         tracing::debug!("Applying effect: {:?}", effect);
         match effect {
-            Effect::SpawnAgent { task, context } => {
-                tracing::info!("SpawnAgent effect: task={}, context={:?}", task, context);
-
-                // Ensure OAuth is fresh before spawning sub-agent
-                self.refresh_oauth().await;
-
-                // Helper to create tool registry based on config
-                let create_tools = || match self.config.agents.background.tool_access {
-                    ToolAccess::Full => ToolRegistry::new(),
-                    ToolAccess::ReadOnly => ToolRegistry::read_only(),
-                    ToolAccess::None => ToolRegistry::empty(),
-                };
-
-                let system_prompt = if let Some(ctx) = &context {
-                    format!("{}\n\n## Context\n{}", SUB_AGENT_PROMPT, ctx)
-                } else {
-                    SUB_AGENT_PROMPT.to_string()
-                };
-
-                // Create agent with its own tool registry
-                let mut sub_agent = Agent::new(
-                    AgentRuntimeConfig::background(&self.config),
-                    &system_prompt,
-                    self.oauth.clone(),
-                    create_tools(),
-                );
-                sub_agent.send_request(&task, RequestMode::Normal);
-
-                // Run the background agent to completion with separate tool registry
-                let output = crate::llm::background::run_agent(sub_agent, create_tools()).await?;
-                tracing::info!(
-                    "Background agent completed, output length: {}",
-                    output.len()
-                );
-                Ok(Some(output))
-            },
             Effect::IdeReloadBuffer { path } => {
                 if let Some(ide) = &self.ide {
                     ide.reload_buffer(&path.to_string_lossy()).await?;
@@ -1195,10 +1170,6 @@ impl App {
                 if let Some(ide) = &self.ide {
                     ide.close_preview().await?;
                 }
-                Ok(None)
-            },
-            Effect::Notify { message } => {
-                self.alert = Some(message);
                 Ok(None)
             },
             Effect::IdeCheckUnsavedEdits { path } => {

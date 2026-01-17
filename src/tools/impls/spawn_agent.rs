@@ -1,7 +1,16 @@
-//! Task tool for spawning background agents
+//! Spawn agent tool for creating sub-agents
 
-use super::{handlers, Tool, ToolPipeline};
+use std::sync::OnceLock;
+
+use super::{Tool, ToolPipeline};
+use crate::app::SUB_AGENT_PROMPT;
+use crate::tools::ToolRegistry;
+use crate::auth::OAuthCredentials;
+use crate::config::AgentRuntimeConfig;
 use crate::impl_base_block;
+use crate::llm::{Agent, RequestMode};
+use crate::llm::background::run_agent;
+use crate::tools::pipeline::{EffectHandler, Step};
 use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
@@ -9,10 +18,44 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::sync::RwLock;
 
-/// Task block - shows the task description
+// =============================================================================
+// Agent Context - global state for spawning sub-agents
+// =============================================================================
+
+/// Context needed to spawn sub-agents, initialized at app startup
+pub struct AgentContext {
+    pub runtime_config: AgentRuntimeConfig,
+    /// OAuth credentials - wrapped in RwLock so app can update after refresh
+    pub oauth: RwLock<Option<OAuthCredentials>>,
+}
+
+static AGENT_CONTEXT: OnceLock<AgentContext> = OnceLock::new();
+
+/// Initialize the agent context. Called once at app startup.
+pub fn init_agent_context(runtime_config: AgentRuntimeConfig, oauth: Option<OAuthCredentials>) {
+    AGENT_CONTEXT.set(AgentContext {
+        runtime_config,
+        oauth: RwLock::new(oauth),
+    }).ok();
+}
+
+/// Update the oauth credentials (called after refresh)
+pub async fn update_agent_oauth(oauth: Option<OAuthCredentials>) {
+    if let Some(ctx) = AGENT_CONTEXT.get() {
+        *ctx.oauth.write().await = oauth;
+    }
+}
+
+/// Get the agent context, if initialized.
+fn agent_context() -> Option<&'static AgentContext> {
+    AGENT_CONTEXT.get()
+}
+
+/// Spawn agent block - shows the task description
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaskBlock {
+pub struct SpawnAgentBlock {
     pub call_id: String,
     pub tool_name: String,
     pub params: serde_json::Value,
@@ -22,7 +65,7 @@ pub struct TaskBlock {
     pub background: bool,
 }
 
-impl TaskBlock {
+impl SpawnAgentBlock {
     pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
         Self {
             call_id: call_id.into(),
@@ -35,13 +78,13 @@ impl TaskBlock {
     }
 
     pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value, background: bool) -> Option<Self> {
-        let _: TaskParams = serde_json::from_value(params.clone()).ok()?;
+        let _: SpawnAgentParams = serde_json::from_value(params.clone()).ok()?;
         Some(Self::new(call_id, tool_name, params, background))
     }
 }
 
 #[typetag::serde]
-impl Block for TaskBlock {
+impl Block for SpawnAgentBlock {
     impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
@@ -58,7 +101,7 @@ impl Block for TaskBlock {
         lines.push(Line::from(vec![
             self.render_status(),
             render_prefix(self.background),
-            Span::styled("task", Style::default().fg(Color::Magenta)),
+            Span::styled("spawn_agent", Style::default().fg(Color::Magenta)),
             Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(task_display, Style::default().fg(Color::Yellow)),
             Span::styled(")", Style::default().fg(Color::DarkGray)),
@@ -98,22 +141,24 @@ impl Block for TaskBlock {
     }
 }
 
-/// Tool for spawning background agents to handle subtasks
-pub struct TaskTool;
+/// Tool for spawning sub-agents to handle tasks
+// NOTE: Currently delegates to app for execution because Agent is not Send-safe.
+// When Agent becomes Send, this tool can run the agent directly in its handler.
+pub struct SpawnAgentTool;
 
 #[derive(Debug, Deserialize)]
-struct TaskParams {
+struct SpawnAgentParams {
     /// Description of the task for the sub-agent
     task: String,
     /// Optional context to provide to the sub-agent
     context: Option<String>,
 }
 
-impl TaskTool {
-    pub const NAME: &'static str = "mcp_task";
+impl SpawnAgentTool {
+    pub const NAME: &'static str = "mcp_spawn_agent";
 }
 
-impl Tool for TaskTool {
+impl Tool for SpawnAgentTool {
     fn name(&self) -> &'static str {
         Self::NAME
     }
@@ -146,25 +191,72 @@ impl Tool for TaskTool {
     }
 
     fn compose(&self, params: serde_json::Value) -> ToolPipeline {
-        let parsed: TaskParams = match serde_json::from_value(params) {
+        let parsed: SpawnAgentParams = match serde_json::from_value(params) {
             Ok(p) => p,
             Err(e) => return ToolPipeline::error(format!("Invalid params: {}", e)),
         };
 
-        // SpawnAgent effect runs the background agent and returns its output
+        // Create handler - delegates to app for actual execution (Agent is not Send)
         ToolPipeline::new()
             .await_approval()
-            .then(handlers::SpawnAgent {
+            .then(RunAgent {
                 task: parsed.task,
-                context: parsed.context,
+                task_context: parsed.context,
             })
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value, background: bool) -> Box<dyn Block> {
-        if let Some(block) = TaskBlock::from_params(call_id, self.name(), params.clone(), background) {
+        if let Some(block) = SpawnAgentBlock::from_params(call_id, self.name(), params.clone(), background) {
             Box::new(block)
         } else {
             Box::new(ToolBlock::new(call_id, self.name(), params, background))
+        }
+    }
+}
+
+// =============================================================================
+// RunAgent handler - actually runs the sub-agent
+// =============================================================================
+
+/// Handler that runs a sub-agent to completion
+struct RunAgent {
+    task: String,
+    task_context: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl EffectHandler for RunAgent {
+    async fn call(self: Box<Self>) -> Step {
+        // Get the agent context (initialized at app startup)
+        let ctx = match agent_context() {
+            Some(c) => c,
+            None => return Step::Error("Agent context not initialized".into()),
+        };
+
+        // Get OAuth credentials (may be None for API key auth)
+        let oauth = ctx.oauth.read().await.clone();
+
+        // Build system prompt
+        let system_prompt = if let Some(context) = &self.task_context {
+            format!("{}\n\n## Context\n{}", SUB_AGENT_PROMPT, context)
+        } else {
+            SUB_AGENT_PROMPT.to_string()
+        };
+
+        // Create the sub-agent with read-only tools
+        let tools = ToolRegistry::subagent();
+        let mut agent = Agent::new(
+            ctx.runtime_config.clone(),
+            &system_prompt,
+            oauth,
+            tools.clone(),
+        );
+        agent.send_request(&self.task, RequestMode::Normal);
+
+        // Run to completion
+        match run_agent(agent, tools).await {
+            Ok(output) => Step::Output(output),
+            Err(e) => Step::Error(e.to_string()),
         }
     }
 }

@@ -50,10 +50,6 @@ pub enum Effect {
     IdeClosePreview,
     /// Check if IDE buffer has unsaved changes - fails pipeline if dirty
     IdeCheckUnsavedEdits { path: PathBuf },
-
-    // === Agents ===
-    SpawnAgent { task: String, context: Option<String> },
-    Notify { message: String },
     
     // === Background Tasks ===
     ListBackgroundTasks,
