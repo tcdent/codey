@@ -36,7 +36,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::tools::ToolDecision;
 use crate::tools::{
-    EditFileTool, FetchUrlTool, ReadFileTool, ShellTool, WebSearchTool, WriteFileTool,
+    EditFileTool, FetchUrlTool, GetBackgroundTaskTool, ListBackgroundTasksTool,
+    ReadFileTool, ShellTool, WebSearchTool, WriteFileTool,
 };
 
 /// Filter configuration with allow and deny pattern lists
@@ -103,6 +104,8 @@ fn primary_param(tool_name: &str) -> &'static str {
         x if x == EditFileTool::NAME => "path",
         x if x == FetchUrlTool::NAME => "url",
         x if x == WebSearchTool::NAME => "query",
+        x if x == GetBackgroundTaskTool::NAME => "task_id",
+        x if x == ListBackgroundTasksTool::NAME => "", // No params - empty string matches ".*"
         _ => "command", // Default fallback
     }
 }
@@ -136,6 +139,13 @@ impl ToolFilters {
 
         // Get the primary parameter value for this tool
         let param_name = primary_param(tool_name);
+        
+        // Special case: empty param name means no params (e.g., list_background_tasks)
+        // Match against empty string so ".*" patterns work
+        if param_name.is_empty() {
+            return filter.evaluate("");
+        }
+        
         let value = match params.get(param_name) {
             Some(serde_json::Value::String(s)) => s.as_str(),
             Some(v) => {
