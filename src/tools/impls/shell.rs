@@ -2,7 +2,7 @@
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
-use crate::transcript::{render_approval_prompt, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
+use crate::transcript::{render_tool_block, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -46,44 +46,14 @@ impl Block for ShellBlock {
     impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
         let command = self.params["command"].as_str().unwrap_or("");
         let working_dir = self.params.get("working_dir").and_then(|v| v.as_str());
 
-        // Format: shell(command) or shell(command, in dir)
-        let mut spans = vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("shell", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(command, Style::default().fg(Color::White)),
-        ];
+        let mut args = vec![Span::styled(command.to_string(), Style::default().fg(Color::White))];
         if let Some(dir) = working_dir {
-            spans.push(Span::styled(format!(", in {}", dir), Style::default().fg(Color::DarkGray)));
+            args.push(Span::styled(format!(", in {}", dir), Style::default().fg(Color::DarkGray)));
         }
-        spans.push(Span::styled(")", Style::default().fg(Color::DarkGray)));
-        lines.push(Line::from(spans));
-
-        // Approval prompt if pending
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        // Output if completed
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
-        }
-
-        // Denied message
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
+        render_tool_block(self.status, self.background, "shell", args, &self.text, 10)
     }
 
     fn call_id(&self) -> Option<&str> {
@@ -187,6 +157,84 @@ impl Tool for ShellTool {
 mod tests {
     use super::*;
     use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
+    use crate::transcript::lines_to_string;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending() {
+        let block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "ls -la"}), false);
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? shell(ls -la)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_pending_with_working_dir() {
+        let block = ShellBlock::new(
+            "call_1",
+            "mcp_shell",
+            json!({"command": "ls -la", "working_dir": "/home/user"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? shell(ls -la, in /home/user)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "cargo build"}), false);
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ shell(cargo build)");
+    }
+
+    #[test]
+    fn test_render_complete_with_output() {
+        let mut block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "echo hello"}), false);
+        block.status = Status::Complete;
+        block.text = "hello".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ shell(echo hello)\n  hello");
+    }
+
+    #[test]
+    fn test_render_complete_with_multiline_output() {
+        let mut block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "ls"}), false);
+        block.status = Status::Complete;
+        block.text = "file1.txt\nfile2.txt\nfile3.txt".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ shell(ls)\n  file1.txt\n  file2.txt\n  file3.txt");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "rm -rf /"}), false);
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ shell(rm -rf /)\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "make build"}), true);
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] shell(make build)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "invalid_cmd"}), false);
+        block.status = Status::Error;
+        block.text = "Command not found".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✗ shell(invalid_cmd)\n  Command not found");
+    }
+
+    // =========================================================================
+    // Execution tests
+    // =========================================================================
 
     #[tokio::test]
     async fn test_shell_echo() {

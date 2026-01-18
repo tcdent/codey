@@ -11,7 +11,7 @@ use crate::impl_base_block;
 use crate::llm::{Agent, RequestMode};
 use crate::llm::background::run_agent;
 use crate::tools::pipeline::{EffectHandler, Step};
-use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, ToolBlock, Status};
+use crate::transcript::{render_tool_block, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -94,8 +94,6 @@ impl Block for SpawnAgentBlock {
     impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
         let task = self.params["task"].as_str().unwrap_or("");
         // Truncate task for display
         let task_display = if task.len() > 60 {
@@ -104,34 +102,8 @@ impl Block for SpawnAgentBlock {
             task.to_string()
         };
 
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("spawn_agent", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(task_display, Style::default().fg(Color::Yellow)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        if !self.text.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("  {}", self.text),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
+        let args = vec![Span::styled(task_display, Style::default().fg(Color::Yellow))];
+        render_tool_block(self.status, self.background, "spawn_agent", args, &self.text, 5)
     }
 
     fn call_id(&self) -> Option<&str> {
@@ -264,5 +236,107 @@ impl EffectHandler for RunAgent {
             Ok(output) => Step::Output(output),
             Err(e) => Step::Error(e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::lines_to_string;
+    use serde_json::json;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending() {
+        let block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? spawn_agent(Find all TODO comments)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_pending_long_task() {
+        let block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "This is a very long task description that should be truncated after sixty characters"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        // Truncation happens at 60 chars (57 chars + "...")
+        assert_eq!(output, "? spawn_agent(This is a very long task description that should be trunc...)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            false,
+        );
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ spawn_agent(Find all TODO comments)");
+    }
+
+    #[test]
+    fn test_render_complete_with_output() {
+        let mut block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            false,
+        );
+        block.status = Status::Complete;
+        block.text = "Found 5 TODO comments".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ spawn_agent(Find all TODO comments)\n  Found 5 TODO comments");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            false,
+        );
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ spawn_agent(Find all TODO comments)\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            true,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] spawn_agent(Find all TODO comments)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            false,
+        );
+        block.status = Status::Error;
+        block.text = "Agent context not initialized".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✗ spawn_agent(Find all TODO comments)\n  Agent context not initialized");
     }
 }

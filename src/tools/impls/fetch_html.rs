@@ -12,9 +12,7 @@ use serde_json::json;
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
-use crate::transcript::{
-    render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
-};
+use crate::transcript::{render_tool_block, Block, BlockType, Status, ToolBlock};
 
 /// Fetch HTML display block
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,35 +54,9 @@ impl Block for FetchHtmlBlock {
     impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
         let url = self.params["url"].as_str().unwrap_or("");
-
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("fetch_html", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(url, Style::default().fg(Color::Blue)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 5));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
+        let args = vec![Span::styled(url.to_string(), Style::default().fg(Color::Blue))];
+        render_tool_block(self.status, self.background, "fetch_html", args, &self.text, 5)
     }
 
     fn call_id(&self) -> Option<&str> {
@@ -172,6 +144,94 @@ impl Tool for FetchHtmlTool {
 mod tests {
     use super::*;
     use crate::tools::{ToolCall, ToolDecision, ToolExecutor, ToolRegistry};
+    use crate::transcript::lines_to_string;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending() {
+        let block = FetchHtmlBlock::new(
+            "call_1",
+            "mcp_fetch_html",
+            json!({"url": "https://example.com"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? fetch_html(https://example.com)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = FetchHtmlBlock::new(
+            "call_1",
+            "mcp_fetch_html",
+            json!({"url": "https://example.com"}),
+            false,
+        );
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ fetch_html(https://example.com)");
+    }
+
+    #[test]
+    fn test_render_complete_with_output() {
+        let mut block = FetchHtmlBlock::new(
+            "call_1",
+            "mcp_fetch_html",
+            json!({"url": "https://example.com"}),
+            false,
+        );
+        block.status = Status::Complete;
+        // Use text without blank lines to avoid render_result preserving them
+        block.text = "# Example Domain\nThis is an example.".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ fetch_html(https://example.com)\n  # Example Domain\n  This is an example.");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = FetchHtmlBlock::new(
+            "call_1",
+            "mcp_fetch_html",
+            json!({"url": "https://example.com"}),
+            false,
+        );
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ fetch_html(https://example.com)\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = FetchHtmlBlock::new(
+            "call_1",
+            "mcp_fetch_html",
+            json!({"url": "https://example.com"}),
+            true,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] fetch_html(https://example.com)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = FetchHtmlBlock::new(
+            "call_1",
+            "mcp_fetch_html",
+            json!({"url": "https://example.com"}),
+            false,
+        );
+        block.status = Status::Error;
+        block.text = "Page not found".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✗ fetch_html(https://example.com)\n  Page not found");
+    }
+
+    // =========================================================================
+    // Execution tests
+    // =========================================================================
 
     #[tokio::test]
     async fn test_fetch_html_invalid_url() {

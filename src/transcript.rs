@@ -368,6 +368,79 @@ pub fn render_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// Helper: render denied message
+pub fn render_denied() -> Line<'static> {
+    Line::from(Span::styled(
+        "  Denied by user",
+        Style::default().fg(Color::DarkGray),
+    ))
+}
+
+/// Render a tool block with the standard layout:
+/// - Header: status + [bg]? + name(args)
+/// - Approval prompt if pending
+/// - Result lines if text present
+/// - Denied message if denied
+///
+/// Arguments:
+/// - `status`: Current block status
+/// - `background`: Whether this is a background tool
+/// - `name`: Display name (e.g., "read_file", "shell")
+/// - `args`: Argument spans to display inside parentheses
+/// - `text`: Result text to display
+/// - `max_lines`: Maximum result lines to show
+pub fn render_tool_block(
+    status: Status,
+    background: bool,
+    name: &str,
+    args: Vec<Span<'static>>,
+    text: &str,
+    max_lines: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    // Build header: status + [bg]? + name + (args)
+    let mut header_spans = vec![
+        render_status_icon(status),
+        render_prefix(background),
+        Span::styled(name.to_string(), Style::default().fg(Color::Magenta)),
+        Span::styled("(", Style::default().fg(Color::DarkGray)),
+    ];
+    header_spans.extend(args);
+    header_spans.push(Span::styled(")", Style::default().fg(Color::DarkGray)));
+    lines.push(Line::from(header_spans));
+
+    // Approval prompt if pending
+    if status == Status::Pending {
+        lines.push(render_approval_prompt());
+    }
+
+    // Result lines if text present
+    if !text.is_empty() {
+        lines.extend(render_result(text, max_lines));
+    }
+
+    // Denied message if denied
+    if status == Status::Denied {
+        lines.push(render_denied());
+    }
+
+    lines
+}
+
+/// Render status icon with appropriate color (standalone version for render_tool_block)
+fn render_status_icon(status: Status) -> Span<'static> {
+    let (icon, color) = match status {
+        Status::Pending => ("? ", Color::Yellow),
+        Status::Running => ("⚙ ", Color::Blue),
+        Status::Complete => ("✓ ", Color::Green),
+        Status::Error => ("✗ ", Color::Red),
+        Status::Denied => ("⊘ ", Color::DarkGray),
+        Status::Cancelled => ("⊘ ", Color::Yellow),
+    };
+    Span::styled(icon, Style::default().fg(color))
+}
+
 /// A turn in the conversation - one user or assistant response
 #[derive(Serialize, Deserialize)]
 pub struct Turn {
@@ -688,9 +761,34 @@ impl Transcript {
     }
 }
 
+/// Convert ratatui Lines to a plain string representation for testing.
+/// Each Line becomes a string with spans concatenated, joined by newlines.
+#[cfg(test)]
+pub fn lines_to_string(lines: &[Line<'_>]) -> String {
+    lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_lines_to_string() {
+        let lines = vec![
+            Line::from(vec![Span::raw("Hello "), Span::raw("World")]),
+            Line::from(vec![Span::raw("Line 2")]),
+        ];
+        assert_eq!(lines_to_string(&lines), "Hello World\nLine 2");
+    }
 
     #[test]
     fn test_text_block_render() {

@@ -2,7 +2,7 @@
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
-use crate::transcript::{render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock};
+use crate::transcript::{render_tool_block, Block, BlockType, Status, ToolBlock};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -45,37 +45,15 @@ impl Block for WebSearchBlock {
     impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
         let query = self.params["query"].as_str().unwrap_or("");
-
-        // Format: web_search(query)
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("web_search", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("\"{}\"", query), Style::default().fg(Color::Green)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        if !self.text.is_empty() {
-            lines.extend(render_result(
-                &format!("{} results.", self.text.split("\n").count()), 1));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
+        let args = vec![Span::styled(format!("\"{}\"", query), Style::default().fg(Color::Green))];
+        // Show result count instead of full results
+        let result_text = if self.text.is_empty() {
+            String::new()
+        } else {
+            format!("{} results.", self.text.lines().count())
+        };
+        render_tool_block(self.status, self.background, "web_search", args, &result_text, 1)
     }
 
     fn call_id(&self) -> Option<&str> {
@@ -159,5 +137,95 @@ impl Tool for WebSearchTool {
         } else {
             Box::new(ToolBlock::new(call_id, self.name(), params, background))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::lines_to_string;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending() {
+        let block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? web_search(\"rust async await\")\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            false,
+        );
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ web_search(\"rust async await\")");
+    }
+
+    #[test]
+    fn test_render_complete_with_output() {
+        let mut block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            false,
+        );
+        block.status = Status::Complete;
+        block.text = "Result 1\nResult 2\nResult 3".to_string();
+        let output = lines_to_string(&block.render(80));
+        // WebSearchBlock shows "N results." instead of the actual results
+        assert_eq!(output, "✓ web_search(\"rust async await\")\n  3 results.");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            false,
+        );
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ web_search(\"rust async await\")\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            true,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] web_search(\"rust async await\")\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            false,
+        );
+        block.status = Status::Error;
+        block.text = "API key not configured".to_string();
+        let output = lines_to_string(&block.render(80));
+        // WebSearchBlock uses render_result which shows "N results." for any text
+        assert_eq!(output, "✗ web_search(\"rust async await\")\n  1 results.");
     }
 }
