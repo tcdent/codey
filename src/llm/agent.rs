@@ -251,23 +251,28 @@ impl Agent {
                                 }
                             },
                             BlockType::Tool => {
-                                // Add tool call
-                                if let (Some(call_id), Some(tool_name), Some(params)) =
-                                    (block.call_id(), block.tool_name(), block.params())
-                                {
+                                // Only add tool call if it has a result (text)
+                                // Skip incomplete tools (e.g., quit while awaiting approval)
+                                if let (
+                                    Some(call_id),
+                                    Some(tool_name),
+                                    Some(params),
+                                    Some(text),
+                                ) = (
+                                    block.call_id(),
+                                    block.tool_name(),
+                                    block.params(),
+                                    block.text(),
+                                ) {
                                     tool_calls.push(GenaiToolCall {
                                         call_id: call_id.to_string(),
                                         fn_name: tool_name.to_string(),
                                         fn_arguments: params.clone(),
                                     });
-
-                                    // Also collect tool response
-                                    if let Some(text) = block.text() {
-                                        tool_responses.push(ToolResponse::new(
-                                            call_id.to_string(),
-                                            text.to_string(),
-                                        ));
-                                    }
+                                    tool_responses.push(ToolResponse::new(
+                                        call_id.to_string(),
+                                        text.to_string(),
+                                    ));
                                 }
                             },
                             BlockType::Thinking => {},
