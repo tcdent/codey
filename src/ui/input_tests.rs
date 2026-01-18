@@ -12,7 +12,7 @@ fn render_input_box(input: &InputBox, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("test-model", 1000);
+        let widget = input.widget("test-model", 1000, 0);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -35,7 +35,7 @@ fn render_input_content(input: &InputBox, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("test-model", 1000);
+        let widget = input.widget("test-model", 1000, 0);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -162,7 +162,7 @@ fn test_render_cursor_position_at_end() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("model", 1000);
+        let widget = input.widget("model", 1000, 0);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -194,7 +194,7 @@ fn test_render_cursor_position_middle() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("model", 1000);
+        let widget = input.widget("model", 1000, 0);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -282,7 +282,7 @@ fn test_render_token_count_display() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("model", 5000);
+        let widget = input.widget("model", 5000, 0);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -297,6 +297,57 @@ fn test_render_token_count_display() {
 
     assert!(full_render.contains("5k"),
         "Should display '5k' for 5000 tokens. Got:\n{}", full_render);
+}
+
+#[test]
+fn test_render_background_tasks_indicator() {
+    let input = InputBox::new();
+    
+    // Render with 0 background tasks - no indicator
+    let backend = TestBackend::new(40, 5);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| {
+        let widget = input.widget("model", 1000, 0);
+        frame.render_widget(widget, frame.area());
+    }).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let mut render_no_bg = String::new();
+    for y in 0..5 {
+        for x in 0..40 {
+            render_no_bg.push_str(buffer.cell((x, y)).unwrap().symbol());
+        }
+        render_no_bg.push('\n');
+    }
+
+    // Should show "model" without asterisk
+    assert!(render_no_bg.contains(" model "),
+        "Should display model name without indicator. Got:\n{}", render_no_bg);
+    assert!(!render_no_bg.contains(" * "),
+        "Should NOT have indicator when no background tasks. Got:\n{}", render_no_bg);
+    
+    // Render with 2 background tasks - should show indicator
+    let backend = TestBackend::new(40, 5);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| {
+        let widget = input.widget("model", 1000, 2);
+        frame.render_widget(widget, frame.area());
+    }).unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let mut render_with_bg = String::new();
+    for y in 0..5 {
+        for x in 0..40 {
+            render_with_bg.push_str(buffer.cell((x, y)).unwrap().symbol());
+        }
+        render_with_bg.push('\n');
+    }
+
+    // Should show " * model " with indicator
+    assert!(render_with_bg.contains(" * model "),
+        "Should display indicator when background tasks running. Got:\n{}", render_with_bg);
 }
 
 // ==================== Snapshot Tests ====================
@@ -578,7 +629,7 @@ fn test_cursor_position_after_complex_edits() {
     let backend = TestBackend::new(40, 5);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| {
-        f.render_widget(input.widget("m", 0), f.area());
+        f.render_widget(input.widget("m", 0, 0), f.area());
     }).unwrap();
 
     let buffer = terminal.backend().buffer();

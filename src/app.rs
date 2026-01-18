@@ -486,7 +486,11 @@ impl App {
             .map_or(0, |a| a.total_usage().context_tokens);
         let input_widget = self
             .input
-            .widget(&self.config.agents.foreground.model, context_tokens);
+            .widget(
+                &self.config.agents.foreground.model,
+                context_tokens,
+                self.tool_executor.running_background_count(),
+            );
         let alert = self.alert.clone();
 
         if let Err(e) = self.terminal.draw(|frame| {
@@ -1131,6 +1135,8 @@ impl App {
                     call_id,
                     agent_id
                 );
+                // Redraw to update background task indicator
+                self.draw();
             },
         }
         Ok(())

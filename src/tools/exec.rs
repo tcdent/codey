@@ -347,6 +347,11 @@ impl ToolExecutor {
         self.active.values().any(|p| !p.background && p.status == Status::Running)
     }
     
+    /// Count running background tasks
+    pub fn running_background_count(&self) -> usize {
+        self.active.values().filter(|p| p.background && p.status == Status::Running).count()
+    }
+    
     /// Start a tool by composing its pipeline and adding to active
     fn start_tool(&mut self, tool_call: ToolCall) {
         let call_id = tool_call.call_id.clone();

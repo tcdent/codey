@@ -572,11 +572,13 @@ impl InputBox {
         &'a self,
         model: &'a str,
         context_tokens: u32,
+        background_tasks: usize,
     ) -> InputBoxWidget<'a> {
         InputBoxWidget {
             state: self,
             model,
             context_tokens,
+            background_tasks,
         }
     }
 }
@@ -593,17 +595,26 @@ pub struct InputBoxWidget<'a> {
     model: &'a str,
     /// Current context window size in tokens
     context_tokens: u32,
+    /// Number of running background tasks
+    background_tasks: usize,
 }
 
 impl Widget for InputBoxWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // Build the usage string for right title
         let usage_title = format!(" {} ", format_tokens(self.context_tokens));
+        
+        // Build model title with background indicator
+        let model_title = if self.background_tasks > 0 {
+            format!(" * {} ", self.model)
+        } else {
+            format!(" {} ", self.model)
+        };
 
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(format!(" {} ", self.model))
+            .title(model_title)
             .title_top(Line::from(usage_title).right_aligned());
 
         let inner = block.inner(area);
