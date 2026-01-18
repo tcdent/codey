@@ -27,15 +27,13 @@ use crate::tools::{
     init_agent_context, update_agent_oauth, Effect, ToolCall, ToolDecision, ToolEvent,
     ToolExecutor, ToolRegistry,
 };
-use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
+use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript, CODEY_DIR};
 use crate::ui::{Attachment, ChatView, InputBox};
 
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
 
 pub const APP_NAME: &str = "Codey";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const CODEY_DIR: &str = ".codey";
-pub const TRANSCRIPTS_DIR: &str = "transcripts";
 
 const WELCOME_MESSAGE: &str =
     "Welcome to Codey! I'm your AI coding assistant. How can I help you today?";
@@ -96,24 +94,6 @@ Please provide a comprehensive summary of our conversation so far in markdown fo
 6. **Quotes and log snippets** - Any important quotes or logs that the user provided that we'll need later
 
 Be thorough but concise - this summary will seed a fresh conversation context."#;
-
-pub const SUB_AGENT_PROMPT: &str = r#"You are a background research agent. Your task is to investigate, explore, or analyze as directed.
-
-## Capabilities
-You have read-only access to:
-- `read_file`: Read file contents
-- `shell`: Execute commands (for searching, exploring)
-- `fetch_url`: Fetch web content
-- `web_search`: Search the web
-- `open_file`: Signal a file to open in the IDE
-
-## Guidelines
-- Focus on the specific task assigned to you
-- Be thorough but concise in your findings
-- Report back with structured, actionable information
-- You cannot modify files - only read and explore
-- If you need to suggest changes, describe them clearly for the primary agent to implement
-"#;
 
 const SYSTEM_MD_FILENAME: &str = "SYSTEM.md";
 

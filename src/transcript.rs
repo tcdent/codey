@@ -12,8 +12,12 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::app::{CODEY_DIR, TRANSCRIPTS_DIR};
 use crate::compaction::CompactionBlock;
+
+/// Directory name for Codey project-level configuration and data
+pub const CODEY_DIR: &str = ".codey";
+/// Directory name for storing transcripts
+pub const TRANSCRIPTS_DIR: &str = "transcripts";
 
 
 /// Role of the message sender

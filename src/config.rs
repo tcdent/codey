@@ -143,6 +143,18 @@ pub struct AgentRuntimeConfig {
     pub compaction_thinking_budget: u32,
 }
 
+impl Default for AgentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            model: "claude-sonnet-4-20250514".to_string(),
+            max_tokens: 8192,
+            thinking_budget: 2_000,
+            max_retries: 5,
+            compaction_thinking_budget: 8_000,
+        }
+    }
+}
+
 impl AgentRuntimeConfig {
     /// Create runtime config for foreground agent
     pub fn foreground(config: &Config) -> Self {

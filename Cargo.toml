@@ -7,6 +7,14 @@ description = "A terminal-based AI coding assistant"
 license = "MIT"
 repository = "https://github.com/tcdent/codey"
 
+[lib]
+name = "codey"
+path = "src/lib.rs"
+
+[[bin]]
+name = "codey"
+path = "src/main.rs"
+
 [dependencies]
 # TUI
 ratatui = { version = "0.30.0-beta.0", features = ["scrolling-regions"] }
