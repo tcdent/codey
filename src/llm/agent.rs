@@ -734,3 +734,572 @@ impl Agent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::{Block, TextBlock, ToolBlock, Status};
+
+    // =========================================================================
+    // Usage struct tests
+    // =========================================================================
+
+    #[test]
+    fn test_usage_default() {
+        let usage = Usage::default();
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.context_tokens, 0);
+        assert_eq!(usage.cache_creation_tokens, 0);
+        assert_eq!(usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn test_usage_format_log_basic() {
+        let usage = Usage {
+            output_tokens: 100,
+            context_tokens: 5000,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+        };
+        let log = usage.format_log();
+        assert_eq!(log, "Context: 5000 tokens, output: 100");
+    }
+
+    #[test]
+    fn test_usage_format_log_with_cache() {
+        let usage = Usage {
+            output_tokens: 150,
+            context_tokens: 10000,
+            cache_creation_tokens: 2000,
+            cache_read_tokens: 3000,
+        };
+        let log = usage.format_log();
+        assert_eq!(log, "Context: 10000 tokens (cached: 3000, new: 2000), output: 150");
+    }
+
+    #[test]
+    fn test_usage_format_log_cache_read_only() {
+        let usage = Usage {
+            output_tokens: 50,
+            context_tokens: 8000,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 4000,
+        };
+        let log = usage.format_log();
+        assert!(log.contains("cached: 4000"));
+        assert!(log.contains("new: 0"));
+    }
+
+    #[test]
+    fn test_usage_format_log_cache_creation_only() {
+        let usage = Usage {
+            output_tokens: 75,
+            context_tokens: 6000,
+            cache_creation_tokens: 1500,
+            cache_read_tokens: 0,
+        };
+        let log = usage.format_log();
+        assert!(log.contains("cached: 0"));
+        assert!(log.contains("new: 1500"));
+    }
+
+    #[test]
+    fn test_usage_add_assign_accumulates_output() {
+        let mut total = Usage {
+            output_tokens: 100,
+            context_tokens: 5000,
+            cache_creation_tokens: 1000,
+            cache_read_tokens: 2000,
+        };
+        let turn = Usage {
+            output_tokens: 50,
+            context_tokens: 6000,
+            cache_creation_tokens: 500,
+            cache_read_tokens: 3000,
+        };
+        total += turn;
+
+        // Output tokens accumulate
+        assert_eq!(total.output_tokens, 150);
+        // Context/cache values are replaced (current state, not cumulative)
+        assert_eq!(total.context_tokens, 6000);
+        assert_eq!(total.cache_creation_tokens, 500);
+        assert_eq!(total.cache_read_tokens, 3000);
+    }
+
+    #[test]
+    fn test_usage_add_assign_multiple_turns() {
+        let mut total = Usage::default();
+
+        // First turn
+        total += Usage {
+            output_tokens: 100,
+            context_tokens: 1000,
+            cache_creation_tokens: 500,
+            cache_read_tokens: 0,
+        };
+        assert_eq!(total.output_tokens, 100);
+
+        // Second turn
+        total += Usage {
+            output_tokens: 200,
+            context_tokens: 2000,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 500,
+        };
+        assert_eq!(total.output_tokens, 300);
+        assert_eq!(total.context_tokens, 2000);
+        assert_eq!(total.cache_read_tokens, 500);
+
+        // Third turn
+        total += Usage {
+            output_tokens: 150,
+            context_tokens: 3000,
+            cache_creation_tokens: 100,
+            cache_read_tokens: 900,
+        };
+        assert_eq!(total.output_tokens, 450);
+        assert_eq!(total.context_tokens, 3000);
+    }
+
+    // =========================================================================
+    // ToolCall conversion tests
+    // =========================================================================
+
+    #[test]
+    fn test_toolcall_from_genai_basic() {
+        let genai_tc = GenaiToolCall {
+            call_id: "call_123".to_string(),
+            fn_name: "read_file".to_string(),
+            fn_arguments: serde_json::json!({"path": "/tmp/test.txt"}),
+        };
+
+        let tc = ToolCall::from(&genai_tc);
+
+        assert_eq!(tc.agent_id, 0); // Placeholder
+        assert_eq!(tc.call_id, "call_123");
+        assert_eq!(tc.name, "read_file");
+        assert_eq!(tc.params, serde_json::json!({"path": "/tmp/test.txt"}));
+        assert_eq!(tc.decision, ToolDecision::Pending);
+        assert!(!tc.background);
+    }
+
+    #[test]
+    fn test_toolcall_from_genai_with_background_true() {
+        let genai_tc = GenaiToolCall {
+            call_id: "call_456".to_string(),
+            fn_name: "shell".to_string(),
+            fn_arguments: serde_json::json!({
+                "command": "sleep 10",
+                "background": true
+            }),
+        };
+
+        let tc = ToolCall::from(&genai_tc);
+
+        assert!(tc.background);
+        // background param should be removed from params
+        assert!(tc.params.get("background").is_none());
+        assert_eq!(tc.params.get("command").unwrap(), "sleep 10");
+    }
+
+    #[test]
+    fn test_toolcall_from_genai_with_background_false() {
+        let genai_tc = GenaiToolCall {
+            call_id: "call_789".to_string(),
+            fn_name: "shell".to_string(),
+            fn_arguments: serde_json::json!({
+                "command": "echo hello",
+                "background": false
+            }),
+        };
+
+        let tc = ToolCall::from(&genai_tc);
+
+        assert!(!tc.background);
+        assert!(tc.params.get("background").is_none());
+    }
+
+    #[test]
+    fn test_toolcall_from_genai_empty_params() {
+        let genai_tc = GenaiToolCall {
+            call_id: "call_empty".to_string(),
+            fn_name: "list_tasks".to_string(),
+            fn_arguments: serde_json::json!({}),
+        };
+
+        let tc = ToolCall::from(&genai_tc);
+
+        assert!(!tc.background);
+        assert_eq!(tc.params, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_toolcall_from_genai_null_params() {
+        let genai_tc = GenaiToolCall {
+            call_id: "call_null".to_string(),
+            fn_name: "some_tool".to_string(),
+            fn_arguments: serde_json::Value::Null,
+        };
+
+        let tc = ToolCall::from(&genai_tc);
+
+        // Should handle null gracefully (background defaults to false)
+        assert!(!tc.background);
+    }
+
+    #[test]
+    fn test_toolcall_from_genai_array_params() {
+        // Edge case: params is an array instead of object
+        let genai_tc = GenaiToolCall {
+            call_id: "call_array".to_string(),
+            fn_name: "weird_tool".to_string(),
+            fn_arguments: serde_json::json!(["a", "b", "c"]),
+        };
+
+        let tc = ToolCall::from(&genai_tc);
+
+        // Should handle non-object gracefully
+        assert!(!tc.background);
+        assert_eq!(tc.params, serde_json::json!(["a", "b", "c"]));
+    }
+
+    // =========================================================================
+    // RequestMode tests
+    // =========================================================================
+
+    fn test_config() -> AgentRuntimeConfig {
+        AgentRuntimeConfig {
+            model: "claude-test".to_string(),
+            max_tokens: 4096,
+            thinking_budget: 2000,
+            max_retries: 3,
+            compaction_thinking_budget: 8000,
+        }
+    }
+
+    #[test]
+    fn test_request_mode_normal_options() {
+        let config = test_config();
+        let opts = RequestMode::Normal.options(&config);
+
+        assert!(opts.tools_enabled);
+        assert_eq!(opts.thinking_budget, 2000);
+        assert!(opts.capture_tool_calls);
+    }
+
+    #[test]
+    fn test_request_mode_compaction_options() {
+        let config = test_config();
+        let opts = RequestMode::Compaction.options(&config);
+
+        assert!(!opts.tools_enabled);
+        assert_eq!(opts.thinking_budget, 8000); // Uses compaction_thinking_budget
+        assert!(!opts.capture_tool_calls);
+    }
+
+    #[test]
+    fn test_request_mode_default() {
+        let mode = RequestMode::default();
+        assert!(matches!(mode, RequestMode::Normal));
+    }
+
+    // =========================================================================
+    // extract_turn_usage tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_turn_usage_basic() {
+        let genai_usage = genai::chat::Usage {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(200),
+            total_tokens: Some(1200),
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+
+        let usage = Agent::extract_turn_usage(&genai_usage);
+
+        assert_eq!(usage.output_tokens, 200);
+        assert_eq!(usage.context_tokens, 1000); // input + 0 cache
+        assert_eq!(usage.cache_creation_tokens, 0);
+        assert_eq!(usage.cache_read_tokens, 0);
+    }
+
+    #[test]
+    fn test_extract_turn_usage_with_cache() {
+        let genai_usage = genai::chat::Usage {
+            prompt_tokens: Some(500),
+            completion_tokens: Some(100),
+            total_tokens: Some(600),
+            prompt_tokens_details: Some(genai::chat::PromptTokensDetails {
+                cache_creation_tokens: Some(1000),
+                cached_tokens: Some(2000),
+                audio_tokens: None,
+            }),
+            completion_tokens_details: None,
+        };
+
+        let usage = Agent::extract_turn_usage(&genai_usage);
+
+        assert_eq!(usage.output_tokens, 100);
+        // context = input (500) + cache_creation (1000) + cache_read (2000) = 3500
+        assert_eq!(usage.context_tokens, 3500);
+        assert_eq!(usage.cache_creation_tokens, 1000);
+        assert_eq!(usage.cache_read_tokens, 2000);
+    }
+
+    #[test]
+    fn test_extract_turn_usage_missing_values() {
+        let genai_usage = genai::chat::Usage {
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        };
+
+        let usage = Agent::extract_turn_usage(&genai_usage);
+
+        // Should default to 0 for missing values
+        assert_eq!(usage.output_tokens, 0);
+        assert_eq!(usage.context_tokens, 0);
+    }
+
+    // =========================================================================
+    // Agent restore_from_transcript tests
+    // =========================================================================
+
+    fn create_test_agent() -> Agent {
+        let config = test_config();
+        let tools = ToolRegistry::empty();
+        Agent::new(config, "Test system prompt", None, tools)
+    }
+
+    #[test]
+    fn test_restore_from_empty_transcript() {
+        let mut agent = create_test_agent();
+        let transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test.json"));
+
+        agent.restore_from_transcript(&transcript);
+
+        // Should only have system prompt
+        assert_eq!(agent.messages.len(), 1);
+        assert!(matches!(agent.messages[0].role, ChatRole::System));
+    }
+
+    #[test]
+    fn test_restore_from_transcript_user_messages() {
+        let mut agent = create_test_agent();
+        let mut transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test.json"));
+
+        transcript.add_turn(Role::User, TextBlock::complete("Hello"));
+        transcript.add_turn(Role::User, TextBlock::complete("How are you?"));
+
+        agent.restore_from_transcript(&transcript);
+
+        // System + 2 user messages
+        assert_eq!(agent.messages.len(), 3);
+        assert!(matches!(agent.messages[1].role, ChatRole::User));
+        assert!(matches!(agent.messages[2].role, ChatRole::User));
+    }
+
+    #[test]
+    fn test_restore_from_transcript_assistant_text() {
+        let mut agent = create_test_agent();
+        let mut transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test.json"));
+
+        transcript.add_turn(Role::User, TextBlock::complete("Hello"));
+        transcript.add_turn(Role::Assistant, TextBlock::complete("Hi there!"));
+
+        agent.restore_from_transcript(&transcript);
+
+        assert_eq!(agent.messages.len(), 3);
+        assert!(matches!(agent.messages[2].role, ChatRole::Assistant));
+    }
+
+    #[test]
+    fn test_restore_from_transcript_with_complete_tool() {
+        let mut agent = create_test_agent();
+        let mut transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test.json"));
+
+        transcript.add_turn(Role::User, TextBlock::complete("Read a file"));
+
+        // Add assistant turn with a completed tool block
+        let mut tool_block = ToolBlock::new(
+            "call_123",
+            "read_file",
+            serde_json::json!({"path": "/tmp/test.txt"}),
+            false,
+        );
+        tool_block.set_status(Status::Complete);
+        tool_block.append_text("file contents here");
+        transcript.add_turn(Role::Assistant, tool_block);
+
+        agent.restore_from_transcript(&transcript);
+
+        // System + user + assistant (with tool) + tool response
+        assert_eq!(agent.messages.len(), 4);
+    }
+
+    #[test]
+    fn test_restore_from_transcript_includes_tool_with_empty_result() {
+        // Note: The code has a comment saying incomplete tools should be skipped,
+        // but the check `Some(text)` matches `Some("")`, so tools with empty results
+        // are still included. This test documents the actual behavior.
+        let mut agent = create_test_agent();
+        let mut transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test.json"));
+
+        transcript.add_turn(Role::User, TextBlock::complete("Read a file"));
+
+        // Add assistant turn with a tool block that has empty text
+        let tool_block = ToolBlock::new(
+            "call_pending",
+            "read_file",
+            serde_json::json!({"path": "/tmp/pending.txt"}),
+            false,
+        );
+        transcript.add_turn(Role::Assistant, tool_block);
+
+        agent.restore_from_transcript(&transcript);
+
+        // Current behavior: tools with empty text are still included
+        // System + user + assistant (with tool) + tool response = 4
+        assert_eq!(agent.messages.len(), 4);
+    }
+
+    #[test]
+    fn test_restore_from_transcript_skips_system_turns() {
+        let mut agent = create_test_agent();
+        let mut transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test.json"));
+
+        // Add a system turn (should be skipped - we use our own system prompt)
+        transcript.add_turn(Role::System, TextBlock::complete("Old system prompt"));
+        transcript.add_turn(Role::User, TextBlock::complete("Hello"));
+
+        agent.restore_from_transcript(&transcript);
+
+        // Should skip the system turn from transcript and use our own
+        assert_eq!(agent.messages.len(), 2); // Our system + user
+        // First message should be our system prompt, not the one from transcript
+        let first_text = agent.messages[0].content.first_text();
+        assert_eq!(first_text, Some("Test system prompt"));
+    }
+
+    // =========================================================================
+    // Agent reset_with_summary tests
+    // =========================================================================
+
+    #[test]
+    fn test_reset_with_summary_basic() {
+        let mut agent = create_test_agent();
+
+        // Add some messages to simulate a conversation
+        agent.messages.push(ChatMessage::user("Hello"));
+        agent.messages.push(ChatMessage::assistant("Hi!"));
+        agent.messages.push(ChatMessage::user("Do something"));
+
+        // Set some usage
+        agent.total_usage = Usage {
+            output_tokens: 500,
+            context_tokens: 10000,
+            cache_creation_tokens: 1000,
+            cache_read_tokens: 2000,
+        };
+
+        agent.reset_with_summary("This is the compaction summary");
+
+        // Should have system prompt + summary as user message
+        assert_eq!(agent.messages.len(), 2);
+        assert!(matches!(agent.messages[0].role, ChatRole::System));
+        assert!(matches!(agent.messages[1].role, ChatRole::User));
+
+        // Usage should be reset
+        assert_eq!(agent.total_usage.output_tokens, 0);
+        assert_eq!(agent.total_usage.context_tokens, 0);
+    }
+
+    #[test]
+    fn test_reset_with_summary_preserves_system_prompt() {
+        let config = test_config();
+        let tools = ToolRegistry::empty();
+        let custom_prompt = "Custom system prompt for testing";
+        let mut agent = Agent::new(config, custom_prompt, None, tools);
+
+        agent.messages.push(ChatMessage::user("test"));
+
+        agent.reset_with_summary("Summary after compaction");
+
+        // Verify system prompt is preserved
+        let first_text = agent.messages[0].content.first_text();
+        assert_eq!(first_text, Some(custom_prompt));
+    }
+
+    #[test]
+    fn test_reset_with_summary_adds_summary_as_user_message() {
+        let mut agent = create_test_agent();
+        let summary = "## Summary\n- Task 1 completed\n- Task 2 in progress";
+
+        agent.reset_with_summary(summary);
+
+        // Check the summary is added as user message
+        assert_eq!(agent.messages.len(), 2);
+        let summary_text = agent.messages[1].content.first_text();
+        assert_eq!(summary_text, Some(summary));
+    }
+
+    // =========================================================================
+    // Agent state tests
+    // =========================================================================
+
+    #[test]
+    fn test_agent_new_initial_state() {
+        let agent = create_test_agent();
+
+        // Initial state should be None (not streaming)
+        assert!(agent.state.is_none());
+        assert!(agent.active_stream.is_none());
+        assert!(agent.streaming_text.is_empty());
+        assert!(agent.streaming_tool_calls.is_empty());
+        assert!(agent.streaming_thinking.is_empty());
+        assert!(agent.tool_responses.is_empty());
+    }
+
+    #[test]
+    fn test_agent_send_request_sets_state() {
+        let mut agent = create_test_agent();
+
+        agent.send_request("Hello", RequestMode::Normal);
+
+        // State should be NeedsChatRequest
+        assert!(matches!(agent.state, Some(StreamState::NeedsChatRequest)));
+        // Message should be added
+        assert_eq!(agent.messages.len(), 2); // system + user
+    }
+
+    #[test]
+    fn test_agent_cancel_clears_state() {
+        let mut agent = create_test_agent();
+
+        agent.send_request("Hello", RequestMode::Normal);
+        agent.cancel();
+
+        assert!(agent.state.is_none());
+        assert!(agent.active_stream.is_none());
+    }
+
+    #[test]
+    fn test_agent_total_usage_accessor() {
+        let mut agent = create_test_agent();
+        agent.total_usage = Usage {
+            output_tokens: 100,
+            context_tokens: 5000,
+            cache_creation_tokens: 500,
+            cache_read_tokens: 1000,
+        };
+
+        let usage = agent.total_usage();
+        assert_eq!(usage.output_tokens, 100);
+        assert_eq!(usage.context_tokens, 5000);
+    }
+}
