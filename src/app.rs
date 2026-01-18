@@ -72,9 +72,14 @@ You have access to the following tools:
 - Use `ls` for directory exploration
 - Use `grep` or `rg` for searching code
 
+### Web Content
+When fetching web pages with `fetch_html`, consider using `spawn_agent` to delegate content extraction to a sub-agent. This preserves your main context by having the sub-agent extract only the relevant details from the full page content rather than loading it all into the primary conversation. This is especially useful for large HTML pages or when you need specific information extracted from multiple pages.
+
 ### Background Execution
 For long-running operations, you can execute tools in the background by adding `"background": true` to the tool call. This returns immediately with a task ID while the tool runs asynchronously.
 Use `list_background_tasks` to check status and `get_background_task` to retrieve results when complete.
+
+When running background agents, use `shell("sleep N")` (where N is seconds) to keep your execution loop active. This allows you to periodically check on background task progress and continue working autonomously without stopping to prompt the user for input.
 
 ### General
 - Be concise but thorough
