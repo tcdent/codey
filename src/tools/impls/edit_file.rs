@@ -307,6 +307,129 @@ mod tests {
 
     use super::*;
     use crate::tools::{ToolCall, ToolDecision, ToolEvent, ToolExecutor, ToolRegistry};
+    use crate::transcript::lines_to_string;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending_single_edit() {
+        let block = EditFileBlock::new(
+            "call_1",
+            "mcp_edit_file",
+            json!({
+                "path": "/src/main.rs",
+                "edits": [{"old_string": "foo", "new_string": "bar"}]
+            }),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? edit_file(/src/main.rs, 1 edit)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_pending_multiple_edits() {
+        let block = EditFileBlock::new(
+            "call_1",
+            "mcp_edit_file",
+            json!({
+                "path": "/src/main.rs",
+                "edits": [
+                    {"old_string": "foo", "new_string": "bar"},
+                    {"old_string": "baz", "new_string": "qux"}
+                ]
+            }),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? edit_file(/src/main.rs, 2 edits)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = EditFileBlock::new(
+            "call_1",
+            "mcp_edit_file",
+            json!({
+                "path": "/src/main.rs",
+                "edits": [{"old_string": "foo", "new_string": "bar"}]
+            }),
+            false,
+        );
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ edit_file(/src/main.rs, 1 edit)");
+    }
+
+    #[test]
+    fn test_render_complete_with_output() {
+        let mut block = EditFileBlock::new(
+            "call_1",
+            "mcp_edit_file",
+            json!({
+                "path": "/src/main.rs",
+                "edits": [{"old_string": "foo", "new_string": "bar"}]
+            }),
+            false,
+        );
+        block.status = Status::Complete;
+        block.text = "Successfully applied 1 edit(s)".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ edit_file(/src/main.rs, 1 edit)\n  Successfully applied 1 edit(s)");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = EditFileBlock::new(
+            "call_1",
+            "mcp_edit_file",
+            json!({
+                "path": "/src/main.rs",
+                "edits": [{"old_string": "foo", "new_string": "bar"}]
+            }),
+            false,
+        );
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ edit_file(/src/main.rs, 1 edit)\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = EditFileBlock::new(
+            "call_1",
+            "mcp_edit_file",
+            json!({
+                "path": "/src/main.rs",
+                "edits": [{"old_string": "foo", "new_string": "bar"}]
+            }),
+            true,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] edit_file(/src/main.rs, 1 edit)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = EditFileBlock::new(
+            "call_1",
+            "mcp_edit_file",
+            json!({
+                "path": "/src/main.rs",
+                "edits": [{"old_string": "foo", "new_string": "bar"}]
+            }),
+            false,
+        );
+        block.status = Status::Error;
+        block.text = "old_string not found".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✗ edit_file(/src/main.rs, 1 edit)\n  old_string not found");
+    }
+
+    // =========================================================================
+    // Execution tests
+    // =========================================================================
 
     /// Helper to run a tool to completion, auto-responding to Delegate events
     async fn run_to_completion(executor: &mut ToolExecutor) -> ToolEvent {

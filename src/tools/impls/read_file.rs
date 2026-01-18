@@ -182,8 +182,90 @@ impl Tool for ReadFileTool {
 mod tests {
     use super::*;
     use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
+    use crate::transcript::lines_to_string;
     use std::fs;
     use tempfile::tempdir;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending() {
+        let block = ReadFileBlock::new("call_1", "mcp_read_file", json!({"path": "/src/main.rs"}), false);
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? read_file(/src/main.rs)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_pending_with_range() {
+        let block = ReadFileBlock::new(
+            "call_1",
+            "mcp_read_file",
+            json!({"path": "/src/main.rs", "start_line": 10, "end_line": 20}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? read_file(/src/main.rs:10:20)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_pending_with_start_only() {
+        let block = ReadFileBlock::new(
+            "call_1",
+            "mcp_read_file",
+            json!({"path": "/src/main.rs", "start_line": 10}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? read_file(/src/main.rs:10:)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = ReadFileBlock::new("call_1", "mcp_read_file", json!({"path": "/src/main.rs"}), false);
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ read_file(/src/main.rs)");
+    }
+
+    #[test]
+    fn test_render_complete_with_output() {
+        let mut block = ReadFileBlock::new("call_1", "mcp_read_file", json!({"path": "/src/main.rs"}), false);
+        block.status = Status::Complete;
+        block.text = "   1│fn main() {\n   2│    println!(\"Hello\");\n   3│}".to_string();
+        let output = lines_to_string(&block.render(80));
+        // render_result adds "  " prefix to each line
+        assert_eq!(output, "✓ read_file(/src/main.rs)\n     1│fn main() {\n     2│    println!(\"Hello\");\n     3│}");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = ReadFileBlock::new("call_1", "mcp_read_file", json!({"path": "/src/main.rs"}), false);
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ read_file(/src/main.rs)\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = ReadFileBlock::new("call_1", "mcp_read_file", json!({"path": "/src/main.rs"}), true);
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] read_file(/src/main.rs)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = ReadFileBlock::new("call_1", "mcp_read_file", json!({"path": "/src/main.rs"}), false);
+        block.status = Status::Error;
+        block.text = "File not found".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✗ read_file(/src/main.rs)\n  File not found");
+    }
+
+    // =========================================================================
+    // Execution tests
+    // =========================================================================
 
     #[tokio::test]
     async fn test_read_file() {

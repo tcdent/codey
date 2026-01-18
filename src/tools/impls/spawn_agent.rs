@@ -266,3 +266,105 @@ impl EffectHandler for RunAgent {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::lines_to_string;
+    use serde_json::json;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending() {
+        let block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? spawn_agent(Find all TODO comments)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_pending_long_task() {
+        let block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "This is a very long task description that should be truncated after sixty characters"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        // Truncation happens at 60 chars (57 chars + "...")
+        assert_eq!(output, "? spawn_agent(This is a very long task description that should be trunc...)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            false,
+        );
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ spawn_agent(Find all TODO comments)");
+    }
+
+    #[test]
+    fn test_render_complete_with_output() {
+        let mut block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            false,
+        );
+        block.status = Status::Complete;
+        block.text = "Found 5 TODO comments".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ spawn_agent(Find all TODO comments)\n  Found 5 TODO comments");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            false,
+        );
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ spawn_agent(Find all TODO comments)\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            true,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] spawn_agent(Find all TODO comments)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = SpawnAgentBlock::new(
+            "call_1",
+            "mcp_spawn_agent",
+            json!({"task": "Find all TODO comments"}),
+            false,
+        );
+        block.status = Status::Error;
+        block.text = "Agent context not initialized".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✗ spawn_agent(Find all TODO comments)\n  Agent context not initialized");
+    }
+}

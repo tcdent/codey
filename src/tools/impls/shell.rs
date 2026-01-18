@@ -187,6 +187,84 @@ impl Tool for ShellTool {
 mod tests {
     use super::*;
     use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
+    use crate::transcript::lines_to_string;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending() {
+        let block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "ls -la"}), false);
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? shell(ls -la)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_pending_with_working_dir() {
+        let block = ShellBlock::new(
+            "call_1",
+            "mcp_shell",
+            json!({"command": "ls -la", "working_dir": "/home/user"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? shell(ls -la, in /home/user)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "cargo build"}), false);
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ shell(cargo build)");
+    }
+
+    #[test]
+    fn test_render_complete_with_output() {
+        let mut block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "echo hello"}), false);
+        block.status = Status::Complete;
+        block.text = "hello".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ shell(echo hello)\n  hello");
+    }
+
+    #[test]
+    fn test_render_complete_with_multiline_output() {
+        let mut block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "ls"}), false);
+        block.status = Status::Complete;
+        block.text = "file1.txt\nfile2.txt\nfile3.txt".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ shell(ls)\n  file1.txt\n  file2.txt\n  file3.txt");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "rm -rf /"}), false);
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ shell(rm -rf /)\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "make build"}), true);
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] shell(make build)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = ShellBlock::new("call_1", "mcp_shell", json!({"command": "invalid_cmd"}), false);
+        block.status = Status::Error;
+        block.text = "Command not found".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✗ shell(invalid_cmd)\n  Command not found");
+    }
+
+    // =========================================================================
+    // Execution tests
+    // =========================================================================
 
     #[tokio::test]
     async fn test_shell_echo() {

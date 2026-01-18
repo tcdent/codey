@@ -200,8 +200,95 @@ impl Tool for WriteFileTool {
 mod tests {
     use super::*;
     use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision, ToolEvent};
+    use crate::transcript::lines_to_string;
     use std::fs;
     use tempfile::tempdir;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending() {
+        let block = WriteFileBlock::new(
+            "call_1",
+            "mcp_write_file",
+            json!({"path": "/src/new_file.rs", "content": "fn main() {}"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? write_file(/src/new_file.rs, 12 bytes)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = WriteFileBlock::new(
+            "call_1",
+            "mcp_write_file",
+            json!({"path": "/src/new_file.rs", "content": "fn main() {}"}),
+            false,
+        );
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ write_file(/src/new_file.rs, 12 bytes)");
+    }
+
+    #[test]
+    fn test_render_complete_with_output() {
+        let mut block = WriteFileBlock::new(
+            "call_1",
+            "mcp_write_file",
+            json!({"path": "/src/new_file.rs", "content": "fn main() {}"}),
+            false,
+        );
+        block.status = Status::Complete;
+        block.text = "Created file: /src/new_file.rs".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ write_file(/src/new_file.rs, 12 bytes)\n  Created file: /src/new_file.rs");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = WriteFileBlock::new(
+            "call_1",
+            "mcp_write_file",
+            json!({"path": "/src/new_file.rs", "content": "fn main() {}"}),
+            false,
+        );
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ write_file(/src/new_file.rs, 12 bytes)\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = WriteFileBlock::new(
+            "call_1",
+            "mcp_write_file",
+            json!({"path": "/src/new_file.rs", "content": "fn main() {}"}),
+            true,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] write_file(/src/new_file.rs, 12 bytes)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = WriteFileBlock::new(
+            "call_1",
+            "mcp_write_file",
+            json!({"path": "/src/new_file.rs", "content": "fn main() {}"}),
+            false,
+        );
+        block.status = Status::Error;
+        block.text = "File already exists".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✗ write_file(/src/new_file.rs, 12 bytes)\n  File already exists");
+    }
+
+    // =========================================================================
+    // Execution tests
+    // =========================================================================
 
     /// Helper to run a tool to completion, auto-responding to Delegate events
     async fn run_to_completion(executor: &mut ToolExecutor) -> ToolEvent {

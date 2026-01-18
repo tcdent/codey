@@ -161,3 +161,93 @@ impl Tool for WebSearchTool {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::lines_to_string;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending() {
+        let block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? web_search(\"rust async await\")\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            false,
+        );
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ web_search(\"rust async await\")");
+    }
+
+    #[test]
+    fn test_render_complete_with_output() {
+        let mut block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            false,
+        );
+        block.status = Status::Complete;
+        block.text = "Result 1\nResult 2\nResult 3".to_string();
+        let output = lines_to_string(&block.render(80));
+        // WebSearchBlock shows "N results." instead of the actual results
+        assert_eq!(output, "✓ web_search(\"rust async await\")\n  3 results.");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            false,
+        );
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ web_search(\"rust async await\")\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            true,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] web_search(\"rust async await\")\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = WebSearchBlock::new(
+            "call_1",
+            "mcp_web_search",
+            json!({"query": "rust async await"}),
+            false,
+        );
+        block.status = Status::Error;
+        block.text = "API key not configured".to_string();
+        let output = lines_to_string(&block.render(80));
+        // WebSearchBlock uses render_result which shows "N results." for any text
+        assert_eq!(output, "✗ web_search(\"rust async await\")\n  1 results.");
+    }
+}

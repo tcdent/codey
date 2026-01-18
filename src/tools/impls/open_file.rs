@@ -157,3 +157,102 @@ impl Block for OpenFileBlock {
         Some(&self.params)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::lines_to_string;
+    use serde_json::json;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending() {
+        let block = OpenFileBlock::new(
+            "call_1",
+            "mcp_open_file",
+            json!({"path": "/src/main.rs"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? open_file(/src/main.rs)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_pending_with_line() {
+        let block = OpenFileBlock::new(
+            "call_1",
+            "mcp_open_file",
+            json!({"path": "/src/main.rs", "line": 42}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? open_file(/src/main.rs:42)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = OpenFileBlock::new(
+            "call_1",
+            "mcp_open_file",
+            json!({"path": "/src/main.rs"}),
+            false,
+        );
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ open_file(/src/main.rs)");
+    }
+
+    #[test]
+    fn test_render_complete() {
+        let mut block = OpenFileBlock::new(
+            "call_1",
+            "mcp_open_file",
+            json!({"path": "/src/main.rs", "line": 42}),
+            false,
+        );
+        block.status = Status::Complete;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ open_file(/src/main.rs:42)");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = OpenFileBlock::new(
+            "call_1",
+            "mcp_open_file",
+            json!({"path": "/src/main.rs"}),
+            false,
+        );
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ open_file(/src/main.rs)\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = OpenFileBlock::new(
+            "call_1",
+            "mcp_open_file",
+            json!({"path": "/src/main.rs"}),
+            true,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] open_file(/src/main.rs)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = OpenFileBlock::new(
+            "call_1",
+            "mcp_open_file",
+            json!({"path": "/src/main.rs"}),
+            false,
+        );
+        block.status = Status::Error;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✗ open_file(/src/main.rs)");
+    }
+}

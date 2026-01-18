@@ -688,9 +688,34 @@ impl Transcript {
     }
 }
 
+/// Convert ratatui Lines to a plain string representation for testing.
+/// Each Line becomes a string with spans concatenated, joined by newlines.
+#[cfg(test)]
+pub fn lines_to_string(lines: &[Line<'_>]) -> String {
+    lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_lines_to_string() {
+        let lines = vec![
+            Line::from(vec![Span::raw("Hello "), Span::raw("World")]),
+            Line::from(vec![Span::raw("Line 2")]),
+        ];
+        assert_eq!(lines_to_string(&lines), "Hello World\nLine 2");
+    }
 
     #[test]
     fn test_text_block_render() {

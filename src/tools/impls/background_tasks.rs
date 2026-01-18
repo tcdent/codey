@@ -275,3 +275,160 @@ impl Tool for GetBackgroundTaskTool {
         Box::new(GetBackgroundTaskBlock::new(call_id, self.name(), params, background))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transcript::lines_to_string;
+    use serde_json::json;
+
+    // =========================================================================
+    // ListBackgroundTasksBlock render tests
+    // =========================================================================
+
+    #[test]
+    fn test_list_render_pending() {
+        let block = ListBackgroundTasksBlock::new(
+            "call_1",
+            "mcp_list_background_tasks",
+            json!({}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? list_background_tasks()\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_list_render_running() {
+        let mut block = ListBackgroundTasksBlock::new(
+            "call_1",
+            "mcp_list_background_tasks",
+            json!({}),
+            false,
+        );
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ list_background_tasks()");
+    }
+
+    #[test]
+    fn test_list_render_complete_with_output() {
+        let mut block = ListBackgroundTasksBlock::new(
+            "call_1",
+            "mcp_list_background_tasks",
+            json!({}),
+            false,
+        );
+        block.status = Status::Complete;
+        block.text = "task_1: shell (Complete)\ntask_2: read_file (Running)".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ list_background_tasks()\n  task_1: shell (Complete)\n  task_2: read_file (Running)");
+    }
+
+    #[test]
+    fn test_list_render_denied() {
+        let mut block = ListBackgroundTasksBlock::new(
+            "call_1",
+            "mcp_list_background_tasks",
+            json!({}),
+            false,
+        );
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ list_background_tasks()\n  Denied by user");
+    }
+
+    #[test]
+    fn test_list_render_background() {
+        let block = ListBackgroundTasksBlock::new(
+            "call_1",
+            "mcp_list_background_tasks",
+            json!({}),
+            true,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] list_background_tasks()\n  [y]es  [n]o");
+    }
+
+    // =========================================================================
+    // GetBackgroundTaskBlock render tests
+    // =========================================================================
+
+    #[test]
+    fn test_get_render_pending() {
+        let block = GetBackgroundTaskBlock::new(
+            "call_1",
+            "mcp_get_background_task",
+            json!({"task_id": "task_123"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? get_background_task(task_123)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_get_render_running() {
+        let mut block = GetBackgroundTaskBlock::new(
+            "call_1",
+            "mcp_get_background_task",
+            json!({"task_id": "task_123"}),
+            false,
+        );
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ get_background_task(task_123)");
+    }
+
+    #[test]
+    fn test_get_render_complete_with_output() {
+        let mut block = GetBackgroundTaskBlock::new(
+            "call_1",
+            "mcp_get_background_task",
+            json!({"task_id": "task_123"}),
+            false,
+        );
+        block.status = Status::Complete;
+        block.text = "file1.txt\nfile2.txt".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ get_background_task(task_123)\n  file1.txt\n  file2.txt");
+    }
+
+    #[test]
+    fn test_get_render_denied() {
+        let mut block = GetBackgroundTaskBlock::new(
+            "call_1",
+            "mcp_get_background_task",
+            json!({"task_id": "task_123"}),
+            false,
+        );
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ get_background_task(task_123)\n  Denied by user");
+    }
+
+    #[test]
+    fn test_get_render_background() {
+        let block = GetBackgroundTaskBlock::new(
+            "call_1",
+            "mcp_get_background_task",
+            json!({"task_id": "task_123"}),
+            true,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] get_background_task(task_123)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_get_render_error() {
+        let mut block = GetBackgroundTaskBlock::new(
+            "call_1",
+            "mcp_get_background_task",
+            json!({"task_id": "task_123"}),
+            false,
+        );
+        block.status = Status::Error;
+        block.text = "Task not found".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✗ get_background_task(task_123)\n  Task not found");
+    }
+}

@@ -162,6 +162,93 @@ impl Tool for FetchUrlTool {
 mod tests {
     use super::*;
     use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
+    use crate::transcript::lines_to_string;
+
+    // =========================================================================
+    // Render tests
+    // =========================================================================
+
+    #[test]
+    fn test_render_pending() {
+        let block = FetchUrlBlock::new(
+            "call_1",
+            "mcp_fetch_url",
+            json!({"url": "https://example.com/api"}),
+            false,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? fetch_url(https://example.com/api)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_running() {
+        let mut block = FetchUrlBlock::new(
+            "call_1",
+            "mcp_fetch_url",
+            json!({"url": "https://example.com/api"}),
+            false,
+        );
+        block.status = Status::Running;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⚙ fetch_url(https://example.com/api)");
+    }
+
+    #[test]
+    fn test_render_complete_with_output() {
+        let mut block = FetchUrlBlock::new(
+            "call_1",
+            "mcp_fetch_url",
+            json!({"url": "https://example.com/api"}),
+            false,
+        );
+        block.status = Status::Complete;
+        block.text = "{\"status\": \"ok\"}".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✓ fetch_url(https://example.com/api)\n  {\"status\": \"ok\"}");
+    }
+
+    #[test]
+    fn test_render_denied() {
+        let mut block = FetchUrlBlock::new(
+            "call_1",
+            "mcp_fetch_url",
+            json!({"url": "https://example.com/api"}),
+            false,
+        );
+        block.status = Status::Denied;
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "⊘ fetch_url(https://example.com/api)\n  Denied by user");
+    }
+
+    #[test]
+    fn test_render_background() {
+        let block = FetchUrlBlock::new(
+            "call_1",
+            "mcp_fetch_url",
+            json!({"url": "https://example.com/api"}),
+            true,
+        );
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "? [bg] fetch_url(https://example.com/api)\n  [y]es  [n]o");
+    }
+
+    #[test]
+    fn test_render_error() {
+        let mut block = FetchUrlBlock::new(
+            "call_1",
+            "mcp_fetch_url",
+            json!({"url": "https://example.com/api"}),
+            false,
+        );
+        block.status = Status::Error;
+        block.text = "Connection refused".to_string();
+        let output = lines_to_string(&block.render(80));
+        assert_eq!(output, "✗ fetch_url(https://example.com/api)\n  Connection refused");
+    }
+
+    // =========================================================================
+    // Execution tests
+    // =========================================================================
 
     #[tokio::test]
     async fn test_fetch_invalid_url() {
