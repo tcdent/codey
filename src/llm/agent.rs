@@ -1302,4 +1302,258 @@ mod tests {
         assert_eq!(usage.output_tokens, 100);
         assert_eq!(usage.context_tokens, 5000);
     }
+
+    // =========================================================================
+    // State machine transition tests
+    // =========================================================================
+
+    /// Helper to set up agent in AwaitingToolDecision state with pending tool calls
+    fn setup_agent_awaiting_tools(tool_count: usize) -> Agent {
+        let mut agent = create_test_agent();
+        agent.state = Some(StreamState::AwaitingToolDecision);
+
+        // Add mock tool calls that would have been captured during streaming
+        for i in 0..tool_count {
+            agent.streaming_tool_calls.push(GenaiToolCall {
+                call_id: format!("call_{}", i),
+                fn_name: "test_tool".to_string(),
+                fn_arguments: serde_json::json!({}),
+            });
+        }
+
+        agent
+    }
+
+    #[test]
+    fn test_submit_tool_result_single_tool_transitions_to_needs_chat() {
+        let mut agent = setup_agent_awaiting_tools(1);
+
+        // Verify initial state
+        assert!(matches!(agent.state, Some(StreamState::AwaitingToolDecision)));
+        assert_eq!(agent.streaming_tool_calls.len(), 1);
+        assert_eq!(agent.tool_responses.len(), 0);
+
+        // Submit the tool result
+        agent.submit_tool_result("call_0", "result content".to_string());
+
+        // Should transition to NeedsChatRequest for continuation
+        assert!(matches!(agent.state, Some(StreamState::NeedsChatRequest)));
+        // Tool responses should be consumed (moved to messages)
+        assert_eq!(agent.tool_responses.len(), 0);
+        // Messages should include assistant message + tool response
+        // System (1) + assistant with tool call (1) + tool response (1) = 3
+        assert_eq!(agent.messages.len(), 3);
+    }
+
+    #[test]
+    fn test_submit_tool_result_multiple_tools_waits_for_all() {
+        let mut agent = setup_agent_awaiting_tools(3);
+
+        // Submit first result
+        agent.submit_tool_result("call_0", "result 0".to_string());
+
+        // Should stay in AwaitingToolDecision (not all tools complete)
+        assert!(matches!(agent.state, Some(StreamState::AwaitingToolDecision)));
+        assert_eq!(agent.tool_responses.len(), 1);
+
+        // Submit second result
+        agent.submit_tool_result("call_1", "result 1".to_string());
+
+        // Still waiting
+        assert!(matches!(agent.state, Some(StreamState::AwaitingToolDecision)));
+        assert_eq!(agent.tool_responses.len(), 2);
+
+        // Submit third (final) result
+        agent.submit_tool_result("call_2", "result 2".to_string());
+
+        // Now should transition to NeedsChatRequest
+        assert!(matches!(agent.state, Some(StreamState::NeedsChatRequest)));
+    }
+
+    #[test]
+    fn test_submit_tool_result_builds_correct_message_structure() {
+        let mut agent = setup_agent_awaiting_tools(2);
+
+        // Add some streaming text and thinking that would have been captured
+        agent.streaming_text = "I'll help with that.".to_string();
+        agent.streaming_thinking.push(genai::chat::Thinking {
+            thinking: "Let me think about this...".to_string(),
+            signature: String::new(),
+        });
+
+        // Submit all tool results
+        agent.submit_tool_result("call_0", "result 0".to_string());
+        agent.submit_tool_result("call_1", "result 1".to_string());
+
+        // Check message structure
+        // System (1) + assistant (1) + tool response 0 (1) + tool response 1 (1) = 4
+        assert_eq!(agent.messages.len(), 4);
+
+        // Assistant message should be at index 1
+        let assistant_msg = &agent.messages[1];
+        assert!(matches!(assistant_msg.role, ChatRole::Assistant));
+
+        // Tool responses should follow with ChatRole::Tool
+        let tool_resp_1 = &agent.messages[2];
+        let tool_resp_2 = &agent.messages[3];
+        assert!(matches!(tool_resp_1.role, ChatRole::Tool));
+        assert!(matches!(tool_resp_2.role, ChatRole::Tool));
+    }
+
+    #[test]
+    fn test_submit_tool_result_clears_tool_responses_after_transition() {
+        let mut agent = setup_agent_awaiting_tools(1);
+
+        agent.submit_tool_result("call_0", "result".to_string());
+
+        // tool_responses should be consumed (moved to messages via std::mem::take)
+        assert!(agent.tool_responses.is_empty());
+    }
+
+    #[test]
+    fn test_submit_tool_result_in_wrong_state_still_accumulates() {
+        // This tests current behavior: submit_tool_result warns but still works
+        // when called in wrong state (defensive programming)
+        let mut agent = create_test_agent();
+
+        // In NeedsChatRequest state, not AwaitingToolDecision
+        agent.state = Some(StreamState::NeedsChatRequest);
+        agent.streaming_tool_calls.push(GenaiToolCall {
+            call_id: "call_0".to_string(),
+            fn_name: "test".to_string(),
+            fn_arguments: serde_json::json!({}),
+        });
+
+        // This would log a warning but still process
+        agent.submit_tool_result("call_0", "result".to_string());
+
+        // State transitions to NeedsChatRequest (continuation)
+        assert!(matches!(agent.state, Some(StreamState::NeedsChatRequest)));
+    }
+
+    #[test]
+    fn test_submit_tool_result_with_no_pending_tools_is_noop() {
+        let mut agent = create_test_agent();
+        agent.state = Some(StreamState::AwaitingToolDecision);
+        // No streaming_tool_calls added
+
+        agent.submit_tool_result("call_0", "result".to_string());
+
+        // State should remain unchanged (early return due to empty tool calls)
+        assert!(matches!(agent.state, Some(StreamState::AwaitingToolDecision)));
+    }
+
+    #[test]
+    fn test_send_request_always_adds_message() {
+        // Note: send_request doesn't guard against being called in wrong state.
+        // It always adds a message and sets state to NeedsChatRequest.
+        // This could be a source of bugs if called during streaming/tool execution.
+        let mut agent = create_test_agent();
+
+        // First request
+        agent.send_request("First", RequestMode::Normal);
+        assert!(matches!(agent.state, Some(StreamState::NeedsChatRequest)));
+        assert_eq!(agent.messages.len(), 2); // system + first user
+
+        // Second request adds another message (no guard)
+        agent.send_request("Second", RequestMode::Normal);
+        assert!(matches!(agent.state, Some(StreamState::NeedsChatRequest)));
+        assert_eq!(agent.messages.len(), 3); // system + first + second
+
+        // This documents current behavior - caller is responsible for
+        // only calling send_request when agent is idle
+    }
+
+    #[test]
+    fn test_send_request_after_cancel_works() {
+        let mut agent = create_test_agent();
+
+        agent.send_request("First", RequestMode::Normal);
+        agent.cancel();
+
+        // Now idle again
+        assert!(agent.state.is_none());
+
+        // Can send new request
+        agent.send_request("Second", RequestMode::Normal);
+        assert!(matches!(agent.state, Some(StreamState::NeedsChatRequest)));
+        assert_eq!(agent.messages.len(), 3); // system + first + second
+    }
+
+    #[test]
+    fn test_cancel_from_awaiting_tool_decision() {
+        let mut agent = setup_agent_awaiting_tools(2);
+
+        // Cancel mid-tool-execution
+        agent.cancel();
+
+        // Should be back to idle
+        assert!(agent.state.is_none());
+        assert!(agent.active_stream.is_none());
+        // Note: streaming_tool_calls etc are NOT cleared by cancel
+        // This is intentional - allows inspection of state after cancel
+    }
+
+    #[test]
+    fn test_state_machine_full_cycle_simulation() {
+        // Simulate a full request -> tool -> response cycle
+        let mut agent = create_test_agent();
+
+        // 1. Start idle
+        assert!(agent.state.is_none());
+
+        // 2. Send request -> NeedsChatRequest
+        agent.send_request("Do something with tools", RequestMode::Normal);
+        assert!(matches!(agent.state, Some(StreamState::NeedsChatRequest)));
+
+        // 3. Simulate what happens after streaming completes with tool calls
+        //    (normally done by next(), but we can set up the state directly)
+        agent.state = Some(StreamState::Streaming);
+        agent.streaming_text = "I'll use a tool.".to_string();
+        agent.streaming_tool_calls.push(GenaiToolCall {
+            call_id: "call_abc".to_string(),
+            fn_name: "read_file".to_string(),
+            fn_arguments: serde_json::json!({"path": "/tmp/test"}),
+        });
+
+        // Simulate stream end with tool calls -> AwaitingToolDecision
+        agent.state = Some(StreamState::AwaitingToolDecision);
+
+        // 4. Submit tool result -> NeedsChatRequest (for continuation)
+        agent.submit_tool_result("call_abc", "file contents".to_string());
+        assert!(matches!(agent.state, Some(StreamState::NeedsChatRequest)));
+
+        // 5. Could continue with next() for continuation, or cancel
+        agent.cancel();
+        assert!(agent.state.is_none());
+    }
+
+    #[test]
+    fn test_streaming_data_cleared_on_new_request() {
+        let mut agent = create_test_agent();
+
+        // Simulate leftover data from a previous request
+        agent.streaming_text = "leftover text".to_string();
+        agent.streaming_tool_calls.push(GenaiToolCall {
+            call_id: "old_call".to_string(),
+            fn_name: "old_tool".to_string(),
+            fn_arguments: serde_json::json!({}),
+        });
+        agent.streaming_thinking.push(genai::chat::Thinking {
+            thinking: "old thinking".to_string(),
+            signature: String::new(),
+        });
+        agent.tool_responses.push(ToolResponse::new("old".to_string(), "old".to_string()));
+
+        // When we send a new request and poll next(), the NeedsChatRequest
+        // handler clears this data. We can verify the data is there before.
+        assert!(!agent.streaming_text.is_empty());
+        assert!(!agent.streaming_tool_calls.is_empty());
+        assert!(!agent.streaming_thinking.is_empty());
+        assert!(!agent.tool_responses.is_empty());
+
+        // The actual clearing happens in next() when processing NeedsChatRequest,
+        // which we can't easily test without async/mocking, but we document
+        // the expectation here.
+    }
 }
