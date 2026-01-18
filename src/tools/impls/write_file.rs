@@ -14,7 +14,7 @@
 use super::{handlers, Tool, ToolPipeline};
 use crate::ide::ToolPreview;
 use crate::impl_base_block;
-use crate::transcript::{render_approval_prompt, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
+use crate::transcript::{render_tool_block, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -58,38 +58,14 @@ impl Block for WriteFileBlock {
     impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
         let path = self.params["path"].as_str().unwrap_or("");
         let content_len = self.params.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
 
-        // Format: write_file(path, N bytes)
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("write_file", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(path, Style::default().fg(Color::Green)),
+        let args = vec![
+            Span::styled(path.to_string(), Style::default().fg(Color::Green)),
             Span::styled(format!(", {} bytes", content_len), Style::default().fg(Color::DarkGray)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 5));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
+        ];
+        render_tool_block(self.status, self.background, "write_file", args, &self.text, 5)
     }
 
     fn call_id(&self) -> Option<&str> {

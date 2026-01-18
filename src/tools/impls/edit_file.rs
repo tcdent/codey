@@ -28,9 +28,7 @@ use super::{handlers, Tool, ToolPipeline};
 use crate::ide::Edit;
 use crate::impl_base_block;
 use crate::tools::pipeline::{EffectHandler, Step};
-use crate::transcript::{
-    render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
-};
+use crate::transcript::{render_tool_block, Block, BlockType, Status, ToolBlock};
 
 // =============================================================================
 // Edit-specific validation handler
@@ -116,8 +114,6 @@ impl Block for EditFileBlock {
     impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
         let path = self.params["path"].as_str().unwrap_or("");
         let edit_count = self
             .params
@@ -126,40 +122,14 @@ impl Block for EditFileBlock {
             .map(|a| a.len())
             .unwrap_or(0);
 
-        // Format: edit_file(path, N edits)
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("edit_file", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(path, Style::default().fg(Color::Yellow)),
+        let args = vec![
+            Span::styled(path.to_string(), Style::default().fg(Color::Yellow)),
             Span::styled(
-                format!(
-                    ", {} edit{}",
-                    edit_count,
-                    if edit_count == 1 { "" } else { "s" }
-                ),
+                format!(", {} edit{}", edit_count, if edit_count == 1 { "" } else { "s" }),
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 5));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
+        ];
+        render_tool_block(self.status, self.background, "edit_file", args, &self.text, 5)
     }
 
     fn call_id(&self) -> Option<&str> {

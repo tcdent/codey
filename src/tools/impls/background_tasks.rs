@@ -11,7 +11,7 @@ use serde_json::json;
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
-use crate::transcript::{render_approval_prompt, render_prefix, render_result, Block, BlockType, Status};
+use crate::transcript::{render_tool_block, Block, BlockType, Status};
 
 // =============================================================================
 // ListBackgroundTasks block
@@ -47,36 +47,7 @@ impl Block for ListBackgroundTasksBlock {
     impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
-        // Format: list_background_tasks()
-        let spans = vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("list_background_tasks", Style::default().fg(Color::Magenta)),
-            Span::styled("()", Style::default().fg(Color::DarkGray)),
-        ];
-        lines.push(Line::from(spans));
-
-        // Approval prompt if pending
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        // Output if completed
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
-        }
-
-        // Denied message
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
+        render_tool_block(self.status, self.background, "list_background_tasks", vec![], &self.text, 10)
     }
 
     fn call_id(&self) -> Option<&str> {
@@ -126,40 +97,9 @@ impl Block for GetBackgroundTaskBlock {
     impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
         let task_id = self.params["task_id"].as_str().unwrap_or("");
-
-        // Format: get_background_task(task_id)
-        let spans = vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("get_background_task", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(task_id, Style::default().fg(Color::White)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ];
-        lines.push(Line::from(spans));
-
-        // Approval prompt if pending
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        // Output if completed
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
-        }
-
-        // Denied message
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
+        let args = vec![Span::styled(task_id.to_string(), Style::default().fg(Color::White))];
+        render_tool_block(self.status, self.background, "get_background_task", args, &self.text, 10)
     }
 
     fn call_id(&self) -> Option<&str> {

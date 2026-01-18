@@ -2,7 +2,7 @@
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
-use crate::transcript::{render_approval_prompt, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
+use crate::transcript::{render_tool_block, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -46,44 +46,14 @@ impl Block for ShellBlock {
     impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
         let command = self.params["command"].as_str().unwrap_or("");
         let working_dir = self.params.get("working_dir").and_then(|v| v.as_str());
 
-        // Format: shell(command) or shell(command, in dir)
-        let mut spans = vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("shell", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(command, Style::default().fg(Color::White)),
-        ];
+        let mut args = vec![Span::styled(command.to_string(), Style::default().fg(Color::White))];
         if let Some(dir) = working_dir {
-            spans.push(Span::styled(format!(", in {}", dir), Style::default().fg(Color::DarkGray)));
+            args.push(Span::styled(format!(", in {}", dir), Style::default().fg(Color::DarkGray)));
         }
-        spans.push(Span::styled(")", Style::default().fg(Color::DarkGray)));
-        lines.push(Line::from(spans));
-
-        // Approval prompt if pending
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        // Output if completed
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
-        }
-
-        // Denied message
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
+        render_tool_block(self.status, self.background, "shell", args, &self.text, 10)
     }
 
     fn call_id(&self) -> Option<&str> {

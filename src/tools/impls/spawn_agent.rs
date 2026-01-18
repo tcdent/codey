@@ -11,7 +11,7 @@ use crate::impl_base_block;
 use crate::llm::{Agent, RequestMode};
 use crate::llm::background::run_agent;
 use crate::tools::pipeline::{EffectHandler, Step};
-use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, ToolBlock, Status};
+use crate::transcript::{render_tool_block, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -94,8 +94,6 @@ impl Block for SpawnAgentBlock {
     impl_base_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
         let task = self.params["task"].as_str().unwrap_or("");
         // Truncate task for display
         let task_display = if task.len() > 60 {
@@ -104,34 +102,8 @@ impl Block for SpawnAgentBlock {
             task.to_string()
         };
 
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("spawn_agent", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(task_display, Style::default().fg(Color::Yellow)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        if !self.text.is_empty() {
-            lines.push(Line::from(Span::styled(
-                format!("  {}", self.text),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
+        let args = vec![Span::styled(task_display, Style::default().fg(Color::Yellow))];
+        render_tool_block(self.status, self.background, "spawn_agent", args, &self.text, 5)
     }
 
     fn call_id(&self) -> Option<&str> {
