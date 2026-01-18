@@ -336,6 +336,24 @@ impl ToolExecutor {
             .filter(|p| p.background)
             .map(|p| p.output.clone())
     }
+    
+    /// Check if a tool call is ready to start (not denied/requested)
+    fn is_ready(tool_call: &ToolCall) -> bool {
+        matches!(tool_call.decision, ToolDecision::Pending | ToolDecision::Approve)
+    }
+    
+    /// Check if any foreground tool is currently running
+    fn has_running_foreground(&self) -> bool {
+        self.active.values().any(|p| !p.background && p.status == Status::Running)
+    }
+    
+    /// Start a tool by composing its pipeline and adding to active
+    fn start_tool(&mut self, tool_call: ToolCall) {
+        let call_id = tool_call.call_id.clone();
+        let tool = self.tools.get(&tool_call.name);
+        let pipeline = tool.compose(tool_call.params.clone());
+        self.active.insert(call_id, ActivePipeline::new(tool_call, pipeline));
+    }
 
     pub async fn next(&mut self) -> Option<ToolEvent> {
         // Check for cancellation
@@ -347,49 +365,25 @@ impl ToolExecutor {
         // Start pending tools with these rules:
         // - Foreground tools execute strictly in order (FIFO), one at a time
         // - Background tools can start anytime, order not guaranteed
-        // This ensures predictable behavior for foreground while allowing parallelism for background.
-        let mut started_foreground = false;
-        let mut i = 0;
-        while i < self.pending.len() {
-            let dominated = matches!(
-                self.pending[i].decision,
-                ToolDecision::Pending | ToolDecision::Approve
-            );
-            if !dominated {
-                i += 1;
-                continue;
+        
+        // Start one foreground tool if none is currently running
+        if !self.has_running_foreground() {
+            if let Some(idx) = self.pending.iter().position(|t| !t.background && Self::is_ready(t)) {
+                let tool_call = self.pending.remove(idx).unwrap();
+                self.start_tool(tool_call);
             }
-            
-            let is_background = self.pending[i].background;
-            
-            if is_background {
-                // Background tools can always start
-                let tool_call = self.pending.remove(i).unwrap();
-                let call_id = tool_call.call_id.clone();
-                let tool = self.tools.get(&tool_call.name);
-                let pipeline = tool.compose(tool_call.params.clone());
-                self.active.insert(call_id, ActivePipeline::new(tool_call, pipeline));
-                // Don't increment i - next element shifted into this position
-            } else {
-                // Foreground tools must wait for previous foreground tools that are still running
-                // (Denied/Error pipelines running finally handlers shouldn't block)
-                let any_foreground_active = self.active.values().any(|p| {
-                    !p.background && p.status == Status::Running
-                });
-                if any_foreground_active || started_foreground {
-                    // Can't start this foreground tool yet, skip to look for background tools
-                    i += 1;
-                } else {
-                    // Start this foreground tool
-                    let tool_call = self.pending.remove(i).unwrap();
-                    let call_id = tool_call.call_id.clone();
-                    let tool = self.tools.get(&tool_call.name);
-                    let pipeline = tool.compose(tool_call.params.clone());
-                    self.active.insert(call_id, ActivePipeline::new(tool_call, pipeline));
-                    started_foreground = true;
-                    // Don't increment i - continue looking for background tools
-                }
-            }
+        }
+        
+        // Start all ready background tools
+        // (Collect indices first, then remove in reverse to preserve indices)
+        let bg_indices: Vec<_> = self.pending.iter()
+            .enumerate()
+            .filter(|(_, t)| t.background && Self::is_ready(t))
+            .map(|(i, _)| i)
+            .collect();
+        for idx in bg_indices.into_iter().rev() {
+            let tool_call = self.pending.remove(idx).unwrap();
+            self.start_tool(tool_call);
         }
 
         // Main execution loop - keeps going while there's work to do
