@@ -115,6 +115,36 @@ You have read-only access to:
 - If you need to suggest changes, describe them clearly for the primary agent to implement
 "#;
 
+const SYSTEM_MD_FILENAME: &str = "SYSTEM.md";
+
+/// Build the complete system prompt by appending content from SYSTEM.md files.
+/// Checks (in order):
+/// 1. User config: ~/.config/codey/SYSTEM.md
+/// 2. Project: .codey/SYSTEM.md
+fn build_system_prompt() -> String {
+    let mut prompt = SYSTEM_PROMPT.to_string();
+
+    // Check user config directory: ~/.config/codey/SYSTEM.md
+    if let Some(config_dir) = Config::config_dir() {
+        let user_system_md = config_dir.join(SYSTEM_MD_FILENAME);
+        if let Ok(content) = std::fs::read_to_string(&user_system_md) {
+            tracing::debug!("Appending user SYSTEM.md from {:?}", user_system_md);
+            prompt.push_str("\n\n");
+            prompt.push_str(&content);
+        }
+    }
+
+    // Check project directory: .codey/SYSTEM.md
+    let project_system_md = std::path::Path::new(CODEY_DIR).join(SYSTEM_MD_FILENAME);
+    if let Ok(content) = std::fs::read_to_string(&project_system_md) {
+        tracing::debug!("Appending project SYSTEM.md from {:?}", project_system_md);
+        prompt.push_str("\n\n");
+        prompt.push_str(&content);
+    }
+
+    prompt
+}
+
 /// Result of handling an action
 enum ActionResult {
     NoOp,
@@ -398,7 +428,7 @@ impl App {
 
         let mut agent = Agent::new(
             AgentRuntimeConfig::foreground(&self.config),
-            SYSTEM_PROMPT,
+            &build_system_prompt(),
             self.oauth.clone(),
             self.tool_executor.tools().clone(),
         );

@@ -329,9 +329,14 @@ impl Config {
         Ok(Config::default())
     }
 
+    /// Get the config directory path (~/.config/codey)
+    pub fn config_dir() -> Option<PathBuf> {
+        dirs::home_dir().map(|p| p.join(".config").join("codey"))
+    }
+
     /// Get the default config file path
     pub fn default_config_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|p| p.join(".config").join("codey").join("config.toml"))
+        Self::config_dir().map(|p| p.join("config.toml"))
     }
 }
 
