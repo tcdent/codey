@@ -344,34 +344,52 @@ impl ToolExecutor {
             return None;
         }
 
-        // Start pending tools, but only one approval-requiring tool at a time.
-        // This prevents IDE previews from overwriting each other when multiple
-        // tools are queued. Pre-approved tools can run in parallel.
-        while let Some(tool_call) = self.pending.front() {
-            if tool_call.decision != ToolDecision::Pending && tool_call.decision != ToolDecision::Approve {
-                break;
+        // Start pending tools with these rules:
+        // - Foreground tools execute strictly in order (FIFO), one at a time
+        // - Background tools can start anytime, order not guaranteed
+        // This ensures predictable behavior for foreground while allowing parallelism for background.
+        let mut started_foreground = false;
+        let mut i = 0;
+        while i < self.pending.len() {
+            let dominated = matches!(
+                self.pending[i].decision,
+                ToolDecision::Pending | ToolDecision::Approve
+            );
+            if !dominated {
+                i += 1;
+                continue;
             }
             
-            // Check if this tool will need user approval (not pre-approved)
-            let needs_approval = tool_call.decision != ToolDecision::Approve;
+            let is_background = self.pending[i].background;
             
-            // If it needs approval, only start if no active tool is still running and needs approval
-            // (Denied/Error pipelines running finally handlers shouldn't block new tools)
-            if needs_approval {
-                let any_active_needs_approval = self.active.values().any(|p| {
-                    p.original_decision != ToolDecision::Approve && p.status == Status::Running
+            if is_background {
+                // Background tools can always start
+                let tool_call = self.pending.remove(i).unwrap();
+                let call_id = tool_call.call_id.clone();
+                let tool = self.tools.get(&tool_call.name);
+                let pipeline = tool.compose(tool_call.params.clone());
+                self.active.insert(call_id, ActivePipeline::new(tool_call, pipeline));
+                // Don't increment i - next element shifted into this position
+            } else {
+                // Foreground tools must wait for previous foreground tools that are still running
+                // (Denied/Error pipelines running finally handlers shouldn't block)
+                let any_foreground_active = self.active.values().any(|p| {
+                    !p.background && p.status == Status::Running
                 });
-                if any_active_needs_approval {
-                    break; // Wait for current tool to complete before starting next
+                if any_foreground_active || started_foreground {
+                    // Can't start this foreground tool yet, skip to look for background tools
+                    i += 1;
+                } else {
+                    // Start this foreground tool
+                    let tool_call = self.pending.remove(i).unwrap();
+                    let call_id = tool_call.call_id.clone();
+                    let tool = self.tools.get(&tool_call.name);
+                    let pipeline = tool.compose(tool_call.params.clone());
+                    self.active.insert(call_id, ActivePipeline::new(tool_call, pipeline));
+                    started_foreground = true;
+                    // Don't increment i - continue looking for background tools
                 }
             }
-            
-            let tool_call = self.pending.pop_front().unwrap();
-            let call_id = tool_call.call_id.clone();
-            
-            let tool = self.tools.get(&tool_call.name);
-            let pipeline = tool.compose(tool_call.params.clone());
-            self.active.insert(call_id.clone(), ActivePipeline::new(tool_call, pipeline));
         }
 
         // Main execution loop - keeps going while there's work to do
@@ -917,5 +935,273 @@ mod tests {
         // Both outputs should be present
         assert!(executor.get_background_output("slow1").unwrap().contains("slow1_done"));
         assert!(executor.get_background_output("slow2").unwrap().contains("slow2_done"));
+    }
+
+    #[tokio::test]
+    async fn test_foreground_fifo_order() {
+        // Foreground tools should execute in strict FIFO order,
+        // even if all are auto-approved
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        // Enqueue three foreground tools - second one sleeps to test ordering
+        executor.enqueue(vec![
+            ToolCall {
+                agent_id: 0,
+                call_id: "fg1".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "sleep 0.05 && echo first" }),
+                decision: ToolDecision::Approve,
+                background: false,
+            },
+            ToolCall {
+                agent_id: 0,
+                call_id: "fg2".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo second" }),
+                decision: ToolDecision::Approve,
+                background: false,
+            },
+        ]);
+
+        let events = collect_events(&mut executor).await;
+        
+        // Get completion order by extracting call_ids from Completed events
+        let completion_order: Vec<_> = events.iter().filter_map(|e| {
+            if let ToolEvent::Completed { call_id, .. } = e { Some(call_id.clone()) } else { None }
+        }).collect();
+        
+        assert_eq!(completion_order, vec!["fg1", "fg2"], 
+            "Foreground tools should complete in FIFO order, got {:?}", completion_order);
+    }
+
+    #[tokio::test]
+    async fn test_background_doesnt_block_foreground() {
+        // A running background tool should not block foreground tools from starting
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        // Background tool that takes a while, followed by fast foreground
+        executor.enqueue(vec![
+            ToolCall {
+                agent_id: 0,
+                call_id: "bg1".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "sleep 0.1 && echo background" }),
+                decision: ToolDecision::Approve,
+                background: true,
+            },
+            ToolCall {
+                agent_id: 0,
+                call_id: "fg1".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo foreground" }),
+                decision: ToolDecision::Approve,
+                background: false,
+            },
+        ]);
+
+        // Collect events and track completion order
+        let mut completion_order: Vec<String> = vec![];
+        
+        while let Some(event) = executor.next().await {
+            match &event {
+                ToolEvent::Completed { call_id, .. } => {
+                    completion_order.push(call_id.clone());
+                }
+                ToolEvent::BackgroundCompleted { call_id, .. } => {
+                    completion_order.push(call_id.clone());
+                }
+                _ => {}
+            }
+        }
+        
+        // Foreground (instant echo) should complete before background (0.1s sleep)
+        assert_eq!(completion_order.len(), 2, "Both tools should complete");
+        assert_eq!(completion_order[0], "fg1", "Foreground should complete first");
+        assert_eq!(completion_order[1], "bg1", "Background should complete second");
+    }
+
+    #[tokio::test]
+    async fn test_foreground_approval_blocks_subsequent() {
+        // A foreground tool waiting for approval should block subsequent foreground tools
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        // Two foreground tools, first needs approval
+        executor.enqueue(vec![
+            ToolCall {
+                agent_id: 0,
+                call_id: "fg1".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo first" }),
+                decision: ToolDecision::Pending, // Needs approval
+                background: false,
+            },
+            ToolCall {
+                agent_id: 0,
+                call_id: "fg2".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo second" }),
+                decision: ToolDecision::Approve, // Auto-approved
+                background: false,
+            },
+        ]);
+
+        // First event should be AwaitingApproval for fg1
+        let event1 = executor.next().await.unwrap();
+        let responder = match event1 {
+            ToolEvent::AwaitingApproval { call_id, responder, .. } => {
+                assert_eq!(call_id, "fg1");
+                responder
+            }
+            other => panic!("Expected AwaitingApproval for fg1, got {:?}", other),
+        };
+
+        // fg2 should NOT have started yet (no events available without blocking)
+        // Approve fg1
+        responder.send(ToolDecision::Approve).unwrap();
+
+        // Now collect remaining events
+        let events = collect_events(&mut executor).await;
+        
+        // Should see fg1 complete, then fg2 complete (in order)
+        let completion_order: Vec<_> = events.iter().filter_map(|e| {
+            if let ToolEvent::Completed { call_id, .. } = e { Some(call_id.clone()) } else { None }
+        }).collect();
+        
+        assert_eq!(completion_order, vec!["fg1", "fg2"],
+            "After approval, tools should complete in order");
+    }
+
+    #[tokio::test]
+    async fn test_foreground_denial_unblocks_next() {
+        // Denying a foreground tool should allow the next foreground tool to start
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        executor.enqueue(vec![
+            ToolCall {
+                agent_id: 0,
+                call_id: "fg1".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo first" }),
+                decision: ToolDecision::Pending,
+                background: false,
+            },
+            ToolCall {
+                agent_id: 0,
+                call_id: "fg2".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo second" }),
+                decision: ToolDecision::Pending,
+                background: false,
+            },
+        ]);
+
+        // Get approval request for fg1
+        let event1 = executor.next().await.unwrap();
+        let responder1 = match event1 {
+            ToolEvent::AwaitingApproval { call_id, responder, .. } => {
+                assert_eq!(call_id, "fg1");
+                responder
+            }
+            other => panic!("Expected AwaitingApproval for fg1, got {:?}", other),
+        };
+
+        // Deny fg1
+        responder1.send(ToolDecision::Deny).unwrap();
+
+        // Should get Error for fg1, then AwaitingApproval for fg2
+        let mut saw_fg1_error = false;
+        let mut saw_fg2_approval = false;
+        let mut responder2 = None;
+        
+        while let Some(event) = executor.next().await {
+            match event {
+                ToolEvent::Error { call_id, .. } if call_id == "fg1" => {
+                    saw_fg1_error = true;
+                }
+                ToolEvent::AwaitingApproval { call_id, responder, .. } if call_id == "fg2" => {
+                    saw_fg2_approval = true;
+                    responder2 = Some(responder);
+                    break; // Got what we need
+                }
+                _ => {}
+            }
+        }
+        
+        assert!(saw_fg1_error, "Should see error for denied fg1");
+        assert!(saw_fg2_approval, "fg2 should get approval request after fg1 denied");
+        
+        // Approve fg2 and verify it completes
+        responder2.unwrap().send(ToolDecision::Approve).unwrap();
+        let events = collect_events(&mut executor).await;
+        
+        let fg2_completed = events.iter().any(|e| {
+            matches!(e, ToolEvent::Completed { call_id, .. } if call_id == "fg2")
+        });
+        assert!(fg2_completed, "fg2 should complete after approval");
+    }
+
+    #[tokio::test]
+    async fn test_background_with_pending_foreground() {
+        // Background tools should start even when a foreground tool is waiting for approval
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        executor.enqueue(vec![
+            ToolCall {
+                agent_id: 0,
+                call_id: "fg1".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo foreground" }),
+                decision: ToolDecision::Pending,
+                background: false,
+            },
+            ToolCall {
+                agent_id: 0,
+                call_id: "bg1".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo background" }),
+                decision: ToolDecision::Approve,
+                background: true,
+            },
+        ]);
+
+        // Should get both: AwaitingApproval for fg1 AND BackgroundStarted for bg1
+        let mut saw_fg1_approval = false;
+        let mut saw_bg1_started = false;
+        let mut responder = None;
+        
+        // Collect a few events
+        for _ in 0..5 {
+            if let Some(event) = executor.next().await {
+                match event {
+                    ToolEvent::AwaitingApproval { call_id, responder: r, .. } if call_id == "fg1" => {
+                        saw_fg1_approval = true;
+                        responder = Some(r);
+                    }
+                    ToolEvent::BackgroundStarted { call_id, .. } if call_id == "bg1" => {
+                        saw_bg1_started = true;
+                    }
+                    ToolEvent::BackgroundCompleted { .. } => break,
+                    _ => {}
+                }
+            }
+        }
+        
+        assert!(saw_fg1_approval, "Should see approval request for fg1");
+        assert!(saw_bg1_started, "Background should start even with pending foreground approval");
+        
+        // Cleanup: approve fg1 so test exits cleanly
+        if let Some(r) = responder {
+            let _ = r.send(ToolDecision::Approve);
+        }
     }
 }
