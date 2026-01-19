@@ -3,14 +3,15 @@
 use std::sync::OnceLock;
 
 use super::{Tool, ToolPipeline};
-use crate::tools::ToolRegistry;
 use crate::auth::OAuthCredentials;
 use crate::config::AgentRuntimeConfig;
 use crate::impl_base_block;
-use crate::llm::{Agent, RequestMode};
 use crate::llm::background::run_agent;
+use crate::llm::{Agent, RequestMode};
+use crate::prompts::SUB_AGENT_PROMPT;
 use crate::tools::pipeline::{EffectHandler, Step};
-use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, ToolBlock, Status};
+use crate::tools::ToolRegistry;
+use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, Status, ToolBlock};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -18,25 +19,6 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
-
-/// System prompt for sub-agents (background research agents)
-const SUB_AGENT_PROMPT: &str = r#"You are a background research agent. Your task is to investigate, explore, or analyze as directed.
-
-## Capabilities
-You have read-only access to:
-- `read_file`: Read file contents
-- `shell`: Execute commands (for searching, exploring)
-- `fetch_url`: Fetch web content
-- `web_search`: Search the web
-- `open_file`: Signal a file to open in the IDE
-
-## Guidelines
-- Focus on the specific task assigned to you
-- Be thorough but concise in your findings
-- Report back with structured, actionable information
-- You cannot modify files - only read and explore
-- If you need to suggest changes, describe them clearly for the primary agent to implement
-"#;
 
 // =============================================================================
 // Agent Context - global state for spawning sub-agents

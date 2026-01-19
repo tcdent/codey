@@ -11,6 +11,12 @@ use crate::tools::{
     EditFileTool, FetchUrlTool, ReadFileTool, ShellTool, WebSearchTool, WriteFileTool,
 };
 
+/// Directory name for Codey project-level configuration and data
+pub const CODEY_DIR: &str = ".codey";
+
+/// Directory name for storing conversation transcripts
+pub const TRANSCRIPTS_DIR: &str = "transcripts";
+
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]

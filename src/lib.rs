@@ -45,6 +45,7 @@ mod compaction;
 mod config;
 mod ide;
 mod llm;
+mod prompts;
 mod tool_filter;
 mod tools;
 mod transcript;

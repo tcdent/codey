@@ -7,6 +7,7 @@ mod ide;
 mod llm;
 #[cfg(feature = "profiling")]
 mod profiler;
+mod prompts;
 mod tool_filter;
 mod tools;
 mod transcript;
