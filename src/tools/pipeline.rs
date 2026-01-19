@@ -94,10 +94,18 @@ impl ToolPipeline {
         }
     }
 
-    /// Create a pipeline that immediately errors
+    /// Create a pipeline that immediately errors (CLI only)
+    #[cfg(feature = "cli")]
     pub fn error(message: impl Into<String>) -> Self {
         use crate::tools::handlers;
         Self::new().then(handlers::Error { message: message.into() })
+    }
+
+    /// Create a pipeline that immediately errors (library stub)
+    #[cfg(not(feature = "cli"))]
+    pub fn error(_message: impl Into<String>) -> Self {
+        // Library users handle tools via ToolRequest, so this is never called
+        Self::new()
     }
 
     /// Add an effect handler to the chain
@@ -106,7 +114,8 @@ impl ToolPipeline {
         self
     }
 
-    /// Add approval checkpoint
+    /// Add approval checkpoint (CLI only)
+    #[cfg(feature = "cli")]
     pub fn await_approval(self) -> Self {
         use crate::tools::handlers;
         self.then(handlers::AwaitApproval)
@@ -152,7 +161,7 @@ pub trait Tool: Send + Sync {
     fn create_block(&self, call_id: &str, params: serde_json::Value, background: bool) -> Box<dyn Block>;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cli"))]
 mod tests {
     use super::*;
     use crate::tools::handlers;
