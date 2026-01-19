@@ -13,6 +13,7 @@
 //! ```
 
 use crate::ide::{Edit, ToolPreview};
+#[cfg(feature = "cli")]
 use crate::transcript::Block;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -147,6 +148,7 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     fn schema(&self) -> serde_json::Value;
     fn compose(&self, params: serde_json::Value) -> ToolPipeline;
+    #[cfg(feature = "cli")]
     fn create_block(&self, call_id: &str, params: serde_json::Value, background: bool) -> Box<dyn Block>;
 }
 

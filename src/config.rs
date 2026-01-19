@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "cli")]
 use crate::tool_filter::ToolFilterConfig;
-use crate::tools::{
-    EditFileTool, FetchUrlTool, ReadFileTool, ShellTool, WebSearchTool, WriteFileTool,
-};
+#[cfg(feature = "cli")]
+use crate::tools::names;
 
 /// Directory name for Codey project-level configuration and data
 pub const CODEY_DIR: &str = ".codey";
