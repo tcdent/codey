@@ -16,9 +16,9 @@ name = "codey"
 path = "src/main.rs"
 
 [dependencies]
-# TUI
-ratatui = { version = "0.30.0-beta.0", features = ["scrolling-regions"] }
-crossterm = { version = "0.28", features = ["event-stream"] }
+# TUI (CLI only)
+ratatui = { version = "0.30.0-beta.0", features = ["scrolling-regions"], optional = true }
+crossterm = { version = "0.28", features = ["event-stream"], optional = true }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -31,10 +31,10 @@ genai = "0.4.4"
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
 futures = "0.3"
 
-# Web content extraction (reader view)
-chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
-readability = "0.3"
-htmd = "0.1"
+# Web content extraction (CLI only - reader view)
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false, optional = true }
+readability = { version = "0.3", optional = true }
+htmd = { version = "0.1", optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -44,8 +44,8 @@ serde_json = "1"
 toml = "0.8"
 dirs = "5"
 
-# CLI arguments
-clap = { version = "4", features = ["derive", "env"] }
+# CLI arguments (CLI only)
+clap = { version = "4", features = ["derive", "env"], optional = true }
 
 # Error handling
 anyhow = "1"
@@ -61,7 +61,7 @@ urlencoding = "2"
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
-open = "5"
+open = { version = "5", optional = true }
 
 # Logging
 tracing = "0.1"
@@ -71,12 +71,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 async-stream = "0.3"
 dotenvy = "0.15.7"
-ratskin = "0.3"
 typetag = "0.2.21"
 
-# Neovim RPC
-nvim-rs = { version = "0.9", features = ["use_tokio"] }
-textwrap = "0.16.2"
+# TUI rendering (CLI only)
+ratskin = { version = "0.3", optional = true }
+textwrap = { version = "0.16.2", optional = true }
+
+# Neovim RPC (CLI only)
+nvim-rs = { version = "0.9", features = ["use_tokio"], optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -92,7 +94,15 @@ strip = false
 debug = true
 
 [features]
-default = []
+default = ["cli"]
+
+# Full CLI with TUI, IDE integration, and web extraction
+cli = [
+    "ratatui", "crossterm", "clap", "nvim-rs", "open",
+    "chromiumoxide", "readability", "htmd",
+    "ratskin", "textwrap"
+]
+
 # Enable performance profiling with JSON export
 # Build with: cargo build --release --features profiling
 profiling = ["dep:sysinfo"]

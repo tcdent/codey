@@ -8,10 +8,29 @@ Add codey to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-codey = { git = "https://github.com/tcdent/codey" }
+codey = { git = "https://github.com/tcdent/codey", default-features = false }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1"
 ```
+
+### Lightweight Builds
+
+By default, codey includes the full CLI with TUI rendering, IDE integrations, and web extraction features. For library usage, disable the default features to get a minimal dependency footprint:
+
+```toml
+# Minimal library (recommended for integrations)
+codey = { git = "https://github.com/tcdent/codey", default-features = false }
+
+# Full CLI features (includes ratatui, crossterm, chromiumoxide, etc.)
+codey = { git = "https://github.com/tcdent/codey" }
+```
+
+With `default-features = false`, codey pulls only the core dependencies needed for the agent:
+- `genai` - LLM client
+- `tokio` - Async runtime
+- `serde`/`serde_json` - Serialization
+- `reqwest` - HTTP client
+- Error handling and utilities
 
 ### Patched Dependencies
 

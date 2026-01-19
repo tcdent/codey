@@ -39,16 +39,20 @@
 //! }
 //! ```
 
-// Internal modules used by the library
+// Core modules (always available)
 mod auth;
-mod compaction;
 mod config;
 mod ide;
 mod llm;
 mod prompts;
-mod tool_filter;
 mod tools;
 mod transcript;
+
+// CLI-only modules
+#[cfg(feature = "cli")]
+mod compaction;
+#[cfg(feature = "cli")]
+mod tool_filter;
 
 // Re-export the public API
 pub use config::AgentRuntimeConfig;

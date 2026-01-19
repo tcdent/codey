@@ -6,12 +6,14 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+#[cfg(feature = "cli")]
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "cli")]
 use crate::compaction::CompactionBlock;
 use crate::config::{CODEY_DIR, TRANSCRIPTS_DIR};
 
@@ -84,7 +86,8 @@ pub trait Block: Send + Sync {
     /// Get the kind of this block
     fn kind(&self) -> BlockType;
 
-    /// Render this block to terminal lines with given width for wrapping
+    /// Render this block to terminal lines with given width for wrapping (CLI only)
+    #[cfg(feature = "cli")]
     fn render(&self, width: u16) -> Vec<Line<'_>>;
 
     /// Get the status of this block
@@ -93,7 +96,8 @@ pub trait Block: Send + Sync {
     /// Set the status of this block
     fn set_status(&mut self, status: Status);
 
-    /// Render status icon with appropriate color
+    /// Render status icon with appropriate color (CLI only)
+    #[cfg(feature = "cli")]
     fn render_status(&self) -> Span<'static> {
         let (icon, color) = match self.status() {
             Status::Pending => ("? ", Color::Yellow),
@@ -183,6 +187,7 @@ impl TextBlock {
 impl Block for TextBlock {
     impl_base_block!(BlockType::Text);
 
+    #[cfg(feature = "cli")]
     fn render(&self, width: u16) -> Vec<Line<'_>> {
         // Use ratskin for markdown rendering
         let skin = ratskin::RatSkin::default();
@@ -211,6 +216,7 @@ impl ThinkingBlock {
 impl Block for ThinkingBlock {
     impl_base_block!(BlockType::Thinking);
 
+    #[cfg(feature = "cli")]
     fn render(&self, width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
         let style = Style::default()
@@ -255,6 +261,7 @@ impl ToolBlock {
 impl Block for ToolBlock {
     impl_base_block!(BlockType::Tool);
 
+    #[cfg(feature = "cli")]
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
@@ -320,6 +327,7 @@ impl Block for ToolBlock {
 }
 
 /// Helper: render prefix for background tools - "[bg] " if true, empty otherwise
+#[cfg(feature = "cli")]
 pub fn render_prefix(background: bool) -> Span<'static> {
     if background {
         Span::styled("[bg] ", Style::default().fg(Color::Cyan))
@@ -329,6 +337,7 @@ pub fn render_prefix(background: bool) -> Span<'static> {
 }
 
 /// Helper: render approval prompt
+#[cfg(feature = "cli")]
 pub fn render_approval_prompt() -> Line<'static> {
     Line::from(vec![
         Span::styled("  [", Style::default().fg(Color::DarkGray)),
@@ -350,6 +359,7 @@ pub fn render_approval_prompt() -> Line<'static> {
 }
 
 /// Helper: render result with line limit
+#[cfg(feature = "cli")]
 pub fn render_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let preview_lines: Vec<&str> = result.lines().take(max_lines).collect();
@@ -447,7 +457,8 @@ impl Turn {
         self.active_block_idx.and_then(|idx| self.get_block_mut(idx))
     }
 
-    /// Render all blocks with given width
+    /// Render all blocks with given width (CLI only)
+    #[cfg(feature = "cli")]
     pub fn render(&self, width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
         for (i, block) in self.content.iter().enumerate() {
@@ -555,7 +566,10 @@ impl Transcript {
             let block: Box<dyn Block> = match kind {
                 BlockType::Text => Box::new(TextBlock::new(text)),
                 BlockType::Thinking => Box::new(ThinkingBlock::new(text)),
+                #[cfg(feature = "cli")]
                 BlockType::Compaction => Box::new(CompactionBlock::new(text)),
+                #[cfg(not(feature = "cli"))]
+                BlockType::Compaction => Box::new(TextBlock::new(text)),
                 BlockType::Tool => panic!("Use start_block for tools"),
             };
             turn.start_block(block);
@@ -670,6 +684,7 @@ impl Transcript {
         let mut new_transcript = Self::with_path(new_path);
         
         // Check if last turn has a CompactionBlock and carry it over
+        #[cfg(feature = "cli")]
         if let Some(last_turn) = self.turns.last() {
             for block in &last_turn.content {
                 if block.kind() == BlockType::Compaction {

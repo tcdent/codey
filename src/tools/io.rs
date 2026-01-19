@@ -6,11 +6,14 @@
 use std::fs;
 use std::path::Path;
 use std::process::Stdio;
+#[cfg(feature = "cli")]
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+#[cfg(feature = "cli")]
 use chromiumoxide::browser::{Browser, BrowserConfig, HeadlessMode};
+#[cfg(feature = "cli")]
 use futures::StreamExt;
 
 /// Result of a shell command
@@ -362,6 +365,7 @@ struct WebResult {
 }
 
 /// Result of fetching HTML content as readable markdown
+#[cfg(feature = "cli")]
 #[derive(Debug)]
 pub struct FetchHtmlResult {
     pub content: String,
@@ -370,6 +374,7 @@ pub struct FetchHtmlResult {
 }
 
 /// Detect available browser executable for headless rendering
+#[cfg(feature = "cli")]
 pub fn detect_browser() -> Option<String> {
     // Common browser executable names in order of preference
     let candidates = [
@@ -392,6 +397,7 @@ pub fn detect_browser() -> Option<String> {
 }
 
 /// Check if a browser executable exists in PATH or as absolute path
+#[cfg(feature = "cli")]
 fn which_browser(name: &str) -> Option<String> {
     // If it's an absolute path, check directly
     if name.starts_with('/') {
@@ -421,6 +427,7 @@ fn which_browser(name: &str) -> Option<String> {
 /// 2. Renders page with headless browser (handles SPAs/JS)
 /// 3. Applies readability algorithm to extract main content
 /// 4. Converts to markdown for token-efficient representation
+#[cfg(feature = "cli")]
 pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtmlResult, String> {
     let max_length = max_length.unwrap_or(100000);
 
@@ -470,6 +477,7 @@ pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtm
 }
 
 /// Fetch page using headless browser (handles JavaScript rendering)
+#[cfg(feature = "cli")]
 async fn fetch_with_browser(url: &str, browser_path: Option<&str>) -> Result<String, String> {
     const JS_RENDER_WAIT_MS: u64 = 2000;
     // Configure browser
@@ -534,12 +542,14 @@ async fn fetch_with_browser(url: &str, browser_path: Option<&str>) -> Result<Str
     }
 }
 
+#[cfg(feature = "cli")]
 struct ReadableContent {
     content: String,
     title: Option<String>,
 }
 
 /// Extract readable content using the readability algorithm
+#[cfg(feature = "cli")]
 fn extract_readable_content(html: &str, url: &str) -> Result<ReadableContent, String> {
     use readability::extractor;
 
@@ -565,6 +575,7 @@ fn extract_readable_content(html: &str, url: &str) -> Result<ReadableContent, St
 }
 
 /// Convert HTML to markdown
+#[cfg(feature = "cli")]
 fn html_to_markdown(html: &str) -> String {
     htmd::convert(html).unwrap_or_else(|_| html.to_string())
 }

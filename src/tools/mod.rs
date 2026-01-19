@@ -6,15 +6,33 @@
 //! implementing the full pipeline.
 
 mod exec;
+#[cfg(feature = "cli")]
 pub mod handlers;
+#[cfg(feature = "cli")]
 mod impls;
 mod io;
 mod pipeline;
+
+/// Tool name constants (always available for configuration)
+pub mod names {
+    pub const READ_FILE: &str = "mcp_read_file";
+    pub const WRITE_FILE: &str = "mcp_write_file";
+    pub const EDIT_FILE: &str = "mcp_edit_file";
+    pub const SHELL: &str = "shell";
+    pub const FETCH_URL: &str = "mcp_fetch_url";
+    pub const FETCH_HTML: &str = "mcp_fetch_html";
+    pub const WEB_SEARCH: &str = "mcp_web_search";
+    pub const OPEN_FILE: &str = "mcp_open_file";
+    pub const SPAWN_AGENT: &str = "mcp_spawn_agent";
+    pub const LIST_BACKGROUND_TASKS: &str = "mcp_list_background_tasks";
+    pub const GET_BACKGROUND_TASK: &str = "mcp_get_background_task";
+}
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
+#[cfg(feature = "cli")]
 pub use impls::{
     init_agent_context, update_agent_oauth, EditFileTool, FetchHtmlTool, FetchUrlTool,
     GetBackgroundTaskTool, ListBackgroundTasksTool, OpenFileTool, ReadFileTool, ShellTool,
@@ -22,6 +40,7 @@ pub use impls::{
 };
 pub use pipeline::{Effect, Step, Tool, ToolPipeline};
 
+#[cfg(feature = "cli")]
 use crate::transcript::{Block, BlockType, ToolBlock};
 
 /// A simple tool definition for library users.
@@ -91,6 +110,7 @@ impl Tool for SimpleTool {
         ToolPipeline::error("SimpleTool does not support compose() - handle tool calls via AgentStep::ToolRequest")
     }
 
+    #[cfg(feature = "cli")]
     fn create_block(&self, call_id: &str, params: serde_json::Value, background: bool) -> Box<dyn Block> {
         // Return a basic ToolBlock for compatibility
         Box::new(ToolBlock::new(call_id, self.name, params, background))
@@ -104,7 +124,8 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Create a full registry with all tools
+    /// Create a full registry with all tools (CLI only)
+    #[cfg(feature = "cli")]
     pub fn new() -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
@@ -124,8 +145,9 @@ impl ToolRegistry {
 
         registry
     }
-    
-    /// Tools available to sub-agents (read-only, no spawn_agent)
+
+    /// Tools available to sub-agents (read-only, no spawn_agent) (CLI only)
+    #[cfg(feature = "cli")]
     pub fn subagent() -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
@@ -141,6 +163,7 @@ impl ToolRegistry {
         registry
     }
 
+    #[cfg(feature = "cli")]
     pub fn read_only() -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
