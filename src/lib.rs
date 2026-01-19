@@ -52,4 +52,4 @@ mod transcript;
 // Re-export the public API
 pub use config::AgentRuntimeConfig;
 pub use llm::{Agent, AgentStep, RequestMode, Usage};
-pub use tools::ToolRegistry;
+pub use tools::{SimpleTool, ToolCall, ToolRegistry};

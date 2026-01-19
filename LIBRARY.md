@@ -1,6 +1,6 @@
 # Using Codey as a Library
 
-Codey can be used as a library to create AI agents with custom system prompts in your Rust projects.
+Codey can be used as a library to create AI agents with custom system prompts and tools in your Rust projects.
 
 ## Installation
 
@@ -10,6 +10,7 @@ Add codey to your `Cargo.toml`:
 [dependencies]
 codey = { git = "https://github.com/tcdent/codey" }
 tokio = { version = "1", features = ["full"] }
+serde_json = "1"
 ```
 
 ### Patched Dependencies
@@ -30,33 +31,26 @@ genai = { path = "../codey/lib/genai" }
 
 Note: Run `make patch` in the codey repository first to download and patch the dependencies.
 
-## Basic Usage
+## Basic Usage (No Tools)
 
 ```rust
 use codey::{Agent, AgentRuntimeConfig, AgentStep, RequestMode, ToolRegistry};
 
 #[tokio::main]
 async fn main() {
-    // Create an agent with a custom system prompt (no tools)
     let mut agent = Agent::new(
         AgentRuntimeConfig::default(),
-        "You are a helpful assistant. Answer questions concisely.",
-        None, // OAuth credentials (uses ANTHROPIC_API_KEY env var)
+        "You are a helpful assistant.",
+        None, // uses ANTHROPIC_API_KEY env var
         ToolRegistry::empty(),
     );
 
-    // Send a message
     agent.send_request("What is the capital of France?", RequestMode::Normal);
 
-    // Process streaming responses
     while let Some(step) = agent.next().await {
         match step {
             AgentStep::TextDelta(text) => print!("{}", text),
-            AgentStep::ThinkingDelta(_) => { /* extended thinking output */ }
-            AgentStep::Finished { usage } => {
-                println!("\n\nTokens used: {}", usage.output_tokens);
-                break;
-            }
+            AgentStep::Finished { .. } => break,
             AgentStep::Error(e) => {
                 eprintln!("Error: {}", e);
                 break;
@@ -67,33 +61,143 @@ async fn main() {
 }
 ```
 
-## Public API
+## Custom Tools
 
-### `Agent`
+You can define custom tools using `SimpleTool` and handle their execution yourself.
 
-The main agent type that handles conversations with Claude.
+### Defining Tools
 
 ```rust
-// Create a new agent
-let mut agent = Agent::new(
-    config,           // AgentRuntimeConfig
-    system_prompt,    // &str
-    oauth,            // Option<OAuthCredentials>
-    tools,            // ToolRegistry
+use codey::{SimpleTool, ToolRegistry};
+use serde_json::json;
+use std::sync::Arc;
+
+// Define a tool
+let weather_tool = SimpleTool::new(
+    "get_weather",
+    "Get the current weather for a location",
+    json!({
+        "type": "object",
+        "properties": {
+            "location": {
+                "type": "string",
+                "description": "City name, e.g. 'San Francisco'"
+            }
+        },
+        "required": ["location"]
+    }),
 );
 
-// Send a message
-agent.send_request("Hello!", RequestMode::Normal);
+// Register tools
+let mut tools = ToolRegistry::empty();
+tools.register(Arc::new(weather_tool));
+```
 
-// Get streaming responses
-while let Some(step) = agent.next().await {
-    // Handle AgentStep variants
+### Handling Tool Calls
+
+When the LLM wants to use a tool, you'll receive an `AgentStep::ToolRequest`. You must execute the tool and submit the result back to the agent:
+
+```rust
+use codey::{Agent, AgentRuntimeConfig, AgentStep, RequestMode, SimpleTool, ToolCall, ToolRegistry};
+use serde_json::json;
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() {
+    // Set up tools
+    let weather_tool = SimpleTool::new(
+        "get_weather",
+        "Get the current weather for a location",
+        json!({
+            "type": "object",
+            "properties": {
+                "location": { "type": "string" }
+            },
+            "required": ["location"]
+        }),
+    );
+
+    let mut tools = ToolRegistry::empty();
+    tools.register(Arc::new(weather_tool));
+
+    // Create agent with tools
+    let mut agent = Agent::new(
+        AgentRuntimeConfig::default(),
+        "You are a helpful assistant with access to weather data.",
+        None,
+        tools,
+    );
+
+    agent.send_request("What's the weather in Paris?", RequestMode::Normal);
+
+    loop {
+        match agent.next().await {
+            Some(AgentStep::TextDelta(text)) => print!("{}", text),
+
+            Some(AgentStep::ToolRequest(calls)) => {
+                // Handle each tool call
+                for call in calls {
+                    let result = execute_tool(&call);
+                    agent.submit_tool_result(&call.call_id, result);
+                }
+                // Continue processing after submitting results
+            }
+
+            Some(AgentStep::Finished { .. }) => {
+                println!();
+                break;
+            }
+
+            Some(AgentStep::Error(e)) => {
+                eprintln!("Error: {}", e);
+                break;
+            }
+
+            None => break,
+            _ => {}
+        }
+    }
+}
+
+fn execute_tool(call: &ToolCall) -> String {
+    match call.name.as_str() {
+        "get_weather" => {
+            let location = call.params["location"].as_str().unwrap_or("unknown");
+            // Your actual implementation here
+            format!("Weather in {}: Sunny, 22°C", location)
+        }
+        _ => format!("Unknown tool: {}", call.name),
+    }
 }
 ```
 
-### `AgentRuntimeConfig`
+### `ToolCall` Structure
 
-Configuration for the agent:
+When you receive a tool request, each `ToolCall` contains:
+
+```rust
+pub struct ToolCall {
+    pub call_id: String,           // Unique ID for this call (use with submit_tool_result)
+    pub name: String,              // Tool name
+    pub params: serde_json::Value, // Parameters from the LLM
+    // ... other fields
+}
+```
+
+## Public API Reference
+
+### `Agent`
+
+The main agent type for conversations with Claude.
+
+```rust
+let mut agent = Agent::new(config, system_prompt, oauth, tools);
+agent.send_request("Hello!", RequestMode::Normal);
+while let Some(step) = agent.next().await { /* ... */ }
+agent.submit_tool_result(&call_id, result);
+```
+
+### `AgentRuntimeConfig`
 
 ```rust
 let config = AgentRuntimeConfig {
@@ -110,34 +214,39 @@ let config = AgentRuntimeConfig::default();
 
 ### `AgentStep`
 
-Events emitted during agent processing:
+Events emitted during processing:
 
 - `TextDelta(String)` - Streaming text output
 - `ThinkingDelta(String)` - Extended thinking output
+- `ToolRequest(Vec<ToolCall>)` - LLM wants to use tools
 - `Finished { usage: Usage }` - Processing complete
 - `Error(String)` - Error occurred
 - `Retrying { attempt, error }` - Retrying after error
-- `ToolRequest(Vec<ToolCall>)` - Tools requested (not used with empty registry)
-- `CompactionDelta(String)` - Context compaction output
 
-### `RequestMode`
+### `SimpleTool`
 
-Controls agent behavior:
+Define a tool for the LLM to use:
 
-- `RequestMode::Normal` - Standard conversation
-- `RequestMode::Compaction` - Context compaction mode
+```rust
+let tool = SimpleTool::new(
+    "tool_name",           // Name the LLM will use
+    "Description of tool", // Help the LLM understand when to use it
+    json!({ /* JSON Schema for parameters */ }),
+);
+```
 
 ### `ToolRegistry`
 
-For library usage, create an empty registry:
+Manage available tools:
 
 ```rust
-let tools = ToolRegistry::empty();
+let mut tools = ToolRegistry::empty();
+tools.register(Arc::new(my_tool));
 ```
 
 ### `Usage`
 
-Token usage statistics returned in `AgentStep::Finished`:
+Token usage statistics:
 
 ```rust
 pub struct Usage {
@@ -155,61 +264,3 @@ Set the `ANTHROPIC_API_KEY` environment variable:
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
 ```
-
-## Example: Interactive Chat
-
-```rust
-use codey::{Agent, AgentRuntimeConfig, AgentStep, RequestMode, ToolRegistry};
-use std::io::{self, Write};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let mut agent = Agent::new(
-        AgentRuntimeConfig::default(),
-        "You are a helpful assistant.",
-        None,
-        ToolRegistry::empty(),
-    );
-
-    loop {
-        print!("> ");
-        io::stdout().flush()?;
-
-        let mut input = String::new();
-        io::stdin().read_line(&mut input)?;
-        let input = input.trim();
-
-        if input == "quit" {
-            break;
-        }
-
-        agent.send_request(input, RequestMode::Normal);
-
-        while let Some(step) = agent.next().await {
-            match step {
-                AgentStep::TextDelta(text) => print!("{}", text),
-                AgentStep::Finished { .. } => {
-                    println!();
-                    break;
-                }
-                AgentStep::Error(e) => {
-                    eprintln!("\nError: {}", e);
-                    break;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    Ok(())
-}
-```
-
-## Limitations
-
-The library exposes a minimal API focused on creating agents with custom system prompts. The built-in tools (file operations, shell, web search, etc.) are specific to the Codey binary and its UI, so they are not exposed in the library API.
-
-If you need tool capabilities, you can:
-1. Implement tool-like behavior in your system prompt
-2. Parse structured output from the agent
-3. Build your own tool execution layer outside of codey
