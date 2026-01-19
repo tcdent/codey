@@ -12,8 +12,8 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::app::{CODEY_DIR, TRANSCRIPTS_DIR};
 use crate::compaction::CompactionBlock;
+use crate::config::{CODEY_DIR, TRANSCRIPTS_DIR};
 
 
 /// Role of the message sender

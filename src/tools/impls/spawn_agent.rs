@@ -3,15 +3,15 @@
 use std::sync::OnceLock;
 
 use super::{Tool, ToolPipeline};
-use crate::app::SUB_AGENT_PROMPT;
-use crate::tools::ToolRegistry;
 use crate::auth::OAuthCredentials;
 use crate::config::AgentRuntimeConfig;
 use crate::impl_base_block;
-use crate::llm::{Agent, RequestMode};
 use crate::llm::background::run_agent;
+use crate::llm::{Agent, RequestMode};
+use crate::prompts::SUB_AGENT_PROMPT;
 use crate::tools::pipeline::{EffectHandler, Step};
-use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, ToolBlock, Status};
+use crate::tools::ToolRegistry;
+use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, Status, ToolBlock};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},

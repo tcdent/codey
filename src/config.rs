@@ -11,6 +11,12 @@ use crate::tools::{
     EditFileTool, FetchUrlTool, ReadFileTool, ShellTool, WebSearchTool, WriteFileTool,
 };
 
+/// Directory name for Codey project-level configuration and data
+pub const CODEY_DIR: &str = ".codey";
+
+/// Directory name for storing conversation transcripts
+pub const TRANSCRIPTS_DIR: &str = "transcripts";
+
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -141,6 +147,18 @@ pub struct AgentRuntimeConfig {
     pub thinking_budget: u32,
     pub max_retries: u32,
     pub compaction_thinking_budget: u32,
+}
+
+impl Default for AgentRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            model: "claude-sonnet-4-20250514".to_string(),
+            max_tokens: 8192,
+            thinking_budget: 2_000,
+            max_retries: 5,
+            compaction_thinking_budget: 8_000,
+        }
+    }
 }
 
 impl AgentRuntimeConfig {

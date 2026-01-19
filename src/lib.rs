@@ -1,0 +1,56 @@
+//! Codey - A terminal-based AI coding assistant
+//!
+//! This crate can be used as a library to create AI agents with custom system prompts.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use codey::{Agent, AgentRuntimeConfig, AgentStep, RequestMode, ToolRegistry};
+//!
+//! #[tokio::main]
+//! async fn main() {
+//!     // Create an agent with a custom system prompt
+//!     let mut agent = Agent::new(
+//!         AgentRuntimeConfig::default(),
+//!         "You are a helpful assistant. Answer questions concisely.",
+//!         None, // oauth credentials (uses ANTHROPIC_API_KEY env var)
+//!         ToolRegistry::empty(),
+//!     );
+//!
+//!     // Send a message
+//!     agent.send_request("What is the capital of France?", RequestMode::Normal);
+//!
+//!     // Process streaming responses
+//!     while let Some(step) = agent.next().await {
+//!         match step {
+//!             AgentStep::TextDelta(text) => print!("{}", text),
+//!             AgentStep::ThinkingDelta(_) => { /* extended thinking */ }
+//!             AgentStep::Finished { usage } => {
+//!                 println!("\n\nTokens used: {}", usage.output_tokens);
+//!                 break;
+//!             }
+//!             AgentStep::Error(e) => {
+//!                 eprintln!("Error: {}", e);
+//!                 break;
+//!             }
+//!             _ => {}
+//!         }
+//!     }
+//! }
+//! ```
+
+// Internal modules used by the library
+mod auth;
+mod compaction;
+mod config;
+mod ide;
+mod llm;
+mod prompts;
+mod tool_filter;
+mod tools;
+mod transcript;
+
+// Re-export the public API
+pub use config::AgentRuntimeConfig;
+pub use llm::{Agent, AgentStep, RequestMode, Usage};
+pub use tools::{SimpleTool, ToolCall, ToolRegistry};
