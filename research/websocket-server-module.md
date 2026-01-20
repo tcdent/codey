@@ -19,10 +19,11 @@
 - `server.rs`: WebSocket listener and connection handling
 - `main.rs`: CLI entry point
 
-**Phase 4: Full ToolExecutor Integration** 🔲 Planned
-- Currently tools are sent as `ToolAwaitingApproval` for client to handle
-- TODO: Integrate `ToolExecutor` for server-side execution
-- TODO: Add auto-approve filter support
+**Phase 4: Full ToolExecutor Integration** ✅ Complete
+- `ToolExecutor` integrated for server-side tool execution
+- `ToolFilters` loaded from config for auto-approve/deny
+- Config file format shared with CLI (~/.config/codey/config.toml)
+- Tools matching filters are auto-approved/denied, others bubble to WebSocket
 
 **Phase 5: Integration Testing** 🔲 Planned
 - TODO: Add test client

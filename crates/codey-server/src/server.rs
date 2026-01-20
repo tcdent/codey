@@ -3,6 +3,7 @@
 //! Accepts WebSocket connections and spawns sessions for each.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use anyhow::Result;
 use futures::{SinkExt, StreamExt};
@@ -10,7 +11,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-use codey::AgentRuntimeConfig;
+use codey::{AgentRuntimeConfig, ToolFilters};
 
 use crate::protocol::{ClientMessage, ServerMessage};
 use crate::session::Session;
@@ -22,6 +23,8 @@ pub struct ServerConfig {
     pub system_prompt: String,
     /// Agent runtime configuration
     pub agent_config: AgentRuntimeConfig,
+    /// Tool filters for auto-approve/deny (shared across connections)
+    pub filters: Arc<ToolFilters>,
 }
 
 impl Default for ServerConfig {
@@ -29,6 +32,7 @@ impl Default for ServerConfig {
         Self {
             system_prompt: "You are a helpful AI coding assistant.".to_string(),
             agent_config: AgentRuntimeConfig::default(),
+            filters: Arc::new(ToolFilters::default()),
         }
     }
 }
@@ -129,10 +133,14 @@ async fn handle_connection(stream: TcpStream, config: ServerConfig) -> Result<()
         }
     });
 
+    // Pass the shared Arc<ToolFilters> to the session
+    let filters = Arc::clone(&config.filters);
+
     // Create and run session
     let mut session = Session::new(
         config.agent_config,
         &config.system_prompt,
+        filters,
         tx_to_ws,
         rx_from_ws,
     );
