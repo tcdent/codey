@@ -1,0 +1,96 @@
+[package]
+name = "codey"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core library for the Codey AI coding assistant"
+
+[lib]
+name = "codey"
+path = "src/lib.rs"
+
+[[bin]]
+name = "codey"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+# Async runtime
+tokio.workspace = true
+tokio-stream.workspace = true
+
+# LLM client
+genai.workspace = true
+
+# HTTP client
+reqwest.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Config
+toml.workspace = true
+dirs.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Utilities
+fancy-regex.workspace = true
+unicode-width.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+url.workspace = true
+urlencoding.workspace = true
+base64.workspace = true
+sha2.workspace = true
+rand.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Async utilities
+async-trait.workspace = true
+async-stream.workspace = true
+dotenvy.workspace = true
+typetag.workspace = true
+
+# TUI (optional - for CLI)
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+ratskin = { workspace = true, optional = true }
+textwrap = { workspace = true, optional = true }
+
+# CLI arguments (optional)
+clap = { workspace = true, optional = true }
+
+# IDE integration (optional)
+nvim-rs = { workspace = true, optional = true }
+open = { workspace = true, optional = true }
+
+# Web content extraction (optional)
+chromiumoxide = { workspace = true, optional = true }
+readability = { workspace = true, optional = true }
+htmd = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio-test.workspace = true
+tempfile.workspace = true
+pretty_assertions.workspace = true
+insta.workspace = true
+
+[features]
+default = []
+
+# Full CLI with TUI, tools, IDE integration, and web extraction
+cli = [
+    "ratatui", "crossterm", "clap", "nvim-rs", "open",
+    "chromiumoxide", "readability", "htmd",
+    "ratskin", "textwrap"
+]
