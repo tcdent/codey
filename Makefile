@@ -1,4 +1,4 @@
-.PHONY: build run release profile clean patch
+.PHONY: build build-cli build-server run run-server release profile clean patch
 
 # Set to 0 to use upstream crates: make SIMD=0 build
 SIMD ?= 1
@@ -9,17 +9,31 @@ else
 PATCH_DEPS := lib/genai/.patched .cargo/config.toml
 endif
 
+# Build all workspace members
 build: $(PATCH_DEPS)
-	cargo build
+	cargo build --workspace
 
+# Build just the CLI
+build-cli: $(PATCH_DEPS)
+	cargo build -p codey --features cli
+
+# Build just the server
+build-server: $(PATCH_DEPS)
+	cargo build -p codey-server
+
+# Run the CLI
 run: $(PATCH_DEPS)
-	cargo run
+	cargo run -p codey --features cli
+
+# Run the server
+run-server: $(PATCH_DEPS)
+	cargo run -p codey-server
 
 release: $(PATCH_DEPS)
 ifdef CARGO_BUILD_TARGET
-	cargo build --release --target $(CARGO_BUILD_TARGET)
+	cargo build --workspace --release --target $(CARGO_BUILD_TARGET)
 else
-	cargo build --release
+	cargo build --workspace --release
 endif
 
 profile: release

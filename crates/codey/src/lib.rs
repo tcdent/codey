@@ -57,4 +57,12 @@ mod tool_filter;
 // Re-export the public API
 pub use config::AgentRuntimeConfig;
 pub use llm::{Agent, AgentStep, RequestMode, Usage};
-pub use tools::{SimpleTool, ToolCall, ToolRegistry};
+pub use tools::{Effect, SimpleTool, ToolCall, ToolDecision, ToolEventMessage, ToolRegistry};
+
+// CLI-only exports (server-side tool execution, config, etc.)
+#[cfg(feature = "cli")]
+pub use config::Config;
+#[cfg(feature = "cli")]
+pub use tool_filter::ToolFilters;
+#[cfg(feature = "cli")]
+pub use tools::{ToolEvent, ToolExecutor};

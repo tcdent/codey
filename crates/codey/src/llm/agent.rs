@@ -49,7 +49,7 @@ impl From<&GenaiToolCall> for ToolCall {
 }
 
 /// Token usage tracking
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub struct Usage {
     /// Cumulative output tokens across the session
     pub output_tokens: u32,
@@ -92,6 +92,8 @@ impl std::ops::AddAssign for Usage {
 }
 
 /// Steps yielded by the agent during processing
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
 pub enum AgentStep {
     /// Streaming text chunk
     TextDelta(String),
@@ -120,7 +122,7 @@ enum StreamState {
 }
 
 /// Request mode controlling agent behavior for a single request
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub enum RequestMode {
     /// Normal conversation mode with tool access
     #[default]

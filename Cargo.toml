@@ -1,40 +1,31 @@
-[package]
-name = "codey"
+[workspace]
+resolver = "2"
+members = [
+    "crates/codey",
+    "crates/codey-server",
+]
+
+[workspace.package]
 version = "0.1.0-rc.5"
 edition = "2021"
 authors = ["Codey Contributors"]
-description = "A terminal-based AI coding assistant"
 license = "MIT"
 repository = "https://github.com/tcdent/codey"
 
-[lib]
-name = "codey"
-path = "src/lib.rs"
-
-[[bin]]
-name = "codey"
-path = "src/main.rs"
-
-[dependencies]
-# TUI (CLI only)
-ratatui = { version = "0.30.0-beta.0", features = ["scrolling-regions"], optional = true }
-crossterm = { version = "0.28", features = ["event-stream"], optional = true }
+[workspace.dependencies]
+# Internal crates
+codey = { path = "crates/codey" }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
-# LLM client (multi-provider)
+# LLM client
 genai = "0.4.4"
 
 # HTTP client
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
 futures = "0.3"
-
-# Web content extraction (CLI only - reader view)
-chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false, optional = true }
-readability = { version = "0.3", optional = true }
-htmd = { version = "0.1", optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -43,9 +34,6 @@ serde_json = "1"
 # Config
 toml = "0.8"
 dirs = "5"
-
-# CLI arguments (CLI only)
-clap = { version = "4", features = ["derive", "env"], optional = true }
 
 # Error handling
 anyhow = "1"
@@ -61,7 +49,6 @@ urlencoding = "2"
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
-open = { version = "5", optional = true }
 
 # Logging
 tracing = "0.1"
@@ -73,14 +60,28 @@ async-stream = "0.3"
 dotenvy = "0.15.7"
 typetag = "0.2.21"
 
-# TUI rendering (CLI only)
-ratskin = { version = "0.3", optional = true }
-textwrap = { version = "0.16.2", optional = true }
+# TUI (CLI only)
+ratatui = { version = "0.30.0-beta.0", features = ["scrolling-regions"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+ratskin = "0.3"
+textwrap = "0.16.2"
 
-# Neovim RPC (CLI only)
-nvim-rs = { version = "0.9", features = ["use_tokio"], optional = true }
+# CLI arguments
+clap = { version = "4", features = ["derive", "env"] }
 
-[dev-dependencies]
+# IDE integration
+nvim-rs = { version = "0.9", features = ["use_tokio"] }
+open = "5"
+
+# Web content extraction
+chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false }
+readability = "0.3"
+htmd = "0.1"
+
+# WebSocket
+tokio-tungstenite = "0.24"
+
+# Testing
 tokio-test = "0.4"
 tempfile = "3"
 pretty_assertions = "1"
@@ -92,23 +93,3 @@ codegen-units = 1
 panic = "abort"
 strip = false
 debug = true
-
-[features]
-default = ["cli"]
-
-# Full CLI with TUI, IDE integration, and web extraction
-cli = [
-    "ratatui", "crossterm", "clap", "nvim-rs", "open",
-    "chromiumoxide", "readability", "htmd",
-    "ratskin", "textwrap"
-]
-
-# Enable performance profiling with JSON export
-# Build with: cargo build --release --features profiling
-profiling = ["dep:sysinfo"]
-
-[dependencies.sysinfo]
-version = "0.33"
-optional = true
-default-features = false
-features = ["system"]

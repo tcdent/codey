@@ -1,0 +1,43 @@
+[package]
+name = "codey-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebSocket server for the Codey AI coding assistant"
+
+[[bin]]
+name = "codey-server"
+path = "src/main.rs"
+
+[dependencies]
+# Internal crates
+codey = { workspace = true, features = ["cli"] }
+
+# Async runtime
+tokio.workspace = true
+
+# WebSocket
+tokio-tungstenite.workspace = true
+futures.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# CLI arguments
+clap.workspace = true
+
+# Error handling
+anyhow.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# Utilities
+uuid.workspace = true
+dirs.workspace = true
+dotenvy.workspace = true
+toml.workspace = true
