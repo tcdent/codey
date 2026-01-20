@@ -41,7 +41,7 @@ pub trait EffectHandler: Send {
 }
 
 /// Effects that must be delegated to the app layer
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Effect {
     // === IDE ===
     IdeOpen { path: PathBuf, line: Option<u32>, column: Option<u32> },

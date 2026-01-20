@@ -55,7 +55,7 @@ enum WaitingFor {
 }
 
 /// A tool call pending execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     pub agent_id: AgentId,
     pub call_id: String,
@@ -74,7 +74,7 @@ impl ToolCall {
 }
 
 /// Decision state for a pending tool
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ToolDecision {
     #[default]
     Pending,
@@ -192,6 +192,129 @@ impl ToolEvent {
             rx,
         )
     }
+
+    /// Convert to a serializable message, dropping the responder channels.
+    pub fn to_message(&self) -> ToolEventMessage {
+        match self {
+            Self::AwaitingApproval { agent_id, call_id, name, params, background, .. } => {
+                ToolEventMessage::AwaitingApproval {
+                    agent_id: *agent_id,
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    params: params.clone(),
+                    background: *background,
+                }
+            }
+            Self::Delegate { agent_id, call_id, effect, .. } => {
+                ToolEventMessage::Delegate {
+                    agent_id: *agent_id,
+                    call_id: call_id.clone(),
+                    effect: effect.clone(),
+                }
+            }
+            Self::Delta { agent_id, call_id, content } => {
+                ToolEventMessage::Delta {
+                    agent_id: *agent_id,
+                    call_id: call_id.clone(),
+                    content: content.clone(),
+                }
+            }
+            Self::Completed { agent_id, call_id, content } => {
+                ToolEventMessage::Completed {
+                    agent_id: *agent_id,
+                    call_id: call_id.clone(),
+                    content: content.clone(),
+                }
+            }
+            Self::Error { agent_id, call_id, content } => {
+                ToolEventMessage::Error {
+                    agent_id: *agent_id,
+                    call_id: call_id.clone(),
+                    content: content.clone(),
+                }
+            }
+            Self::BackgroundStarted { agent_id, call_id, name } => {
+                ToolEventMessage::BackgroundStarted {
+                    agent_id: *agent_id,
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                }
+            }
+            Self::BackgroundCompleted { agent_id, call_id, name } => {
+                ToolEventMessage::BackgroundCompleted {
+                    agent_id: *agent_id,
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                }
+            }
+        }
+    }
+}
+
+/// Serializable version of [`ToolEvent`] for wire protocols (WebSocket, IPC, etc.)
+///
+/// This mirrors `ToolEvent` but omits the `oneshot::Sender` responder channels
+/// which cannot be serialized. The internal `ToolEvent` uses channels to implement
+/// the approval flow within a single process, while this type is used for
+/// cross-process or network communication.
+///
+/// # Why the duplication?
+///
+/// `ToolEvent` contains `oneshot::Sender<ToolDecision>` for the approval flow -
+/// when a tool needs approval, the executor sends the event with a channel, and
+/// the receiver (TUI or WebSocket server) sends the decision back through that
+/// channel. This is elegant for in-process use but channels can't cross the wire.
+///
+/// TODO: Consider whether we could restructure to have a single event type with
+/// the responder as an external concern (e.g., keyed by call_id in a separate map).
+/// For now, the duplication is minimal and the conversion is straightforward.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum ToolEventMessage {
+    /// Tool needs user approval
+    AwaitingApproval {
+        agent_id: AgentId,
+        call_id: String,
+        name: String,
+        params: serde_json::Value,
+        background: bool,
+    },
+    /// Effect delegated to app (IDE, agents, etc)
+    Delegate {
+        agent_id: AgentId,
+        call_id: String,
+        effect: Effect,
+    },
+    /// Streaming output from execution
+    Delta {
+        agent_id: AgentId,
+        call_id: String,
+        content: String,
+    },
+    /// Tool execution completed successfully
+    Completed {
+        agent_id: AgentId,
+        call_id: String,
+        content: String,
+    },
+    /// Tool execution failed
+    Error {
+        agent_id: AgentId,
+        call_id: String,
+        content: String,
+    },
+    /// Background tool started - placeholder sent to agent
+    BackgroundStarted {
+        agent_id: AgentId,
+        call_id: String,
+        name: String,
+    },
+    /// Background tool completed - notification for agent
+    BackgroundCompleted {
+        agent_id: AgentId,
+        call_id: String,
+        name: String,
+    },
 }
 
 /// Active pipeline execution state

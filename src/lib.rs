@@ -57,4 +57,4 @@ mod tool_filter;
 // Re-export the public API
 pub use config::AgentRuntimeConfig;
 pub use llm::{Agent, AgentStep, RequestMode, Usage};
-pub use tools::{SimpleTool, ToolCall, ToolRegistry};
+pub use tools::{Effect, SimpleTool, ToolCall, ToolDecision, ToolEventMessage, ToolRegistry};

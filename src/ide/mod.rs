@@ -28,14 +28,14 @@ pub use nvim::Nvim;
 // ============================================================================
 
 /// An edit operation (old_string → new_string)
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Edit {
     pub old_string: String,
     pub new_string: String,
 }
 
 /// A preview to show in the IDE before tool execution
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ToolPreview {
     /// Show file content (for write_file, showing what will be created)
     File { path: String, content: String },

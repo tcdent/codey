@@ -31,7 +31,7 @@ pub mod names {
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
+pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolEventMessage, ToolExecutor};
 #[cfg(feature = "cli")]
 pub use impls::{
     init_agent_context, update_agent_oauth, EditFileTool, FetchHtmlTool, FetchUrlTool,
