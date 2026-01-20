@@ -1,5 +1,33 @@
 # WebSocket Server Module
 
+## Current Status
+
+**Phase 1: Serialization** ✅ Complete
+- Added `Serialize`/`Deserialize` to `AgentStep`, `Usage`, `RequestMode`, `ToolCall`, `ToolDecision`, `Effect`
+- Added `ToolEventMessage` with `to_message()` conversion from `ToolEvent`
+- Exported new types from `lib.rs` public API
+
+**Phase 2: Workspace Restructure** ✅ Complete (simplified)
+- Created workspace with `crates/codey` and `crates/codey-server`
+- Kept tool implementations in `codey` with `cli` feature (simpler than separate `codey-tools` crate)
+- `codey` crate produces both library and `codey` binary
+- `codey-server` depends on `codey` with `cli` feature for full tool access
+
+**Phase 3: codey-server Skeleton** ✅ Complete
+- `protocol.rs`: `ClientMessage` and `ServerMessage` enums
+- `session.rs`: Per-connection session with event loop
+- `server.rs`: WebSocket listener and connection handling
+- `main.rs`: CLI entry point
+
+**Phase 4: Full ToolExecutor Integration** 🔲 Planned
+- Currently tools are sent as `ToolAwaitingApproval` for client to handle
+- TODO: Integrate `ToolExecutor` for server-side execution
+- TODO: Add auto-approve filter support
+
+**Phase 5: Integration Testing** 🔲 Planned
+- TODO: Add test client
+- TODO: End-to-end tests
+
 ## Overview
 
 This document outlines the plan to add a WebSocket server module (`codey-server`) that exposes the full agent interaction over WebSocket, enabling automation and integration with external clients while keeping the core CLI unaltered.
@@ -14,82 +42,50 @@ This document outlines the plan to add a WebSocket server module (`codey-server`
 
 ## Architecture
 
-### Workspace Structure
+### Workspace Structure (Actual Implementation)
 
 ```
 codey/
-├── Cargo.toml                    # workspace root
+├── Cargo.toml                    # workspace root with shared deps
 ├── crates/
-│   ├── codey/                    # core library (agent, executor, config)
-│   │   ├── Cargo.toml
+│   ├── codey/                    # core library + CLI binary
+│   │   ├── Cargo.toml            # has 'cli' feature for TUI/tools
 │   │   └── src/
 │   │       ├── lib.rs            # public API exports
-│   │       ├── auth.rs           # OAuth handling
-│   │       ├── config.rs         # AgentRuntimeConfig
-│   │       ├── llm/
-│   │       │   ├── mod.rs
-│   │       │   ├── agent.rs      # Agent, AgentStep, Usage
-│   │       │   ├── registry.rs   # AgentRegistry (multi-agent)
-│   │       │   └── background.rs # Background task coordination
-│   │       ├── tools/
-│   │       │   ├── mod.rs        # SimpleTool, ToolRegistry, re-exports
-│   │       │   ├── exec.rs       # ToolExecutor, ToolCall, ToolEvent, ToolEventMessage
-│   │       │   ├── pipeline.rs   # Effect, Step, ToolPipeline
-│   │       │   └── io.rs         # I/O helpers
-│   │       ├── tool_filter.rs    # Auto-approval filters
-│   │       ├── transcript.rs     # Conversation persistence
-│   │       └── prompts.rs        # System prompts
-│   │
-│   ├── codey-tools/              # tool implementations
-│   │   ├── Cargo.toml            # depends on codey
-│   │   └── src/
-│   │       ├── lib.rs            # ToolSet::full(), re-exports
-│   │       ├── read_file.rs
-│   │       ├── write_file.rs
-│   │       ├── edit_file.rs
-│   │       ├── shell.rs
-│   │       ├── fetch_url.rs
-│   │       ├── fetch_html.rs     # optional: requires chromiumoxide
-│   │       ├── web_search.rs
-│   │       ├── open_file.rs
-│   │       ├── spawn_agent.rs
-│   │       └── background_tasks.rs
-│   │
-│   ├── codey-cli/                # TUI binary (existing CLI)
-│   │   ├── Cargo.toml            # depends on codey + codey-tools + ratatui
-│   │   └── src/
-│   │       ├── main.rs
+│   │       ├── main.rs           # CLI entry point (requires cli feature)
 │   │       ├── app.rs            # TUI event loop
-│   │       ├── commands.rs       # CLI commands
-│   │       ├── compaction.rs     # Context compaction
-│   │       ├── ui/
-│   │       │   ├── mod.rs
-│   │       │   ├── chat.rs       # ChatView
-│   │       │   └── input.rs      # InputBox
-│   │       ├── ide/
-│   │       │   ├── mod.rs        # Ide trait
-│   │       │   └── nvim/         # Neovim integration
-│   │       └── handlers.rs       # Tool approval UI, effect handlers
+│   │       ├── ui/               # TUI components
+│   │       ├── llm/              # Agent, AgentStep, Usage
+│   │       ├── tools/            # ToolExecutor + implementations
+│   │       │   ├── exec.rs       # ToolExecutor, ToolEvent, ToolEventMessage
+│   │       │   ├── handlers.rs   # Effect handlers
+│   │       │   └── impls/        # Tool implementations
+│   │       └── ...
 │   │
 │   └── codey-server/             # WebSocket server binary
-│       ├── Cargo.toml            # depends on codey + codey-tools + tokio-tungstenite
+│       ├── Cargo.toml            # depends on codey with cli feature
 │       └── src/
-│           ├── main.rs           # CLI entry point, daemonization
-│           ├── server.rs         # WebSocket listener, connection accept
-│           ├── session.rs        # Per-connection agent session
-│           ├── protocol.rs       # ClientMessage, ServerMessage
-│           └── handlers.rs       # Tool approval routing, effect handling
+│           ├── main.rs           # Server entry point
+│           ├── protocol.rs       # ClientMessage/ServerMessage
+│           ├── server.rs         # WebSocket listener
+│           └── session.rs        # Per-connection session
 ```
+
+Note: The original plan included a separate `codey-tools` crate, but the
+implementation keeps tools in the `codey` crate behind the `cli` feature
+for simplicity. This can be refactored later if needed.
 
 ### Dependency Graph
 
 ```
-codey-cli ──────┬──► codey-tools ──► codey (core)
-                │
-codey-server ───┘
+codey-server ──► codey (with cli feature)
+                    │
+                    ├── Agent, AgentStep, Usage
+                    ├── ToolExecutor, ToolEvent, ToolEventMessage
+                    └── Tool implementations (read_file, shell, etc.)
 
 External clients ──► codey-server (WebSocket)
-Library users ──────► codey (core) directly
+Library users ──────► codey (no cli feature, just core Agent)
 ```
 
 ## Implementation Plan
