@@ -98,18 +98,6 @@ You can extend Codey's system prompt by creating `SYSTEM.md` files that are auto
 
 SYSTEM.md files support [mdsh](https://github.com/zimbatm/mdsh) syntax, allowing you to embed shell commands that are executed dynamically. This is useful for including context that changes over time.
 
-**Inline commands** - Use backticks with `$`:
-```markdown
-Current branch: `$ git branch --show-current`
-```
-
-**Code blocks** - Use `$` or `sh` as the language:
-~~~markdown
-```$
-git log --oneline -5
-```
-~~~
-
 ### Example SYSTEM.md
 
 ```markdown
