@@ -117,11 +117,19 @@ git log --oneline -5
 
 You are working on the `$ basename $(pwd)` project.
 
+Today is `$ date '+%d %B %Y'`.
+
 Current branch: `$ git branch --show-current`
 
 ## Recent Activity
 ```$
 git log --oneline -5
+```
+
+```$
+if which linctl > /dev/null 2>&1; then
+  echo "The linctl CLI is available for managing infrastructure."
+fi
 ```
 
 ## Guidelines
