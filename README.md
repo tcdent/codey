@@ -87,6 +87,50 @@ max_tokens = 8192
 theme = "base16-ocean.dark"
 ```
 
+## Custom System Prompts
+
+You can extend Codey's system prompt by creating `SYSTEM.md` files that are automatically appended to the base prompt. These files are loaded from two locations (in order):
+
+1. **User config**: `~/.config/codey/SYSTEM.md` - personal customizations
+2. **Project**: `.codey/SYSTEM.md` - project-specific instructions
+
+### Dynamic Content with mdsh
+
+SYSTEM.md files support [mdsh](https://github.com/zimbatm/mdsh) syntax, allowing you to embed shell commands that are executed dynamically. This is useful for including context that changes over time.
+
+**Inline commands** - Use backticks with `$`:
+```markdown
+Current branch: `$ git branch --show-current`
+```
+
+**Code blocks** - Use `$` or `sh` as the language:
+~~~markdown
+```$
+git log --oneline -5
+```
+~~~
+
+### Example SYSTEM.md
+
+```markdown
+# Project Context
+
+You are working on the `$ basename $(pwd)` project.
+
+Current branch: `$ git branch --show-current`
+
+## Recent Activity
+```$
+git log --oneline -5
+```
+
+## Guidelines
+- Follow the existing code style
+- Write tests for new functionality
+```
+
+Commands are re-executed on every LLM request, so the prompt always reflects the current state of your environment. Note that this may cause cache invalidation if command output changes between requests.
+
 ## Keybindings
 
 | Key | Action |
