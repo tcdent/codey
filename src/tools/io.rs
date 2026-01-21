@@ -427,8 +427,21 @@ fn which_browser(name: &str) -> Option<String> {
 /// 2. Renders page with headless browser (handles SPAs/JS)
 /// 3. Applies readability algorithm to extract main content
 /// 4. Converts to markdown for token-efficient representation
+///
+/// # Arguments
+/// * `url` - The URL to fetch
+/// * `max_length` - Maximum length of returned content (default: 100,000 chars)
+/// * `chrome_executable` - Optional custom Chrome/Chromium executable path (falls back to config, then auto-detect)
+/// * `chrome_profile_path` - Optional path to Chrome user data directory for cookie sharing (falls back to config)
 #[cfg(feature = "cli")]
-pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtmlResult, String> {
+pub async fn fetch_html(
+    url: &str,
+    max_length: Option<usize>,
+    chrome_executable: Option<&str>,
+    chrome_profile_path: Option<&str>,
+) -> Result<FetchHtmlResult, String> {
+    use crate::config::Config;
+
     let max_length = max_length.unwrap_or(100000);
 
     // Validate URL
@@ -441,13 +454,48 @@ pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtm
         ));
     }
 
-    // Require browser
-    let browser_path = detect_browser().ok_or_else(|| {
-        "No Chrome/Chromium browser found. Install chromium or google-chrome to use this tool."
-            .to_string()
-    })?;
+    // Load config for browser settings (if not provided as arguments)
+    let config = Config::load().ok();
+    let browser_config = config.as_ref().map(|c| &c.browser);
 
-    let html = fetch_with_browser(url, Some(&browser_path)).await?;
+    // Resolve browser executable: argument -> config -> auto-detect
+    let browser_path = match chrome_executable {
+        Some(path) => path.to_string(),
+        None => {
+            // Try config first
+            let config_exe = browser_config
+                .and_then(|b| b.chrome_executable.as_ref())
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string());
+
+            match config_exe {
+                Some(path) => path,
+                None => detect_browser().ok_or_else(|| {
+                    "No Chrome/Chromium browser found. Install chromium or google-chrome to use this tool."
+                        .to_string()
+                })?,
+            }
+        }
+    };
+
+    // Resolve profile path: argument -> config -> None
+    let profile_path: Option<String> = match chrome_profile_path {
+        Some(path) => Some(path.to_string()),
+        None => browser_config
+            .and_then(|b| b.chrome_profile_path.as_ref())
+            .and_then(|p| {
+                // Expand ~ to home directory
+                let path_str = p.to_str()?;
+                if path_str.starts_with("~/") {
+                    dirs::home_dir()
+                        .map(|home| home.join(&path_str[2..]).to_string_lossy().to_string())
+                } else {
+                    Some(path_str.to_string())
+                }
+            }),
+    };
+
+    let html = fetch_with_browser(url, Some(&browser_path), profile_path.as_deref()).await?;
 
     // Apply readability to extract main content
     let readable = extract_readable_content(&html, url)?;
@@ -477,8 +525,17 @@ pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtm
 }
 
 /// Fetch page using headless browser (handles JavaScript rendering)
+///
+/// # Arguments
+/// * `url` - The URL to fetch
+/// * `browser_path` - Optional path to Chrome/Chromium executable
+/// * `profile_path` - Optional path to Chrome user data directory (profile)
 #[cfg(feature = "cli")]
-async fn fetch_with_browser(url: &str, browser_path: Option<&str>) -> Result<String, String> {
+async fn fetch_with_browser(
+    url: &str,
+    browser_path: Option<&str>,
+    profile_path: Option<&str>,
+) -> Result<String, String> {
     const JS_RENDER_WAIT_MS: u64 = 2000;
     // Configure browser
     let mut config = BrowserConfig::builder()
@@ -488,6 +545,12 @@ async fn fetch_with_browser(url: &str, browser_path: Option<&str>) -> Result<Str
 
     if let Some(path) = browser_path {
         config = config.chrome_executable(path);
+    }
+
+    // Add Chrome profile path if specified
+    // This allows sharing cookies and session data with the user's browser
+    if let Some(profile) = profile_path {
+        config = config.arg(format!("--user-data-dir={}", profile));
     }
 
     let config = config.build().map_err(|e| format!("Failed to configure browser: {:?}", e))?;

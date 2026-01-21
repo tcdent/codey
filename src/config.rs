@@ -109,6 +109,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub tools: ToolsConfig,
     pub ide: IdeConfig,
+    pub browser: BrowserConfig,
 }
 
 #[cfg(feature = "cli")]
@@ -121,6 +122,7 @@ impl Default for Config {
             ui: UiConfig::default(),
             tools: ToolsConfig::default(),
             ide: IdeConfig::default(),
+            browser: BrowserConfig::default(),
         }
     }
 }
@@ -406,6 +408,29 @@ impl Default for NvimConfig {
             socket: None,
             show_diffs: true,
             auto_reload: true,
+        }
+    }
+}
+
+/// Browser configuration for fetch_html tool
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserConfig {
+    /// Path to Chrome/Chromium user data directory (profile)
+    /// This allows sharing cookies and session data with your local browser.
+    /// Example: "~/.config/google-chrome" or "~/Library/Application Support/Google/Chrome"
+    pub chrome_profile_path: Option<PathBuf>,
+    /// Custom Chrome/Chromium executable path (optional, auto-detected if not set)
+    pub chrome_executable: Option<PathBuf>,
+}
+
+#[cfg(feature = "cli")]
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            chrome_profile_path: None,
+            chrome_executable: None,
         }
     }
 }

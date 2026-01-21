@@ -395,12 +395,23 @@ impl EffectHandler for GetBackgroundTask {
 pub struct FetchHtml {
     pub url: String,
     pub max_length: Option<usize>,
+    /// Optional custom Chrome/Chromium executable path
+    pub chrome_executable: Option<String>,
+    /// Optional path to Chrome user data directory for cookie sharing
+    pub chrome_profile_path: Option<String>,
 }
 
 #[async_trait::async_trait]
 impl EffectHandler for FetchHtml {
     async fn call(self: Box<Self>) -> Step {
-        match io::fetch_html(&self.url, self.max_length).await {
+        match io::fetch_html(
+            &self.url,
+            self.max_length,
+            self.chrome_executable.as_deref(),
+            self.chrome_profile_path.as_deref(),
+        )
+        .await
+        {
             Ok(result) => {
                 let title_info = result
                     .title

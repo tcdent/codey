@@ -108,6 +108,32 @@ deny = [
 ]
 
 # =============================================================================
+# Browser Configuration (for fetch_html tool)
+# =============================================================================
+# Configure Chrome/Chromium settings for the fetch_html tool which uses
+# headless browser rendering to fetch web pages.
+
+[browser]
+# Path to Chrome/Chromium user data directory (profile)
+# This allows sharing cookies and session data with your local browser,
+# enabling access to authenticated pages.
+#
+# Common paths:
+#   Linux: ~/.config/google-chrome (Chrome) or ~/.config/chromium (Chromium)
+#   macOS: ~/Library/Application Support/Google/Chrome
+#   Windows: %LOCALAPPDATA%\Google\Chrome\User Data
+#
+# Note: The browser profile must not be in use by another Chrome instance.
+# Consider creating a separate profile for Codey if needed.
+#
+# chrome_profile_path = "~/.config/google-chrome"
+
+# Custom Chrome/Chromium executable path (optional)
+# If not set, auto-detects from PATH or standard installation locations.
+#
+# chrome_executable = "/usr/bin/google-chrome"
+
+# =============================================================================
 # Neovim Integration
 # =============================================================================
 # Codey connects to Neovim via RPC socket for diff previews, buffer management,
