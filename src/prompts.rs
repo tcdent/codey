@@ -1,6 +1,16 @@
-//! Centralized prompt definitions for Codey
+//! Centralized prompt definitions and system prompt management.
 //!
-//! This module contains all system prompts used throughout the application.
+//! This module contains all system prompts used throughout the application,
+//! as well as the `SystemPrompt` struct for building dynamic prompts.
+
+use std::path::{Path, PathBuf};
+
+use mdsh::Processor;
+
+use crate::config::{Config, CODEY_DIR};
+
+/// Filename for custom system prompt additions
+pub const SYSTEM_MD_FILENAME: &str = "SYSTEM.md";
 
 /// Welcome message shown when the application starts
 pub const WELCOME_MESSAGE: &str =
@@ -86,5 +96,85 @@ You have read-only access to:
 - If you need to suggest changes, describe them clearly for the primary agent to implement
 "#;
 
-/// Filename for custom system prompt additions
-pub const SYSTEM_MD_FILENAME: &str = "SYSTEM.md";
+/// A system prompt builder that supports dynamic content via mdsh.
+///
+/// The prompt is composed of:
+/// 1. The base system prompt (static)
+/// 2. User SYSTEM.md from ~/.config/codey/ (optional, dynamic)
+/// 3. Project SYSTEM.md from .codey/ (optional, dynamic)
+///
+/// SYSTEM.md files are processed through [mdsh](https://github.com/zimbatm/mdsh),
+/// allowing embedded shell commands to be executed and their output included.
+#[derive(Clone)]
+pub struct SystemPrompt {
+    user_path: Option<PathBuf>,
+    project_path: PathBuf,
+}
+
+impl SystemPrompt {
+    /// Create a new SystemPrompt with default paths.
+    pub fn new() -> Self {
+        let user_path = Config::config_dir().map(|d| d.join(SYSTEM_MD_FILENAME));
+        let project_path = Path::new(CODEY_DIR).join(SYSTEM_MD_FILENAME);
+
+        Self {
+            user_path,
+            project_path,
+        }
+    }
+
+    /// Build the complete system prompt.
+    ///
+    /// This reads and processes all SYSTEM.md files, executing any embedded
+    /// shell commands via mdsh. The result is the concatenation of:
+    /// - Base system prompt
+    /// - User SYSTEM.md content (if exists)
+    /// - Project SYSTEM.md content (if exists)
+    pub fn build(&self) -> String {
+        let mut prompt = SYSTEM_PROMPT.to_string();
+
+        // Append user SYSTEM.md if it exists
+        if let Some(ref user_path) = self.user_path {
+            if let Ok(content) = std::fs::read_to_string(user_path) {
+                tracing::debug!("Appending user SYSTEM.md from {:?}", user_path);
+                let processed = self.process_mdsh(&content, user_path);
+                prompt.push_str("\n\n");
+                prompt.push_str(&processed);
+            }
+        }
+
+        // Append project SYSTEM.md if it exists
+        if let Ok(content) = std::fs::read_to_string(&self.project_path) {
+            tracing::debug!("Appending project SYSTEM.md from {:?}", self.project_path);
+            let processed = self.process_mdsh(&content, &self.project_path);
+            prompt.push_str("\n\n");
+            prompt.push_str(&processed);
+        }
+
+        prompt
+    }
+
+    /// Process content through mdsh, executing embedded shell commands.
+    fn process_mdsh(&self, content: &str, path: &Path) -> String {
+        let workdir = path
+            .parent()
+            .map(|p| p.as_os_str())
+            .unwrap_or_else(|| std::ffi::OsStr::new("."));
+
+        let mut output = Vec::new();
+        let mut processor = mdsh::executor::TheProcessor::new(workdir, &mut output);
+
+        if let Err(e) = processor.process(content, &mdsh::cli::FileArg::StdHandle) {
+            tracing::warn!("Failed to process mdsh content from {:?}: {}", path, e);
+            return content.to_string();
+        }
+
+        String::from_utf8(output).unwrap_or_else(|_| content.to_string())
+    }
+}
+
+impl Default for SystemPrompt {
+    fn default() -> Self {
+        Self::new()
+    }
+}

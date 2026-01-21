@@ -17,12 +17,12 @@ use ratatui::{
 use tokio::sync::oneshot;
 
 use crate::commands::Command;
-use crate::config::{AgentRuntimeConfig, Config, CODEY_DIR};
+use crate::config::{AgentRuntimeConfig, Config};
 use crate::ide::{Ide, IdeEvent, Nvim};
 use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
 #[cfg(feature = "profiling")]
 use crate::{profile_frame, profile_span};
-use crate::prompts::{COMPACTION_PROMPT, SYSTEM_MD_FILENAME, SYSTEM_PROMPT, WELCOME_MESSAGE};
+use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, WELCOME_MESSAGE};
 use crate::tool_filter::ToolFilters;
 use crate::tools::{
     init_agent_context, update_agent_oauth, Effect, ToolCall, ToolDecision, ToolEvent,
@@ -35,34 +35,6 @@ const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
 
 pub const APP_NAME: &str = "Codey";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// Build the complete system prompt by appending content from SYSTEM.md files.
-/// Checks (in order):
-/// 1. User config: ~/.config/codey/SYSTEM.md
-/// 2. Project: .codey/SYSTEM.md
-fn build_system_prompt() -> String {
-    let mut prompt = SYSTEM_PROMPT.to_string();
-
-    // Check user config directory: ~/.config/codey/SYSTEM.md
-    if let Some(config_dir) = Config::config_dir() {
-        let user_system_md = config_dir.join(SYSTEM_MD_FILENAME);
-        if let Ok(content) = std::fs::read_to_string(&user_system_md) {
-            tracing::debug!("Appending user SYSTEM.md from {:?}", user_system_md);
-            prompt.push_str("\n\n");
-            prompt.push_str(&content);
-        }
-    }
-
-    // Check project directory: .codey/SYSTEM.md
-    let project_system_md = std::path::Path::new(CODEY_DIR).join(SYSTEM_MD_FILENAME);
-    if let Ok(content) = std::fs::read_to_string(&project_system_md) {
-        tracing::debug!("Appending project SYSTEM.md from {:?}", project_system_md);
-        prompt.push_str("\n\n");
-        prompt.push_str(&content);
-    }
-
-    prompt
-}
 
 /// Result of handling an action
 enum ActionResult {
@@ -345,9 +317,11 @@ impl App {
             self.oauth.clone(),
         );
 
-        let mut agent = Agent::new(
+        // Use dynamic prompt builder so mdsh commands are re-executed on each LLM call
+        let system_prompt = SystemPrompt::new();
+        let mut agent = Agent::with_dynamic_prompt(
             AgentRuntimeConfig::foreground(&self.config),
-            &build_system_prompt(),
+            Box::new(move || system_prompt.build()),
             self.oauth.clone(),
             self.tool_executor.tools().clone(),
         );
