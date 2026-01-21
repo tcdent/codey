@@ -44,13 +44,14 @@ mod auth;
 mod config;
 mod ide;
 mod llm;
-mod prompts;
 mod tools;
 mod transcript;
 
 // CLI-only modules
 #[cfg(feature = "cli")]
 mod compaction;
+#[cfg(feature = "cli")]
+mod prompts;
 #[cfg(feature = "cli")]
 mod tool_filter;
 

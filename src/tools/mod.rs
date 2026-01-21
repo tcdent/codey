@@ -18,7 +18,7 @@ pub mod names {
     pub const READ_FILE: &str = "mcp_read_file";
     pub const WRITE_FILE: &str = "mcp_write_file";
     pub const EDIT_FILE: &str = "mcp_edit_file";
-    pub const SHELL: &str = "shell";
+    pub const SHELL: &str = "mcp_shell";
     pub const FETCH_URL: &str = "mcp_fetch_url";
     pub const FETCH_HTML: &str = "mcp_fetch_html";
     pub const WEB_SEARCH: &str = "mcp_web_search";
