@@ -109,8 +109,8 @@ impl Tool for FetchUrlTool {
     }
 
     fn description(&self) -> &'static str {
-        "Fetch content from a URL. Returns text content (HTML, JSON, plain text). \
-         Useful for documentation, API responses, web pages. \
+        "Fetch content from a URL. HTML is automatically converted to markdown \
+         for efficient token usage. Scripts, styles, and navigation are stripped. \
          Content is truncated if it exceeds max_length."
     }
 
@@ -124,7 +124,7 @@ impl Tool for FetchUrlTool {
                 },
                 "max_length": {
                     "type": "integer",
-                    "description": "Maximum content length in characters (default: 50000)"
+                    "description": "Maximum content length in characters (default: 20000)"
                 },
                 "background": {
                     "type": "boolean",

@@ -204,8 +204,11 @@ pub async fn execute_shell(
 }
 
 /// Fetch content from a URL
+///
+/// For HTML content, automatically converts to markdown for more efficient
+/// token usage. Scripts, styles, and other noise are stripped.
 pub async fn fetch_url(url: &str, max_length: Option<usize>) -> Result<FetchResult, String> {
-    let max_length = max_length.unwrap_or(50000);
+    let max_length = max_length.unwrap_or(20000);
 
     let parsed_url =
         url::Url::parse(url).map_err(|e| format!("Invalid URL: {}", e))?;
@@ -248,23 +251,38 @@ pub async fn fetch_url(url: &str, max_length: Option<usize>) -> Result<FetchResu
             }
 
             match response.text().await {
-                Ok(mut text) => {
+                Ok(text) => {
                     let original_len = text.len();
-                    if text.len() > max_length {
-                        // Find a valid UTF-8 boundary at or before max_length
+
+                    // Convert HTML to markdown for more efficient token usage
+                    let is_html = content_type.contains("text/html")
+                        || text.trim_start().starts_with("<!DOCTYPE")
+                        || text.trim_start().starts_with("<html");
+
+                    let mut processed = if is_html {
+                        let cleaned = strip_html_noise(&text);
+                        htmd::convert(&cleaned).unwrap_or(cleaned)
+                    } else {
+                        text
+                    };
+
+                    let processed_len = processed.len();
+
+                    // Truncate if needed
+                    if processed.len() > max_length {
                         let mut end = max_length;
-                        while end > 0 && !text.is_char_boundary(end) {
+                        while end > 0 && !processed.is_char_boundary(end) {
                             end -= 1;
                         }
-                        text = text[..end].to_string();
-                        text.push_str(&format!(
-                            "\n\n[... truncated, {} of {} bytes shown]",
-                            end, original_len
+                        processed = processed[..end].to_string();
+                        processed.push_str(&format!(
+                            "\n\n[... truncated, {} of {} chars shown (original: {} bytes)]",
+                            end, processed_len, original_len
                         ));
                     }
 
                     Ok(FetchResult {
-                        content: text,
+                        content: processed,
                         content_type,
                         size: original_len,
                     })
@@ -275,6 +293,33 @@ pub async fn fetch_url(url: &str, max_length: Option<usize>) -> Result<FetchResu
         Ok(Err(e)) => Err(format!("Request failed: {}", e)),
         Err(_) => Err("Request timed out after 30 seconds".to_string()),
     }
+}
+
+/// Strip noise elements from HTML (scripts, styles, nav, etc.)
+fn strip_html_noise(html: &str) -> String {
+    use fancy_regex::Regex;
+
+    // Remove script tags and their content
+    let script_re = Regex::new(r"(?is)<script[^>]*>.*?</script>").unwrap();
+    let html = script_re.replace_all(html, "");
+
+    // Remove style tags and their content
+    let style_re = Regex::new(r"(?is)<style[^>]*>.*?</style>").unwrap();
+    let html = style_re.replace_all(&html, "");
+
+    // Remove common noise elements (keep content simple - just remove the tags)
+    let noise_re = Regex::new(r"(?is)<(nav|header|footer|aside|noscript)[^>]*>.*?</\1>").unwrap();
+    let html = noise_re.replace_all(&html, "");
+
+    // Remove HTML comments
+    let comment_re = Regex::new(r"(?s)<!--.*?-->").unwrap();
+    let html = comment_re.replace_all(&html, "");
+
+    // Remove SVG elements (often large and unhelpful as text)
+    let svg_re = Regex::new(r"(?is)<svg[^>]*>.*?</svg>").unwrap();
+    let html = svg_re.replace_all(&html, "");
+
+    html.to_string()
 }
 
 /// Search the web using Brave Search API

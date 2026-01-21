@@ -34,7 +34,7 @@ futures = "0.3"
 # Web content extraction (CLI only - reader view)
 chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false, optional = true }
 readability = { version = "0.3", optional = true }
-htmd = { version = "0.1", optional = true }
+htmd = "0.1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -99,7 +99,7 @@ default = ["cli"]
 # Full CLI with TUI, IDE integration, and web extraction
 cli = [
     "ratatui", "crossterm", "clap", "nvim-rs", "open",
-    "chromiumoxide", "readability", "htmd",
+    "chromiumoxide", "readability",
     "ratskin", "textwrap"
 ]
 
