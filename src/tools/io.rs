@@ -624,3 +624,32 @@ fn extract_readable_content(html: &str, url: &str) -> Result<ReadableContent, St
 fn html_to_markdown(html: &str) -> String {
     htmd::convert(html).unwrap_or_else(|_| html.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_fetch_url_truncation() {
+        // Use httpbin to test with a known large response
+        let result = fetch_url("https://httpbin.org/bytes/100000", Some(1000)).await;
+
+        match result {
+            Ok(r) => {
+                println!("Original size: {} bytes", r.size);
+                println!("Returned content size: {} bytes", r.content.len());
+
+                // Should be truncated to ~1000 + truncation message
+                assert!(r.content.len() <= 1100, "Content should be truncated to ~1000 bytes, got {}", r.content.len());
+                assert!(r.content.contains("[... truncated"), "Should contain truncation message");
+
+                // Original should be 100000 bytes
+                assert!(r.size >= 100000, "Original should be 100000 bytes, got {}", r.size);
+            }
+            Err(e) => {
+                // Skip if network unavailable
+                eprintln!("Skipping test due to network error: {}", e);
+            }
+        }
+    }
+}
