@@ -36,7 +36,33 @@ const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
 pub const APP_NAME: &str = "Codey";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Process a SYSTEM.md file through mdsh, executing embedded shell commands.
+///
+/// Returns the processed content, or the original content if processing fails.
+fn process_mdsh(content: &str, path: &std::path::Path) -> String {
+    use mdsh::Processor;
+
+    let workdir = path
+        .parent()
+        .map(|p| p.as_os_str())
+        .unwrap_or_else(|| std::ffi::OsStr::new("."));
+
+    let mut output = Vec::new();
+    let mut processor = mdsh::executor::TheProcessor::new(workdir, &mut output);
+
+    if let Err(e) = processor.process(content, &mdsh::cli::FileArg::StdHandle) {
+        tracing::warn!("Failed to process mdsh content from {:?}: {}", path, e);
+        return content.to_string();
+    }
+
+    String::from_utf8(output).unwrap_or_else(|_| content.to_string())
+}
+
 /// Build the complete system prompt by appending content from SYSTEM.md files.
+///
+/// SYSTEM.md files are processed through mdsh, which executes embedded shell commands.
+/// This allows dynamic content like `$ git branch --show-current` to be included.
+///
 /// Checks (in order):
 /// 1. User config: ~/.config/codey/SYSTEM.md
 /// 2. Project: .codey/SYSTEM.md
@@ -48,8 +74,9 @@ fn build_system_prompt() -> String {
         let user_system_md = config_dir.join(SYSTEM_MD_FILENAME);
         if let Ok(content) = std::fs::read_to_string(&user_system_md) {
             tracing::debug!("Appending user SYSTEM.md from {:?}", user_system_md);
+            let processed = process_mdsh(&content, &user_system_md);
             prompt.push_str("\n\n");
-            prompt.push_str(&content);
+            prompt.push_str(&processed);
         }
     }
 
@@ -57,8 +84,9 @@ fn build_system_prompt() -> String {
     let project_system_md = std::path::Path::new(CODEY_DIR).join(SYSTEM_MD_FILENAME);
     if let Ok(content) = std::fs::read_to_string(&project_system_md) {
         tracing::debug!("Appending project SYSTEM.md from {:?}", project_system_md);
+        let processed = process_mdsh(&content, &project_system_md);
         prompt.push_str("\n\n");
-        prompt.push_str(&content);
+        prompt.push_str(&processed);
     }
 
     prompt
@@ -345,9 +373,10 @@ impl App {
             self.oauth.clone(),
         );
 
-        let mut agent = Agent::new(
+        // Use dynamic prompt builder so mdsh commands are re-executed on each LLM call
+        let mut agent = Agent::with_dynamic_prompt(
             AgentRuntimeConfig::foreground(&self.config),
-            &build_system_prompt(),
+            Box::new(build_system_prompt),
             self.oauth.clone(),
             self.tool_executor.tools().clone(),
         );

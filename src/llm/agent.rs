@@ -153,6 +153,10 @@ impl RequestMode {
     }
 }
 
+/// A function that builds a dynamic system prompt.
+/// Called before each LLM request to allow prompt content to change.
+pub type SystemPromptBuilder = Box<dyn Fn() -> String + Send + Sync>;
+
 /// Agent for handling conversations
 pub struct Agent {
     client: Client,
@@ -163,6 +167,8 @@ pub struct Agent {
     total_usage: Usage,
     /// OAuth credentials for Claude Max (if available)
     oauth: Option<OAuthCredentials>,
+    /// Optional dynamic prompt builder - called before each request
+    system_prompt_builder: Option<SystemPromptBuilder>,
 
     // Streaming state (Some when actively processing)
     state: Option<StreamState>,
@@ -194,6 +200,41 @@ impl Agent {
             system_prompt: system_prompt.to_string(),
             total_usage: Usage::default(),
             oauth,
+            system_prompt_builder: None,
+
+            // Streaming state starts empty
+            state: None,
+            active_stream: None,
+            mode: RequestMode::Normal,
+
+            // Accumulated during streaming
+            streaming_text: String::new(),
+            streaming_tool_calls: Vec::new(),
+            streaming_thinking: Vec::new(),
+            tool_responses: Vec::new(),
+        }
+    }
+
+    /// Create a new agent with a dynamic system prompt builder.
+    ///
+    /// The builder is called before each LLM request, allowing the prompt
+    /// to include dynamic content (e.g., mdsh-processed shell command output).
+    pub fn with_dynamic_prompt(
+        config: AgentRuntimeConfig,
+        prompt_builder: SystemPromptBuilder,
+        oauth: Option<OAuthCredentials>,
+        tools: ToolRegistry,
+    ) -> Self {
+        let system_prompt = prompt_builder();
+        Self {
+            client: Client::default(),
+            config,
+            tools,
+            messages: vec![ChatMessage::system(&system_prompt)],
+            system_prompt,
+            total_usage: Usage::default(),
+            oauth,
+            system_prompt_builder: Some(prompt_builder),
 
             // Streaming state starts empty
             state: None,
@@ -352,6 +393,28 @@ impl Agent {
         self.oauth = oauth;
     }
 
+    /// Refresh the system prompt if a dynamic builder is configured.
+    ///
+    /// This is called before each LLM request to allow the prompt content
+    /// to change (e.g., when mdsh commands return different output).
+    fn refresh_system_prompt(&mut self) {
+        if let Some(ref builder) = self.system_prompt_builder {
+            let new_prompt = builder();
+            if new_prompt != self.system_prompt {
+                debug!(
+                    "System prompt changed ({} -> {} chars)",
+                    self.system_prompt.len(),
+                    new_prompt.len()
+                );
+                self.system_prompt = new_prompt.clone();
+                // Update the first message (system message)
+                if !self.messages.is_empty() {
+                    self.messages[0] = ChatMessage::system(&new_prompt);
+                }
+            }
+        }
+    }
+
     /// Get total usage statistics
     pub fn total_usage(&self) -> Usage {
         self.total_usage
@@ -505,6 +568,9 @@ impl Agent {
             match self.state.as_ref()? {
                 StreamState::NeedsChatRequest => {
                     debug!("Agent state: NeedsChatRequest, clearing streaming data");
+                    // Refresh dynamic system prompt before each request
+                    self.refresh_system_prompt();
+
                     // Clear accumulated streaming data for new request
                     self.streaming_text.clear();
                     self.streaming_tool_calls.clear();
