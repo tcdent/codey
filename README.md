@@ -101,28 +101,16 @@ SYSTEM.md files support [mdsh](https://github.com/zimbatm/mdsh) syntax, allowing
 ### Example SYSTEM.md
 
 ```markdown
-# Project Context
-
-You are working on the `$ basename $(pwd)` project.
-
 Today is `$ date '+%d %B %Y'`.
-
-Current branch: `$ git branch --show-current`
-
-## Recent Activity
-```$
-git log --oneline -5
-```
 
 ```$
 if which linctl > /dev/null 2>&1; then
-  echo "The linctl CLI is available for managing infrastructure."
+  echo "Use linctl to manage Linear tickets."
 fi
 ```
 
 ## Guidelines
 - Follow the existing code style
-- Write tests for new functionality
 ```
 
 Commands are re-executed on every LLM request, so the prompt always reflects the current state of your environment. Note that this may cause cache invalidation if command output changes between requests.
