@@ -22,6 +22,7 @@ use crate::ide::{Ide, IdeEvent, Nvim};
 use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
 #[cfg(feature = "profiling")]
 use crate::{profile_frame, profile_span};
+use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, WELCOME_MESSAGE};
 use crate::tool_filter::ToolFilters;
 use crate::tools::{
     init_agent_context, update_agent_oauth, Effect, ToolCall, ToolDecision, ToolEvent,
@@ -34,124 +35,6 @@ const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
 
 pub const APP_NAME: &str = "Codey";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const CODEY_DIR: &str = ".codey";
-pub const TRANSCRIPTS_DIR: &str = "transcripts";
-
-const WELCOME_MESSAGE: &str =
-    "Welcome to Codey! I'm your AI coding assistant. How can I help you today?";
-const SYSTEM_PROMPT: &str = r#"You are Codey, an AI coding assistant running in a terminal interface.
-
-## Capabilities
-You have access to the following tools:
-- `read_file`: Read file contents, optionally with line ranges
-- `write_file`: Create new files
-- `edit_file`: Make precise edits using search/replace
-- `shell`: Execute bash commands
-- `fetch_url`: Fetch web content
-
-## Guidelines
-
-### Reading Files
-- Always read a file before editing it
-- Use line ranges for large files: `read_file(path, start_line=100, end_line=200)`
-- Use `shell("ls -la")` to explore directories
-- When reading files, be careful about reading large files in one-go. Use line ranges, 
-    or check the file stats with `shell("stat <file_path>")` first.
-- shell grep is a great way to get a line number to read a targeted section of a file
-
-### Editing Files
-- Use `edit_file` for existing files, `write_file` only for new files
-- The `old_string` must match EXACTLY, including whitespace and indentation
-- If `old_string` appears multiple times, include more context to make it unique
-- Apply edits sequentially; each edit sees the result of previous edits
-- You can do multiple edits at once, but keep it under 1000 lines
-- Avoid the urge to completely rewrite files - make precise, minimal edits so the user can review them easily
-
-### Shell Commands
-- Prefer `read_file` over `cat`, `head`, `tail`
-- Use `ls` for directory exploration
-- Use `grep` or `rg` for searching code
-- Run `pwd` early in your session to confirm your working directory
-- Prefer relative paths over absolute paths when possible - tool approval configs often allow execution from the current working directory but restrict access to system-wide paths
-- Avoid using `cd` to change directories before commands; instead, use relative paths from your working directory (e.g., `./src/main.rs` or `src/main.rs`)
-
-### Web Content
-When fetching web pages with `fetch_html`, consider using `spawn_agent` to delegate content extraction to a sub-agent. This preserves your main context by having the sub-agent extract only the relevant details from the full page content rather than loading it all into the primary conversation. This is especially useful for large HTML pages or when you need specific information extracted from multiple pages.
-
-### Background Execution
-For long-running operations, you can execute tools in the background by adding `"background": true` to the tool call. This returns immediately with a task ID while the tool runs asynchronously.
-Use `list_background_tasks` to check status and `get_background_task` to retrieve results when complete.
-
-When running background agents, use `shell("sleep N")` (where N is seconds) to keep your execution loop active. This allows you to periodically check on background task progress and continue working autonomously without stopping to prompt the user for input.
-
-### General
-- Be concise but thorough
-- Explain what you're doing before executing tools
-- If a tool fails, explain the error and suggest fixes
-- Ask for clarification if the request is ambiguous
-- If you feel like backing out of a path, always get confirmation before git resetting the work tree
-- Always get confirmation before making destructive changes (this includes building a release)
-"#;
-const COMPACTION_PROMPT: &str = r#"The conversation context is getting large and needs to be compacted.
-
-Please provide a comprehensive summary of our conversation so far in markdown format. Include:
-
-1. **What was accomplished** - Main tasks and changes completed as a bulleted list
-2. **What still needs to be done** - Remaining tasks or open areas of work as a bulleted list
-3. **Key project information** - Important facts about the project that the user has shared or that we're not immediately apparent
-4. **Relevant files** - Files most relevant to the current work with brief descriptions, line numbers, or method/variable names
-5. **Relevant documentation paths or URLs** - Links to docs or resources we will use to continue our work
-6. **Quotes and log snippets** - Any important quotes or logs that the user provided that we'll need later
-
-Be thorough but concise - this summary will seed a fresh conversation context."#;
-
-pub const SUB_AGENT_PROMPT: &str = r#"You are a background research agent. Your task is to investigate, explore, or analyze as directed.
-
-## Capabilities
-You have read-only access to:
-- `read_file`: Read file contents
-- `shell`: Execute commands (for searching, exploring)
-- `fetch_url`: Fetch web content
-- `web_search`: Search the web
-- `open_file`: Signal a file to open in the IDE
-
-## Guidelines
-- Focus on the specific task assigned to you
-- Be thorough but concise in your findings
-- Report back with structured, actionable information
-- You cannot modify files - only read and explore
-- If you need to suggest changes, describe them clearly for the primary agent to implement
-"#;
-
-const SYSTEM_MD_FILENAME: &str = "SYSTEM.md";
-
-/// Build the complete system prompt by appending content from SYSTEM.md files.
-/// Checks (in order):
-/// 1. User config: ~/.config/codey/SYSTEM.md
-/// 2. Project: .codey/SYSTEM.md
-fn build_system_prompt() -> String {
-    let mut prompt = SYSTEM_PROMPT.to_string();
-
-    // Check user config directory: ~/.config/codey/SYSTEM.md
-    if let Some(config_dir) = Config::config_dir() {
-        let user_system_md = config_dir.join(SYSTEM_MD_FILENAME);
-        if let Ok(content) = std::fs::read_to_string(&user_system_md) {
-            tracing::debug!("Appending user SYSTEM.md from {:?}", user_system_md);
-            prompt.push_str("\n\n");
-            prompt.push_str(&content);
-        }
-    }
-
-    // Check project directory: .codey/SYSTEM.md
-    let project_system_md = std::path::Path::new(CODEY_DIR).join(SYSTEM_MD_FILENAME);
-    if let Ok(content) = std::fs::read_to_string(&project_system_md) {
-        tracing::debug!("Appending project SYSTEM.md from {:?}", project_system_md);
-        prompt.push_str("\n\n");
-        prompt.push_str(&content);
-    }
-
-    prompt
-}
 
 /// Result of handling an action
 enum ActionResult {
@@ -434,9 +317,11 @@ impl App {
             self.oauth.clone(),
         );
 
-        let mut agent = Agent::new(
+        // Use dynamic prompt builder so mdsh commands are re-executed on each LLM call
+        let system_prompt = SystemPrompt::new();
+        let mut agent = Agent::with_dynamic_prompt(
             AgentRuntimeConfig::foreground(&self.config),
-            &build_system_prompt(),
+            Box::new(move || system_prompt.build()),
             self.oauth.clone(),
             self.tool_executor.tools().clone(),
         );

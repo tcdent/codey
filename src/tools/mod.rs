@@ -1,23 +1,121 @@
 //! Tool system with effect-based composition
 //!
 //! Tools are defined as chains of effects that get interpreted by the executor.
+//!
+//! For library users, see [`SimpleTool`] for a way to define tools without
+//! implementing the full pipeline.
 
 mod exec;
+#[cfg(feature = "cli")]
 pub mod handlers;
+#[cfg(feature = "cli")]
 mod impls;
 mod io;
 mod pipeline;
+
+/// Tool name constants (always available for configuration)
+pub mod names {
+    pub const READ_FILE: &str = "mcp_read_file";
+    pub const WRITE_FILE: &str = "mcp_write_file";
+    pub const EDIT_FILE: &str = "mcp_edit_file";
+    pub const SHELL: &str = "shell";
+    pub const FETCH_URL: &str = "mcp_fetch_url";
+    pub const FETCH_HTML: &str = "mcp_fetch_html";
+    pub const WEB_SEARCH: &str = "mcp_web_search";
+    pub const OPEN_FILE: &str = "mcp_open_file";
+    pub const SPAWN_AGENT: &str = "mcp_spawn_agent";
+    pub const LIST_BACKGROUND_TASKS: &str = "mcp_list_background_tasks";
+    pub const GET_BACKGROUND_TASK: &str = "mcp_get_background_task";
+}
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
+#[cfg(feature = "cli")]
 pub use impls::{
     init_agent_context, update_agent_oauth, EditFileTool, FetchHtmlTool, FetchUrlTool,
     GetBackgroundTaskTool, ListBackgroundTasksTool, OpenFileTool, ReadFileTool, ShellTool,
     SpawnAgentTool, WebSearchTool, WriteFileTool,
 };
-pub use pipeline::{Effect, Step, Tool};
+pub use pipeline::{Effect, Step, Tool, ToolPipeline};
+
+#[cfg(feature = "cli")]
+use crate::transcript::{Block, BlockType, ToolBlock};
+
+/// A simple tool definition for library users.
+///
+/// This allows defining tools that can be advertised to the LLM without
+/// implementing the full effect pipeline. Tool execution is handled by
+/// the library user via [`AgentStep::ToolRequest`] and [`Agent::submit_tool_result`].
+///
+/// # Example
+///
+/// ```ignore
+/// use codey::{SimpleTool, ToolRegistry};
+/// use serde_json::json;
+/// use std::sync::Arc;
+///
+/// let weather_tool = SimpleTool::new(
+///     "get_weather",
+///     "Get the current weather for a location",
+///     json!({
+///         "type": "object",
+///         "properties": {
+///             "location": {
+///                 "type": "string",
+///                 "description": "City name"
+///             }
+///         },
+///         "required": ["location"]
+///     }),
+/// );
+///
+/// let mut tools = ToolRegistry::empty();
+/// tools.register(Arc::new(weather_tool));
+/// ```
+pub struct SimpleTool {
+    name: &'static str,
+    description: &'static str,
+    schema: serde_json::Value,
+}
+
+impl SimpleTool {
+    /// Create a new simple tool definition.
+    ///
+    /// - `name`: The tool name (used by the LLM to call it)
+    /// - `description`: Human-readable description of what the tool does
+    /// - `schema`: JSON Schema describing the tool's parameters
+    pub fn new(name: &'static str, description: &'static str, schema: serde_json::Value) -> Self {
+        Self { name, description, schema }
+    }
+}
+
+impl Tool for SimpleTool {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn description(&self) -> &'static str {
+        self.description
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        self.schema.clone()
+    }
+
+    fn compose(&self, _params: serde_json::Value) -> ToolPipeline {
+        // SimpleTool is for library users who handle tool execution themselves.
+        // This method should never be called in that context.
+        ToolPipeline::error("SimpleTool does not support compose() - handle tool calls via AgentStep::ToolRequest")
+    }
+
+    #[cfg(feature = "cli")]
+    fn create_block(&self, call_id: &str, params: serde_json::Value, background: bool) -> Box<dyn Block> {
+        // Return a basic ToolBlock for compatibility
+        Box::new(ToolBlock::new(call_id, self.name, params, background))
+    }
+}
 
 /// Registry of available tools
 #[derive(Clone)]
@@ -26,7 +124,8 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Create a full registry with all tools
+    /// Create a full registry with all tools (CLI only)
+    #[cfg(feature = "cli")]
     pub fn new() -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
@@ -46,8 +145,9 @@ impl ToolRegistry {
 
         registry
     }
-    
-    /// Tools available to sub-agents (read-only, no spawn_agent)
+
+    /// Tools available to sub-agents (read-only, no spawn_agent) (CLI only)
+    #[cfg(feature = "cli")]
     pub fn subagent() -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
@@ -63,6 +163,7 @@ impl ToolRegistry {
         registry
     }
 
+    #[cfg(feature = "cli")]
     pub fn read_only() -> Self {
         let mut registry = Self {
             tools: HashMap::new(),

@@ -14,11 +14,13 @@
 //! points in the tool execution flow. Tools can define what previews they produce
 //! and what actions they need after execution.
 
+#[cfg(feature = "cli")]
 pub mod nvim;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
+#[cfg(feature = "cli")]
 pub use nvim::Nvim;
 
 // ============================================================================
