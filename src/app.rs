@@ -413,6 +413,7 @@ impl App {
                 &self.config.agents.foreground.model,
                 context_tokens,
                 self.tool_executor.running_background_count(),
+                self.input_mode != InputMode::Normal,
             );
         let alert = self.alert.clone();
 

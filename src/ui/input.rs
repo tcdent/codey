@@ -573,12 +573,14 @@ impl InputBox {
         model: &'a str,
         context_tokens: u32,
         background_tasks: usize,
+        agent_active: bool,
     ) -> InputBoxWidget<'a> {
         InputBoxWidget {
             state: self,
             model,
             context_tokens,
             background_tasks,
+            agent_active,
         }
     }
 }
@@ -597,6 +599,8 @@ pub struct InputBoxWidget<'a> {
     context_tokens: u32,
     /// Number of running background tasks
     background_tasks: usize,
+    /// Whether the agent is actively processing (streaming, tool execution)
+    agent_active: bool,
 }
 
 impl Widget for InputBoxWidget<'_> {
@@ -707,7 +711,13 @@ impl Widget for InputBoxWidget<'_> {
             let y = inner.y + cursor_y as u16;
 
             if x < inner.x + inner.width && y < inner.y + inner.height {
-                buf[(x, y)].set_style(Style::default().bg(Color::White).fg(Color::Black));
+                if self.agent_active {
+                    // Dimmed reversed cursor when agent is busy
+                    buf[(x, y)].set_style(Style::default().bg(Color::DarkGray).fg(Color::Black));
+                } else {
+                    // Bright reversed cursor when ready for input
+                    buf[(x, y)].set_style(Style::default().bg(Color::White).fg(Color::Black));
+                }
             }
         }
     }

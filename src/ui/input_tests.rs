@@ -12,7 +12,7 @@ fn render_input_box(input: &InputBox, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("test-model", 1000, 0);
+        let widget = input.widget("test-model", 1000, 0, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -35,7 +35,7 @@ fn render_input_content(input: &InputBox, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("test-model", 1000, 0);
+        let widget = input.widget("test-model", 1000, 0, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -162,7 +162,7 @@ fn test_render_cursor_position_at_end() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("model", 1000, 0);
+        let widget = input.widget("model", 1000, 0, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -194,7 +194,7 @@ fn test_render_cursor_position_middle() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("model", 1000, 0);
+        let widget = input.widget("model", 1000, 0, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -282,7 +282,7 @@ fn test_render_token_count_display() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("model", 5000, 0);
+        let widget = input.widget("model", 5000, 0, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -308,7 +308,7 @@ fn test_render_background_tasks_indicator() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("model", 1000, 0);
+        let widget = input.widget("model", 1000, 0, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -332,7 +332,7 @@ fn test_render_background_tasks_indicator() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("model", 1000, 2);
+        let widget = input.widget("model", 1000, 2, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -629,7 +629,7 @@ fn test_cursor_position_after_complex_edits() {
     let backend = TestBackend::new(40, 5);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| {
-        f.render_widget(input.widget("m", 0, 0), f.area());
+        f.render_widget(input.widget("m", 0, 0, false), f.area());
     }).unwrap();
 
     let buffer = terminal.backend().buffer();

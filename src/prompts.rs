@@ -3,11 +3,14 @@
 //! This module contains all system prompts used throughout the application,
 //! as well as the `SystemPrompt` struct for building dynamic prompts.
 
+use std::fs;
 use std::path::{Path, PathBuf};
-
-use mdsh::Processor;
+use std::process::Command;
 
 use crate::config::{Config, CODEY_DIR};
+
+/// Embedded esh script for template processing
+const ESH_SCRIPT: &str = include_str!("../lib/esh/esh");
 
 /// Filename for custom system prompt additions
 pub const SYSTEM_MD_FILENAME: &str = "SYSTEM.md";
@@ -49,7 +52,6 @@ You have access to the following tools:
 - Prefer `read_file` over `cat`, `head`, `tail`
 - Use `ls` for directory exploration
 - Use `grep` or `rg` for searching code
-- Run `pwd` early in your session to confirm your working directory
 - Prefer relative paths over absolute paths when possible - tool approval configs often allow execution from the current working directory but restrict access to system-wide paths
 - Avoid using `cd` to change directories before commands; instead, use relative paths from your working directory (e.g., `./src/main.rs` or `src/main.rs`)
 
@@ -104,15 +106,15 @@ You have read-only access to:
 - If you need to suggest changes, describe them clearly for the primary agent to implement
 "#;
 
-/// A system prompt builder that supports dynamic content via mdsh.
+/// A system prompt builder that supports dynamic content via esh templates.
 ///
 /// The prompt is composed of:
 /// 1. The base system prompt (static)
 /// 2. User SYSTEM.md from ~/.config/codey/ (optional, dynamic)
 /// 3. Project SYSTEM.md from .codey/ (optional, dynamic)
 ///
-/// SYSTEM.md files are processed through [mdsh](https://github.com/zimbatm/mdsh),
-/// allowing embedded shell commands to be executed and their output included.
+/// SYSTEM.md files are processed through [esh](https://github.com/jirutka/esh),
+/// allowing embedded shell commands using `<%= command %>` syntax.
 #[derive(Clone)]
 pub struct SystemPrompt {
     user_path: Option<PathBuf>,
@@ -134,7 +136,7 @@ impl SystemPrompt {
     /// Build the complete system prompt.
     ///
     /// This reads and processes all SYSTEM.md files, executing any embedded
-    /// shell commands via mdsh. The result is the concatenation of:
+    /// shell commands via esh (`<%= command %>`). The result is the concatenation of:
     /// - Base system prompt
     /// - User SYSTEM.md content (if exists)
     /// - Project SYSTEM.md content (if exists)
@@ -143,41 +145,71 @@ impl SystemPrompt {
 
         // Append user SYSTEM.md if it exists
         if let Some(ref user_path) = self.user_path {
-            if let Ok(content) = std::fs::read_to_string(user_path) {
-                let processed = self.process_mdsh(&content, user_path);
-                tracing::debug!("Appending user SYSTEM.md from {:?}:\n{}", user_path, processed);
+            if let Some(content) = self.load_system_md(user_path) {
                 prompt.push_str("\n\n");
-                prompt.push_str(&processed);
+                prompt.push_str(&content);
             }
         }
 
         // Append project SYSTEM.md if it exists
-        if let Ok(content) = std::fs::read_to_string(&self.project_path) {
-            let processed = self.process_mdsh(&content, &self.project_path);
-            tracing::debug!("Appending project SYSTEM.md from {:?}:\n{}", self.project_path, processed);
+        if let Some(content) = self.load_system_md(&self.project_path) {
             prompt.push_str("\n\n");
-            prompt.push_str(&processed);
+            prompt.push_str(&content);
         }
 
         prompt
     }
 
-    /// Process content through mdsh, executing embedded shell commands.
-    fn process_mdsh(&self, content: &str, path: &Path) -> String {
-        let workdir = path
-            .parent()
-            .map(|p| p.as_os_str())
-            .unwrap_or_else(|| std::ffi::OsStr::new("."));
+    /// Load and process a SYSTEM.md file through esh, falling back to raw content.
+    fn load_system_md(&self, path: &Path) -> Option<String> {
+        if !path.exists() {
+            return None;
+        }
+        self.process_esh(path)
+            .or_else(|| fs::read_to_string(path).ok())
+            .filter(|s| !s.is_empty())
+    }
 
-        let mut output = Vec::new();
-        let mut processor = mdsh::executor::TheProcessor::new(workdir, &mut output);
+    /// Ensure the esh script is available in the cache directory.
+    /// Returns the path to the esh executable.
+    // TODO: Use system esh if installed (e.g., `which esh`) before falling back to vendored version.
+    fn ensure_esh() -> Option<PathBuf> {
+        let cache_dir = dirs::cache_dir()?.join("codey");
+        let esh_path = cache_dir.join("esh");
 
-        if let Err(e) = processor.process(content, &mdsh::cli::FileArg::StdHandle) {
-            tracing::warn!("Failed to process mdsh content from {:?}: {}", path, e);
-            return content.to_string();
+        if !esh_path.exists() {
+            fs::create_dir_all(&cache_dir).ok()?;
+            fs::write(&esh_path, ESH_SCRIPT).ok()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&esh_path, fs::Permissions::from_mode(0o755)).ok()?;
+            }
         }
 
-        String::from_utf8(output).unwrap_or_else(|_| content.to_string())
+        Some(esh_path)
+    }
+
+    /// Process content through esh, executing embedded shell commands.
+    /// Uses `<%= $(command) %>` syntax for command substitution.
+    fn process_esh(&self, path: &Path) -> Option<String> {
+        let esh_path = Self::ensure_esh()?;
+        let workdir = path.parent().unwrap_or(Path::new("."));
+        let filename = path.file_name()?;
+
+        let output = Command::new(&esh_path)
+            .arg(filename)
+            .current_dir(workdir)
+            .output()
+            .ok()?;
+
+        if output.status.success() {
+            String::from_utf8(output.stdout).ok()
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("esh failed for {:?}: {}", path, stderr);
+            None
+        }
     }
 }
 
