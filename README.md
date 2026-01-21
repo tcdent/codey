@@ -94,20 +94,21 @@ You can extend Codey's system prompt by creating `SYSTEM.md` files that are auto
 1. **User config**: `~/.config/codey/SYSTEM.md` - personal customizations
 2. **Project**: `.codey/SYSTEM.md` - project-specific instructions
 
-### Dynamic Content with mdsh
+### Dynamic Content with esh
 
-SYSTEM.md files support [mdsh](https://github.com/zimbatm/mdsh) syntax, allowing you to embed shell commands that are executed dynamically. This is useful for including context that changes over time.
+SYSTEM.md files support [esh](https://github.com/jirutka/esh) (Embedded SHell) syntax, allowing you to embed shell commands that are executed dynamically. This is useful for including context that changes over time.
 
 ### Example SYSTEM.md
 
 ```markdown
-Today is `$ date '+%d %B %Y'`.
+## Environment
 
-```$
-if which linctl > /dev/null 2>&1; then
-  echo "Use linctl to manage Linear tickets."
-fi
-```
+- Today's date: <%= $(date +"%m-%d-%Y") %>
+- Project root: <%= $(pwd) %>
+
+<% if which linctl > /dev/null 2>&1; then -%>
+Use linctl to manage Linear tickets.
+<% fi -%>
 
 ## Guidelines
 - Follow the existing code style

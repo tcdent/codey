@@ -144,8 +144,8 @@ impl SystemPrompt {
         // Append user SYSTEM.md if it exists
         if let Some(ref user_path) = self.user_path {
             if let Ok(content) = std::fs::read_to_string(user_path) {
-                tracing::debug!("Appending user SYSTEM.md from {:?}", user_path);
                 let processed = self.process_mdsh(&content, user_path);
+                tracing::debug!("Appending user SYSTEM.md from {:?}:\n{}", user_path, processed);
                 prompt.push_str("\n\n");
                 prompt.push_str(&processed);
             }
@@ -153,8 +153,8 @@ impl SystemPrompt {
 
         // Append project SYSTEM.md if it exists
         if let Ok(content) = std::fs::read_to_string(&self.project_path) {
-            tracing::debug!("Appending project SYSTEM.md from {:?}", self.project_path);
             let processed = self.process_mdsh(&content, &self.project_path);
+            tracing::debug!("Appending project SYSTEM.md from {:?}:\n{}", self.project_path, processed);
             prompt.push_str("\n\n");
             prompt.push_str(&processed);
         }

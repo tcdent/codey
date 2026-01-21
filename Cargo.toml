@@ -51,9 +51,6 @@ clap = { version = "4", features = ["derive", "env"], optional = true }
 anyhow = "1"
 thiserror = "2"
 
-# Markdown shell preprocessor (for dynamic system prompts)
-mdsh = { git = "https://github.com/zimbatm/mdsh" }
-
 # Utilities
 fancy-regex = "0.14"
 unicode-width = "0.2"

@@ -401,11 +401,7 @@ impl Agent {
         if let Some(ref builder) = self.system_prompt_builder {
             let new_prompt = builder();
             if new_prompt != self.system_prompt {
-                debug!(
-                    "System prompt changed ({} -> {} chars)",
-                    self.system_prompt.len(),
-                    new_prompt.len()
-                );
+                debug!("System prompt changed:\n{}", new_prompt);
                 self.system_prompt = new_prompt.clone();
                 // Update the first message (system message)
                 if !self.messages.is_empty() {
