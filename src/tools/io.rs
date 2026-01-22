@@ -7,7 +7,58 @@ use std::fs;
 use std::path::Path;
 use std::process::Stdio;
 #[cfg(feature = "cli")]
+use std::sync::OnceLock;
+#[cfg(feature = "cli")]
 use std::time::Duration;
+
+#[cfg(feature = "cli")]
+use crate::config::BrowserConfig as AppBrowserConfig;
+
+// TODO: Refactor to avoid global state. See issue #46.
+// We use OnceLock here because tool handlers don't have access to app config.
+
+/// Browser configuration context, initialized at app startup
+#[cfg(feature = "cli")]
+static BROWSER_CONTEXT: OnceLock<BrowserContext> = OnceLock::new();
+
+/// Context for browser-based tools (fetch_html)
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone, Default)]
+pub struct BrowserContext {
+    pub chrome_executable: Option<String>,
+    pub chrome_profile_path: Option<String>,
+}
+
+/// Initialize browser context from config. Called once at app startup.
+#[cfg(feature = "cli")]
+pub fn init_browser_context(config: &AppBrowserConfig) {
+    let profile_path = config.chrome_profile_path.as_ref().and_then(|p| {
+        let path_str = p.to_str()?;
+        // Expand ~ to home directory
+        if path_str.starts_with("~/") {
+            dirs::home_dir().map(|home| home.join(&path_str[2..]).to_string_lossy().to_string())
+        } else {
+            Some(path_str.to_string())
+        }
+    });
+
+    BROWSER_CONTEXT
+        .set(BrowserContext {
+            chrome_executable: config
+                .chrome_executable
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string()),
+            chrome_profile_path: profile_path,
+        })
+        .ok();
+}
+
+/// Get the browser context, if initialized.
+#[cfg(feature = "cli")]
+fn browser_context() -> Option<&'static BrowserContext> {
+    BROWSER_CONTEXT.get()
+}
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -428,20 +479,10 @@ fn which_browser(name: &str) -> Option<String> {
 /// 3. Applies readability algorithm to extract main content
 /// 4. Converts to markdown for token-efficient representation
 ///
-/// # Arguments
-/// * `url` - The URL to fetch
-/// * `max_length` - Maximum length of returned content (default: 100,000 chars)
-/// * `chrome_executable` - Optional custom Chrome/Chromium executable path (falls back to config, then auto-detect)
-/// * `chrome_profile_path` - Optional path to Chrome user data directory for cookie sharing (falls back to config)
+/// Browser settings (executable path, profile) are read from the global
+/// BrowserContext initialized at app startup.
 #[cfg(feature = "cli")]
-pub async fn fetch_html(
-    url: &str,
-    max_length: Option<usize>,
-    chrome_executable: Option<&str>,
-    chrome_profile_path: Option<&str>,
-) -> Result<FetchHtmlResult, String> {
-    use crate::config::Config;
-
+pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtmlResult, String> {
     let max_length = max_length.unwrap_or(100000);
 
     // Validate URL
@@ -454,46 +495,20 @@ pub async fn fetch_html(
         ));
     }
 
-    // Load config for browser settings (if not provided as arguments)
-    let config = Config::load().ok();
-    let browser_config = config.as_ref().map(|c| &c.browser);
+    // Get browser settings from global context
+    let ctx = browser_context();
 
-    // Resolve browser executable: argument -> config -> auto-detect
-    let browser_path = match chrome_executable {
-        Some(path) => path.to_string(),
-        None => {
-            // Try config first
-            let config_exe = browser_config
-                .and_then(|b| b.chrome_executable.as_ref())
-                .and_then(|p| p.to_str())
-                .map(|s| s.to_string());
+    // Resolve browser executable: context -> auto-detect
+    let browser_path = ctx
+        .and_then(|c| c.chrome_executable.clone())
+        .or_else(|| detect_browser())
+        .ok_or_else(|| {
+            "No Chrome/Chromium browser found. Install chromium or google-chrome to use this tool."
+                .to_string()
+        })?;
 
-            match config_exe {
-                Some(path) => path,
-                None => detect_browser().ok_or_else(|| {
-                    "No Chrome/Chromium browser found. Install chromium or google-chrome to use this tool."
-                        .to_string()
-                })?,
-            }
-        }
-    };
-
-    // Resolve profile path: argument -> config -> None
-    let profile_path: Option<String> = match chrome_profile_path {
-        Some(path) => Some(path.to_string()),
-        None => browser_config
-            .and_then(|b| b.chrome_profile_path.as_ref())
-            .and_then(|p| {
-                // Expand ~ to home directory
-                let path_str = p.to_str()?;
-                if path_str.starts_with("~/") {
-                    dirs::home_dir()
-                        .map(|home| home.join(&path_str[2..]).to_string_lossy().to_string())
-                } else {
-                    Some(path_str.to_string())
-                }
-            }),
-    };
+    // Get profile path from context
+    let profile_path = ctx.and_then(|c| c.chrome_profile_path.clone());
 
     let html = fetch_with_browser(url, Some(&browser_path), profile_path.as_deref()).await?;
 

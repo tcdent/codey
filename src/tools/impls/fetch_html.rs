@@ -156,9 +156,6 @@ impl Tool for FetchHtmlTool {
             .then(handlers::FetchHtml {
                 url: parsed.url,
                 max_length: parsed.max_length,
-                // Browser config loaded from config.toml in io::fetch_html when None
-                chrome_executable: None,
-                chrome_profile_path: None,
             })
     }
 
