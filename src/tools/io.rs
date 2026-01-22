@@ -26,13 +26,14 @@ static BROWSER_CONTEXT: OnceLock<BrowserContext> = OnceLock::new();
 #[derive(Debug, Clone, Default)]
 pub struct BrowserContext {
     pub chrome_executable: Option<String>,
-    pub chrome_profile_path: Option<String>,
+    pub chrome_user_data_dir: Option<String>,
+    pub chrome_profile: Option<String>,
 }
 
 /// Initialize browser context from config. Called once at app startup.
 #[cfg(feature = "cli")]
 pub fn init_browser_context(config: &AppBrowserConfig) {
-    let profile_path = config.chrome_profile_path.as_ref().and_then(|p| {
+    let user_data_dir = config.chrome_user_data_dir.as_ref().and_then(|p| {
         let path_str = p.to_str()?;
         // Expand ~ to home directory
         if path_str.starts_with("~/") {
@@ -49,7 +50,8 @@ pub fn init_browser_context(config: &AppBrowserConfig) {
                 .as_ref()
                 .and_then(|p| p.to_str())
                 .map(|s| s.to_string()),
-            chrome_profile_path: profile_path,
+            chrome_user_data_dir: user_data_dir,
+            chrome_profile: config.chrome_profile.clone(),
         })
         .ok();
 }
@@ -508,9 +510,10 @@ pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtm
         })?;
 
     // Get profile path from context
-    let profile_path = ctx.and_then(|c| c.chrome_profile_path.clone());
+    let user_data_dir = ctx.and_then(|c| c.chrome_user_data_dir.clone());
+    let profile = ctx.and_then(|c| c.chrome_profile.clone());
 
-    let html = fetch_with_browser(url, Some(&browser_path), profile_path.as_deref()).await?;
+    let html = fetch_with_browser(url, Some(&browser_path), user_data_dir.as_deref(), profile.as_deref()).await?;
 
     // Apply readability to extract main content
     let readable = extract_readable_content(&html, url)?;
@@ -544,12 +547,14 @@ pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtm
 /// # Arguments
 /// * `url` - The URL to fetch
 /// * `browser_path` - Optional path to Chrome/Chromium executable
-/// * `profile_path` - Optional path to Chrome user data directory (profile)
+/// * `user_data_dir` - Optional path to Chrome user data directory
+/// * `profile` - Optional profile directory name (e.g., "Default", "Profile 1")
 #[cfg(feature = "cli")]
 async fn fetch_with_browser(
     url: &str,
     browser_path: Option<&str>,
-    profile_path: Option<&str>,
+    user_data_dir: Option<&str>,
+    profile: Option<&str>,
 ) -> Result<String, String> {
     const JS_RENDER_WAIT_MS: u64 = 2000;
     // Configure browser
@@ -562,10 +567,15 @@ async fn fetch_with_browser(
         config = config.chrome_executable(path);
     }
 
-    // Add Chrome profile path if specified
+    // Add Chrome user data directory if specified
     // This allows sharing cookies and session data with the user's browser
-    if let Some(profile) = profile_path {
-        config = config.arg(format!("--user-data-dir={}", profile));
+    if let Some(dir) = user_data_dir {
+        config = config.arg(format!("--user-data-dir={}", dir));
+    }
+
+    // Add profile directory if specified
+    if let Some(prof) = profile {
+        config = config.arg(format!("--profile-directory={}", prof));
     }
 
     let config = config.build().map_err(|e| format!("Failed to configure browser: {:?}", e))?;

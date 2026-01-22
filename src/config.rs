@@ -417,10 +417,13 @@ impl Default for NvimConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserConfig {
-    /// Path to Chrome/Chromium user data directory (profile)
-    /// This allows sharing cookies and session data with your local browser.
+    /// Path to Chrome/Chromium user data directory.
     /// Example: "~/.config/google-chrome" or "~/Library/Application Support/Google/Chrome"
-    pub chrome_profile_path: Option<PathBuf>,
+    pub chrome_user_data_dir: Option<PathBuf>,
+    /// Profile directory name within the user data directory.
+    /// Example: "Default", "Profile 1", "Profile 9"
+    /// If not set, Chrome uses the last-used or Default profile.
+    pub chrome_profile: Option<String>,
     /// Custom Chrome/Chromium executable path (optional, auto-detected if not set)
     pub chrome_executable: Option<PathBuf>,
 }
@@ -429,7 +432,8 @@ pub struct BrowserConfig {
 impl Default for BrowserConfig {
     fn default() -> Self {
         Self {
-            chrome_profile_path: None,
+            chrome_user_data_dir: None,
+            chrome_profile: None,
             chrome_executable: None,
         }
     }

@@ -241,11 +241,18 @@ To access authenticated pages, configure Codey to use your Chrome profile:
 
 ```toml
 [browser]
-chrome_profile_path = "~/Library/Application Support/Google/Chrome"  # macOS
-# chrome_profile_path = "~/.config/google-chrome"  # Linux
+# macOS
+chrome_user_data_dir = "~/Library/Application Support/Google/Chrome"
+chrome_profile = "Profile 9"  # Optional: specific profile name
+
+# Linux
+# chrome_user_data_dir = "~/.config/google-chrome"
+# chrome_profile = "Default"
 ```
 
-> **Note:** The browser profile must not be in use by another Chrome instance. Consider creating a separate profile for Codey if needed.
+To find your profile name, check `chrome://version` in Chrome or list the profile directories.
+
+> **Note:** The profile must not be in use by another Chrome instance. Consider creating a separate profile for Codey.
 
 ## Session Persistence
 
