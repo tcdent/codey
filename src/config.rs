@@ -429,6 +429,14 @@ pub struct BrowserConfig {
     /// Run browser in headless mode (default: true)
     /// Set to false for debugging to see what the browser is doing
     pub headless: bool,
+    /// Viewport width in pixels (default: 800)
+    pub viewport_width: u32,
+    /// Viewport height in pixels (default: 4000)
+    /// Taller viewports load more content on infinite-scroll pages like Twitter/X
+    pub viewport_height: u32,
+    /// Time to wait for JavaScript to render in milliseconds (default: 10000)
+    /// SPAs like Twitter need time to load and render content after initial page load
+    pub page_load_wait_ms: u64,
 }
 
 #[cfg(feature = "cli")]
@@ -439,6 +447,9 @@ impl Default for BrowserConfig {
             chrome_profile: None,
             chrome_executable: None,
             headless: true,
+            viewport_width: 800,
+            viewport_height: 4000,
+            page_load_wait_ms: 10000,
         }
     }
 }

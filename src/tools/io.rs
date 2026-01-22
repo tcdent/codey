@@ -29,6 +29,9 @@ pub struct BrowserContext {
     pub chrome_user_data_dir: Option<String>,
     pub chrome_profile: Option<String>,
     pub headless: bool,
+    pub viewport_width: u32,
+    pub viewport_height: u32,
+    pub page_load_wait_ms: u64,
 }
 
 #[cfg(feature = "cli")]
@@ -39,6 +42,9 @@ impl Default for BrowserContext {
             chrome_user_data_dir: None,
             chrome_profile: None,
             headless: true,
+            viewport_width: 800,
+            viewport_height: 4000,
+            page_load_wait_ms: 10000,
         }
     }
 }
@@ -66,6 +72,9 @@ pub fn init_browser_context(config: &AppBrowserConfig) {
             chrome_user_data_dir: user_data_dir,
             chrome_profile: config.chrome_profile.clone(),
             headless: config.headless,
+            viewport_width: config.viewport_width,
+            viewport_height: config.viewport_height,
+            page_load_wait_ms: config.page_load_wait_ms,
         })
         .ok();
 }
@@ -101,6 +110,7 @@ use tokio::process::Command;
 
 #[cfg(feature = "cli")]
 use chromiumoxide::browser::{Browser, BrowserConfig, HeadlessMode};
+use chromiumoxide::handler::viewport::Viewport;
 #[cfg(feature = "cli")]
 use futures::StreamExt;
 
@@ -545,11 +555,9 @@ pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtm
         })?;
 
     // Get settings from context
-    let user_data_dir = ctx.and_then(|c| c.chrome_user_data_dir.clone());
-    let profile = ctx.and_then(|c| c.chrome_profile.clone());
-    let headless = ctx.map(|c| c.headless).unwrap_or(true);
+    let ctx = ctx.cloned().unwrap_or_default();
 
-    let html = fetch_with_browser(url, Some(&browser_path), user_data_dir.as_deref(), profile.as_deref(), headless).await?;
+    let html = fetch_with_browser(url, &browser_path, &ctx).await?;
 
     // Apply readability to extract main content
     let readable = extract_readable_content(&html, url)?;
@@ -582,10 +590,8 @@ pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtm
 ///
 /// # Arguments
 /// * `url` - The URL to fetch
-/// * `browser_path` - Optional path to Chrome/Chromium executable
-/// * `user_data_dir` - Optional path to Chrome user data directory
-/// * `profile` - Optional profile directory name (e.g., "Default", "Profile 1")
-/// * `headless` - Whether to run in headless mode
+/// * `browser_path` - Path to Chrome/Chromium executable
+/// * `ctx` - Browser context with profile, viewport, and timing settings
 ///
 /// # Chrome Profile Authentication
 ///
@@ -612,16 +618,12 @@ pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtm
 #[cfg(feature = "cli")]
 async fn fetch_with_browser(
     url: &str,
-    browser_path: Option<&str>,
-    user_data_dir: Option<&str>,
-    profile: Option<&str>,
-    headless: bool,
+    browser_path: &str,
+    ctx: &BrowserContext,
 ) -> Result<String, String> {
-    const JS_RENDER_WAIT_MS: u64 = 2000;
-    
     // Copy profile to isolated temp directory to avoid SingletonLock conflicts.
     // See doc comment above for full explanation of why this is necessary.
-    let temp_dir = if let (Some(data_dir), Some(prof)) = (user_data_dir, profile) {
+    let temp_dir = if let (Some(data_dir), Some(prof)) = (&ctx.chrome_user_data_dir, &ctx.chrome_profile) {
         let source_profile = std::path::Path::new(data_dir).join(prof);
         if source_profile.exists() {
             // Use PID to isolate temp dirs between concurrent Codey instances
@@ -648,7 +650,7 @@ async fn fetch_with_browser(
     };
     
     // Configure browser
-    let headless_mode = if headless { HeadlessMode::True } else { HeadlessMode::False };
+    let headless_mode = if ctx.headless { HeadlessMode::True } else { HeadlessMode::False };
     
     // When using a copied profile, we need real Keychain access to decrypt cookies.
     //
@@ -666,7 +668,16 @@ async fn fetch_with_browser(
     
     let mut config = BrowserConfig::builder()
         .no_sandbox()
-        .headless_mode(headless_mode);
+        .headless_mode(headless_mode)
+        .window_size(ctx.viewport_width, ctx.viewport_height)
+        .viewport(Viewport {
+            width: ctx.viewport_width,
+            height: ctx.viewport_height,
+            device_scale_factor: None,
+            emulating_mobile: false,
+            is_landscape: false,
+            has_touch: false,
+        });
     
     if using_profile {
         // Disable chromiumoxide defaults and add our own (without mock keychain flags)
@@ -704,17 +715,15 @@ async fn fetch_with_browser(
         config = config.arg("--disable-gpu");
     }
 
-    if let Some(path) = browser_path {
-        config = config.chrome_executable(path);
-    }
+    config = config.chrome_executable(browser_path);
 
     // Use temp dir if we copied a profile, otherwise use user_data_dir directly
     if let Some(ref temp) = temp_dir {
         config = config.user_data_dir(temp);
-    } else if let Some(dir) = user_data_dir {
+    } else if let Some(ref dir) = ctx.chrome_user_data_dir {
         // Fallback: use user_data_dir directly (may conflict with running Chrome)
         config = config.user_data_dir(dir);
-        if let Some(prof) = profile {
+        if let Some(ref prof) = ctx.chrome_profile {
             config = config.arg(format!("--profile-directory={}", prof));
         }
     }
@@ -749,8 +758,8 @@ async fn fetch_with_browser(
                 .await
                 .map_err(|e| format!("Failed to navigate: {}", e))?;
 
-            // Wait for JavaScript to render
-            tokio::time::sleep(Duration::from_millis(JS_RENDER_WAIT_MS)).await;
+            // Wait for JavaScript to render (configurable for SPAs like Twitter)
+            tokio::time::sleep(Duration::from_millis(ctx.page_load_wait_ms)).await;
 
             // Get rendered HTML
             page.content()
