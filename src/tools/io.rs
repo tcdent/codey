@@ -75,6 +75,27 @@ pub fn init_browser_context(config: &AppBrowserConfig) {
 fn browser_context() -> Option<&'static BrowserContext> {
     BROWSER_CONTEXT.get()
 }
+
+/// Recursively copy a directory and its contents
+#[cfg(feature = "cli")]
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&src_path, &dst_path)?;
+        }
+        // Skip symlinks to avoid potential issues
+    }
+    Ok(())
+}
+
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
@@ -565,6 +586,29 @@ pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtm
 /// * `user_data_dir` - Optional path to Chrome user data directory
 /// * `profile` - Optional profile directory name (e.g., "Default", "Profile 1")
 /// * `headless` - Whether to run in headless mode
+///
+/// # Chrome Profile Authentication
+///
+/// To access authenticated sessions (logged-in state), we copy the user's Chrome profile
+/// to an isolated temp directory. This is necessary because:
+///
+/// 1. **SingletonLock**: Chrome locks its user data directory at the root level, not per-profile.
+///    Having *any* Chrome window open locks `~/Library/Application Support/Google/Chrome/`.
+///    By copying to `/tmp/codey-browser-{pid}/`, we avoid this conflict.
+///
+/// 2. **Cookie Encryption**: Chrome encrypts cookies using macOS Keychain. The encryption key
+///    is stored in Keychain under "Chrome Safe Storage" and is shared across all profiles
+///    (it's per-application, not per-profile). This means copied cookies can be decrypted
+///    as long as Chrome has Keychain access.
+///
+/// 3. **Keychain Access**: chromiumoxide's default args include `--password-store=basic` and
+///    `--use-mock-keychain`, which tell Chrome to use a mock keychain instead of the real one.
+///    This breaks cookie decryption! We must disable these defaults when using a profile.
+///
+/// The profile copy approach works because:
+/// - Cookie values in the SQLite DB are encrypted with the app-wide Keychain key
+/// - The copied Cookies file contains the same encrypted blobs
+/// - Chrome can decrypt them if we don't use mock keychain flags
 #[cfg(feature = "cli")]
 async fn fetch_with_browser(
     url: &str,
@@ -574,26 +618,105 @@ async fn fetch_with_browser(
     headless: bool,
 ) -> Result<String, String> {
     const JS_RENDER_WAIT_MS: u64 = 2000;
+    
+    // Copy profile to isolated temp directory to avoid SingletonLock conflicts.
+    // See doc comment above for full explanation of why this is necessary.
+    let temp_dir = if let (Some(data_dir), Some(prof)) = (user_data_dir, profile) {
+        let source_profile = std::path::Path::new(data_dir).join(prof);
+        if source_profile.exists() {
+            // Use PID to isolate temp dirs between concurrent Codey instances
+            let temp_base = std::env::temp_dir()
+                .join(format!("codey-browser-{}", std::process::id()));
+            // Clean up any previous temp dir to ensure fresh copy
+            if temp_base.exists() {
+                let _ = std::fs::remove_dir_all(&temp_base);
+            }
+            std::fs::create_dir_all(&temp_base)
+                .map_err(|e| format!("Failed to create temp browser dir: {}", e))?;
+            
+            // Copy profile to temp_base/Default (becomes the default profile)
+            let dest_profile = temp_base.join("Default");
+            copy_dir_recursive(&source_profile, &dest_profile)
+                .map_err(|e| format!("Failed to copy browser profile: {}", e))?;
+            
+            Some(temp_base)
+        } else {
+            return Err(format!("Browser profile not found: {}", source_profile.display()));
+        }
+    } else {
+        None
+    };
+    
     // Configure browser
     let headless_mode = if headless { HeadlessMode::True } else { HeadlessMode::False };
+    
+    // When using a copied profile, we need real Keychain access to decrypt cookies.
+    //
+    // chromiumoxide's DEFAULT_ARGS (from Puppeteer) include:
+    //   "--password-store=basic"  - Uses basic password store instead of OS keychain
+    //   "--use-mock-keychain"     - Uses mock keychain for testing
+    //
+    // These flags are designed for automation/testing where you don't want system prompts,
+    // but they prevent Chrome from decrypting cookies that were encrypted with the real
+    // Keychain key. We must disable defaults and provide our own args list.
+    //
+    // Reference: chromiumoxide 0.7.0 browser.rs DEFAULT_ARGS
+    // Original source: https://github.com/nickelc/chromiumoxide/blob/v0.7.0/src/browser.rs
+    let using_profile = temp_dir.is_some();
+    
     let mut config = BrowserConfig::builder()
         .no_sandbox()
-        .arg("--disable-gpu")
         .headless_mode(headless_mode);
+    
+    if using_profile {
+        // Disable chromiumoxide defaults and add our own (without mock keychain flags)
+        config = config
+            .disable_default_args()
+            .args([
+                "--disable-background-networking",
+                "--enable-features=NetworkService,NetworkServiceInProcess",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-breakpad",
+                "--disable-client-side-phishing-detection",
+                "--disable-component-extensions-with-background-pages",
+                "--disable-default-apps",
+                "--disable-dev-shm-usage",
+                "--disable-extensions",
+                "--disable-features=TranslateUI",
+                "--disable-hang-monitor",
+                "--disable-ipc-flooding-protection",
+                "--disable-popup-blocking",
+                "--disable-prompt-on-repost",
+                "--disable-renderer-backgrounding",
+                "--disable-sync",
+                "--force-color-profile=srgb",
+                "--metrics-recording-only",
+                "--no-first-run",
+                "--enable-automation",
+                // OMITTED: "--password-store=basic" - need real password store for cookies
+                // OMITTED: "--use-mock-keychain" - need real Keychain access
+                "--enable-blink-features=IdleDetection",
+                "--lang=en_US",
+                "--disable-gpu",
+            ]);
+    } else {
+        config = config.arg("--disable-gpu");
+    }
 
     if let Some(path) = browser_path {
         config = config.chrome_executable(path);
     }
 
-    // Add Chrome user data directory if specified
-    // This allows sharing cookies and session data with the user's browser
-    if let Some(dir) = user_data_dir {
-        config = config.arg(format!("--user-data-dir={}", dir));
-    }
-
-    // Add profile directory if specified
-    if let Some(prof) = profile {
-        config = config.arg(format!("--profile-directory={}", prof));
+    // Use temp dir if we copied a profile, otherwise use user_data_dir directly
+    if let Some(ref temp) = temp_dir {
+        config = config.user_data_dir(temp);
+    } else if let Some(dir) = user_data_dir {
+        // Fallback: use user_data_dir directly (may conflict with running Chrome)
+        config = config.user_data_dir(dir);
+        if let Some(prof) = profile {
+            config = config.arg(format!("--profile-directory={}", prof));
+        }
     }
 
     let config = config.build().map_err(|e| format!("Failed to configure browser: {:?}", e))?;
