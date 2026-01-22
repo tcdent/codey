@@ -21,8 +21,8 @@ echo "Applying patches..."
 # Thinking blocks with signatures for extended thinking + tool use
 patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/thinking-blocks-signatures.patch"
 
-# Add OAuth support patch here when ready:
-# patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/oauth-support.patch"
+# OAuth support for Authorization header detection
+patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/oauth-support.patch"
 
 touch "$OUTPUT_DIR/.patched"
 echo "Done."
