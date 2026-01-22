@@ -23,11 +23,24 @@ static BROWSER_CONTEXT: OnceLock<BrowserContext> = OnceLock::new();
 
 /// Context for browser-based tools (fetch_html)
 #[cfg(feature = "cli")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BrowserContext {
     pub chrome_executable: Option<String>,
     pub chrome_user_data_dir: Option<String>,
     pub chrome_profile: Option<String>,
+    pub headless: bool,
+}
+
+#[cfg(feature = "cli")]
+impl Default for BrowserContext {
+    fn default() -> Self {
+        Self {
+            chrome_executable: None,
+            chrome_user_data_dir: None,
+            chrome_profile: None,
+            headless: true,
+        }
+    }
 }
 
 /// Initialize browser context from config. Called once at app startup.
@@ -52,6 +65,7 @@ pub fn init_browser_context(config: &AppBrowserConfig) {
                 .map(|s| s.to_string()),
             chrome_user_data_dir: user_data_dir,
             chrome_profile: config.chrome_profile.clone(),
+            headless: config.headless,
         })
         .ok();
 }
@@ -509,11 +523,12 @@ pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtm
                 .to_string()
         })?;
 
-    // Get profile path from context
+    // Get settings from context
     let user_data_dir = ctx.and_then(|c| c.chrome_user_data_dir.clone());
     let profile = ctx.and_then(|c| c.chrome_profile.clone());
+    let headless = ctx.map(|c| c.headless).unwrap_or(true);
 
-    let html = fetch_with_browser(url, Some(&browser_path), user_data_dir.as_deref(), profile.as_deref()).await?;
+    let html = fetch_with_browser(url, Some(&browser_path), user_data_dir.as_deref(), profile.as_deref(), headless).await?;
 
     // Apply readability to extract main content
     let readable = extract_readable_content(&html, url)?;
@@ -549,19 +564,22 @@ pub async fn fetch_html(url: &str, max_length: Option<usize>) -> Result<FetchHtm
 /// * `browser_path` - Optional path to Chrome/Chromium executable
 /// * `user_data_dir` - Optional path to Chrome user data directory
 /// * `profile` - Optional profile directory name (e.g., "Default", "Profile 1")
+/// * `headless` - Whether to run in headless mode
 #[cfg(feature = "cli")]
 async fn fetch_with_browser(
     url: &str,
     browser_path: Option<&str>,
     user_data_dir: Option<&str>,
     profile: Option<&str>,
+    headless: bool,
 ) -> Result<String, String> {
     const JS_RENDER_WAIT_MS: u64 = 2000;
     // Configure browser
+    let headless_mode = if headless { HeadlessMode::True } else { HeadlessMode::False };
     let mut config = BrowserConfig::builder()
         .no_sandbox()
         .arg("--disable-gpu")
-        .headless_mode(HeadlessMode::True);
+        .headless_mode(headless_mode);
 
     if let Some(path) = browser_path {
         config = config.chrome_executable(path);

@@ -426,6 +426,9 @@ pub struct BrowserConfig {
     pub chrome_profile: Option<String>,
     /// Custom Chrome/Chromium executable path (optional, auto-detected if not set)
     pub chrome_executable: Option<PathBuf>,
+    /// Run browser in headless mode (default: true)
+    /// Set to false for debugging to see what the browser is doing
+    pub headless: bool,
 }
 
 #[cfg(feature = "cli")]
@@ -435,6 +438,7 @@ impl Default for BrowserConfig {
             chrome_user_data_dir: None,
             chrome_profile: None,
             chrome_executable: None,
+            headless: true,
         }
     }
 }
