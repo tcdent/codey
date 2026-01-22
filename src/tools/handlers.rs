@@ -3,6 +3,7 @@
 //! Each handler is a struct that knows how to execute a specific effect.
 //! Handlers are stateless - they receive data and produce a Step result.
 
+use super::browser;
 use crate::ide::{Edit, ToolPreview};
 use crate::tools::io;
 use crate::tools::pipeline::{Effect, EffectHandler, Step};
@@ -400,7 +401,7 @@ pub struct FetchHtml {
 #[async_trait::async_trait]
 impl EffectHandler for FetchHtml {
     async fn call(self: Box<Self>) -> Step {
-        match io::fetch_html(&self.url, self.max_length).await {
+        match browser::fetch_html(&self.url, self.max_length).await {
             Ok(result) => {
                 let title_info = result
                     .title

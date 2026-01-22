@@ -7,6 +7,8 @@
 
 mod exec;
 #[cfg(feature = "cli")]
+pub mod browser;
+#[cfg(feature = "cli")]
 pub mod handlers;
 #[cfg(feature = "cli")]
 mod impls;
@@ -39,7 +41,7 @@ pub use impls::{
     SpawnAgentTool, WebSearchTool, WriteFileTool,
 };
 #[cfg(feature = "cli")]
-pub use io::init_browser_context;
+pub use browser::init_browser_context;
 pub use pipeline::{Effect, Step, Tool, ToolPipeline};
 
 #[cfg(feature = "cli")]
