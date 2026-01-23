@@ -4,9 +4,9 @@
 SIMD ?= 1
 
 ifeq ($(SIMD),1)
-PATCH_DEPS := lib/ratatui-core/.patched lib/genai/.patched .cargo/config.toml
+PATCH_DEPS := lib/ratatui-core/.patched lib/genai/.patched lib/readability/.patched .cargo/config.toml
 else
-PATCH_DEPS := lib/genai/.patched .cargo/config.toml
+PATCH_DEPS := lib/genai/.patched lib/readability/.patched .cargo/config.toml
 endif
 
 build: $(PATCH_DEPS)
@@ -27,13 +27,13 @@ profile: release
 
 clean: clean-config
 	cargo clean
-	rm -rf lib/ratatui-core lib/genai
+	rm -rf lib/ratatui-core lib/genai lib/readability
 
 clean-config:
 	rm -f .cargo/config.toml
 	rmdir .cargo 2>/dev/null || true
 
-patch: lib/ratatui-core/.patched lib/genai/.patched .cargo/config.toml
+patch: lib/ratatui-core/.patched lib/genai/.patched lib/readability/.patched .cargo/config.toml
 
 lib/ratatui-core/.patched: lib/patches/ratatui-core/*
 	./lib/patches/ratatui-core/apply.sh
@@ -41,10 +41,14 @@ lib/ratatui-core/.patched: lib/patches/ratatui-core/*
 lib/genai/.patched: lib/patches/genai/*
 	./lib/patches/genai/apply.sh
 
-.cargo/config.toml: lib/ratatui-core/.patched lib/genai/.patched
+lib/readability/.patched: lib/patches/readability/*
+	./lib/patches/readability/apply.sh
+
+.cargo/config.toml: lib/ratatui-core/.patched lib/genai/.patched lib/readability/.patched
 	mkdir -p .cargo
 	echo '[patch.crates-io]' > $@
 ifeq ($(SIMD),1)
 	echo 'ratatui-core = { path = "lib/ratatui-core" }' >> $@
 endif
 	echo 'genai = { path = "lib/genai" }' >> $@
+	echo 'readability = { path = "lib/readability" }' >> $@

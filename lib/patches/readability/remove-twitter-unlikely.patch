@@ -1,0 +1,14 @@
+--- a/src/scorer.rs
++++ b/src/scorer.rs
+@@ -15,9 +15,10 @@
+ use url::Url;
+ 
+ pub static PUNCTUATIONS_REGEX: &str = r"([、。，．！？]|\.[^A-Za-z0-9]|,[^0-9]|!|\?)";
++// Note: removed tweet|twitter to allow social media content extraction
+ pub static UNLIKELY_CANDIDATES: &str = "combx|comment|community|disqus|extra|foot|header|menu\
+      |remark|rss|shoutbox|sidebar|sponsor|ad-break|agegate\
+-     |pagination|pager|popup|tweet|twitter\
++     |pagination|pager|popup\
+      |ssba";
+ pub static LIKELY_CANDIDATES: &str = "and|article|body|column|main|shadow\
+                                               |content|hentry";

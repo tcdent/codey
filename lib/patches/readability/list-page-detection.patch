@@ -1,0 +1,102 @@
+--- a/src/extractor.rs
++++ b/src/extractor.rs
+@@ -50,22 +50,88 @@
+     let handle = dom.document.clone();
+     scorer::preprocess(&mut dom, handle.clone(), &mut title);
+     scorer::find_candidates(Path::new("/"), handle.clone(), &mut candidates, &mut nodes);
+-    let mut id: &str = "/";
+-    let mut top_candidate: &Candidate = &Candidate {
+-        node: handle.clone(),
+-        score: Cell::new(0.0),
+-    };
+-    for (i, c) in candidates.iter() {
++
++    // Adjust scores by link density
++    for (_i, c) in candidates.iter() {
+         let score = c.score.get() * (1.0 - scorer::get_link_density(c.node.clone()));
+         c.score.set(score);
+-        if score <= top_candidate.score.get() {
+-            continue;
++    }
++
++    // Collect and sort candidates by score (descending)
++    let mut sorted_candidates: Vec<_> = candidates.iter().collect();
++    sorted_candidates.sort_by(|a, b| {
++        b.1.score
++            .get()
++            .partial_cmp(&a.1.score.get())
++            .unwrap_or(std::cmp::Ordering::Equal)
++    });
++
++    // Detect list page: if top N candidates have similar scores, it's likely a list/feed
++    let top_score = sorted_candidates
++        .first()
++        .map(|c| c.1.score.get())
++        .unwrap_or(0.0);
++    let score_threshold = top_score * 0.4; // Candidates within 40% of top score
++    let min_list_candidates = 3;
++
++    let high_scoring: Vec<_> = sorted_candidates
++        .iter()
++        .filter(|(_, c)| c.score.get() >= score_threshold && c.score.get() > 0.0)
++        .take(20) // Cap at 20 items for performance
++        .collect();
++
++    let is_list_page = high_scoring.len() >= min_list_candidates;
++
++    if is_list_page {
++        // List page: combine all high-scoring candidates
++        let mut combined_content = String::new();
++        let mut combined_text = String::new();
++
++        for (id, candidate) in high_scoring.iter() {
++            let node = candidate.node.clone();
++            scorer::clean(&mut dom, Path::new(*id), node.clone(), url, &candidates);
++
++            let mut bytes = vec![];
++            serialize(
++                &mut bytes,
++                &SerializableHandle::from(node.clone()),
++                Default::default(),
++            )
++            .ok();
++
++            if let Ok(content) = String::from_utf8(bytes) {
++                if !content.trim().is_empty() {
++                    combined_content.push_str(&content);
++                    combined_content.push_str("\n\n---\n\n"); // Separator between items
++                }
++            }
++
++            let mut text = String::new();
++            dom::extract_text(node.clone(), &mut text, true);
++            if !text.trim().is_empty() {
++                combined_text.push_str(&text);
++                combined_text.push_str("\n\n");
++            }
+         }
+-        id = i;
+-        top_candidate = c;
++
++        return Ok(Product {
++            title,
++            content: combined_content,
++            text: combined_text,
++        });
+     }
+-    let mut bytes = vec![];
+ 
++    // Single article page: use original logic with top candidate
++    let default_candidate = Candidate {
++        node: handle.clone(),
++        score: Cell::new(0.0),
++    };
++    let (id, top_candidate): (&str, &Candidate) = sorted_candidates
++        .first()
++        .map(|(id, c)| (id.as_str(), *c))
++        .unwrap_or(("/", &default_candidate));
++
++    let mut bytes = vec![];
+     let node = top_candidate.node.clone();
+     scorer::clean(&mut dom, Path::new(id), node.clone(), url, &candidates);
+ 
