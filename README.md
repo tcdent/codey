@@ -235,6 +235,25 @@ brew install --cask chromium
 sudo apt install chromium-browser
 ```
 
+### Chrome Profile (Cookie Sharing)
+
+To access authenticated pages, configure Codey to use your Chrome profile:
+
+```toml
+[browser]
+# macOS
+chrome_user_data_dir = "~/Library/Application Support/Google/Chrome"
+chrome_profile = "Profile 9"  # Optional: specific profile name
+
+# Linux
+# chrome_user_data_dir = "~/.config/google-chrome"
+# chrome_profile = "Default"
+```
+
+To find your profile name, check `chrome://version` in Chrome or list the profile directories.
+
+> **Note:** The profile must not be in use by another Chrome instance. Consider creating a separate profile for Codey.
+
 ## Session Persistence
 
 Sessions are saved to `.codey/transcripts/` in the working directory. Use `codey --continue` to resume with full context restoration.

@@ -109,6 +109,7 @@ pub struct Config {
     pub ui: UiConfig,
     pub tools: ToolsConfig,
     pub ide: IdeConfig,
+    pub browser: BrowserConfig,
 }
 
 #[cfg(feature = "cli")]
@@ -121,6 +122,7 @@ impl Default for Config {
             ui: UiConfig::default(),
             tools: ToolsConfig::default(),
             ide: IdeConfig::default(),
+            browser: BrowserConfig::default(),
         }
     }
 }
@@ -406,6 +408,48 @@ impl Default for NvimConfig {
             socket: None,
             show_diffs: true,
             auto_reload: true,
+        }
+    }
+}
+
+/// Browser configuration for fetch_html tool
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserConfig {
+    /// Path to Chrome/Chromium user data directory.
+    /// Example: "~/.config/google-chrome" or "~/Library/Application Support/Google/Chrome"
+    pub chrome_user_data_dir: Option<PathBuf>,
+    /// Profile directory name within the user data directory.
+    /// Example: "Default", "Profile 1", "Profile 9"
+    /// If not set, Chrome uses the last-used or Default profile.
+    pub chrome_profile: Option<String>,
+    /// Custom Chrome/Chromium executable path (optional, auto-detected if not set)
+    pub chrome_executable: Option<PathBuf>,
+    /// Run browser in headless mode (default: true)
+    /// Set to false for debugging to see what the browser is doing
+    pub headless: bool,
+    /// Viewport width in pixels (default: 800)
+    pub viewport_width: u32,
+    /// Viewport height in pixels (default: 4000)
+    /// Taller viewports load more content on infinite-scroll pages like Twitter/X
+    pub viewport_height: u32,
+    /// Time to wait for JavaScript to render in milliseconds (default: 10000)
+    /// SPAs like Twitter need time to load and render content after initial page load
+    pub page_load_wait_ms: u64,
+}
+
+#[cfg(feature = "cli")]
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            chrome_user_data_dir: None,
+            chrome_profile: None,
+            chrome_executable: None,
+            headless: true,
+            viewport_width: 800,
+            viewport_height: 4000,
+            page_load_wait_ms: 10000,
         }
     }
 }

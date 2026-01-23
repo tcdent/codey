@@ -25,7 +25,7 @@ use crate::{profile_frame, profile_span};
 use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, WELCOME_MESSAGE};
 use crate::tool_filter::ToolFilters;
 use crate::tools::{
-    init_agent_context, update_agent_oauth, Effect, ToolCall, ToolDecision, ToolEvent,
+    init_agent_context, init_browser_context, update_agent_oauth, Effect, ToolCall, ToolDecision, ToolEvent,
     ToolExecutor, ToolRegistry,
 };
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
@@ -316,6 +316,9 @@ impl App {
             AgentRuntimeConfig::background(&self.config),
             self.oauth.clone(),
         );
+
+        // Initialize browser context for fetch_html
+        init_browser_context(&self.config.browser);
 
         // Use dynamic prompt builder so mdsh commands are re-executed on each LLM call
         let system_prompt = SystemPrompt::new();

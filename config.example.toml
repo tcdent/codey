@@ -108,6 +108,60 @@ deny = [
 ]
 
 # =============================================================================
+# Browser Configuration (for fetch_html tool)
+# =============================================================================
+# Configure Chrome/Chromium settings for the fetch_html tool which uses
+# headless browser rendering to fetch web pages.
+
+[browser]
+# Path to Chrome/Chromium user data directory.
+# This allows sharing cookies and session data with your local browser,
+# enabling access to authenticated pages.
+#
+# How it works:
+#   1. Codey copies your Chrome profile to an isolated temp directory
+#   2. This avoids Chrome's SingletonLock (which prevents concurrent access)
+#   3. Cookies are decrypted using macOS Keychain (or equivalent on other OS)
+#
+# Common paths:
+#   Linux: ~/.config/google-chrome (Chrome) or ~/.config/chromium (Chromium)
+#   macOS: ~/Library/Application Support/Google/Chrome
+#   Windows: %LOCALAPPDATA%\Google\Chrome\User Data
+#
+# chrome_user_data_dir = "~/Library/Application Support/Google/Chrome"
+
+# Profile directory name within the user data directory.
+# Use this to select a specific Chrome profile (e.g., one created just for Codey).
+# If not set, Chrome uses the last-used or Default profile.
+#
+# To find your profile names, look in the user data directory for folders named
+# "Default", "Profile 1", "Profile 2", etc. Or check chrome://version in Chrome.
+#
+# chrome_profile = "Profile 9"
+
+# Run browser in headless mode (default: true)
+# Set to false to see what the browser is doing (useful for debugging)
+#
+# headless = true
+
+# Viewport dimensions in pixels
+# Taller viewports help load more content on infinite-scroll pages like Twitter/X
+# Default: 800x4000
+#
+# viewport_width = 800
+# viewport_height = 4000
+
+# Time to wait for JavaScript to render in milliseconds (default: 10000)
+# SPAs like Twitter need time to load and render content after initial page load.
+# Increase this if pages aren't fully loaded, decrease for faster simple pages.
+#
+# page_load_wait_ms = 10000
+# Custom Chrome/Chromium executable path (optional)
+# If not set, auto-detects from PATH or standard installation locations.
+#
+# chrome_executable = "/usr/bin/google-chrome"
+
+# =============================================================================
 # Neovim Integration
 # =============================================================================
 # Codey connects to Neovim via RPC socket for diff previews, buffer management,
