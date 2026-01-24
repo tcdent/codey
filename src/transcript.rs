@@ -124,6 +124,12 @@ pub trait Block: Send + Sync {
 
     /// Get the tool params (for restoring agent context)
     fn params(&self) -> Option<&serde_json::Value> { None }
+
+    /// Set the agent label (for sub-agent tools)
+    fn set_agent_label(&mut self, _label: String) {}
+
+    /// Get the agent label (for sub-agent tools)
+    fn agent_label(&self) -> Option<&str> { None }
 }
 
 /// Macro to implement common Block trait methods for blocks with text and status fields
@@ -242,6 +248,9 @@ pub struct ToolBlock {
     /// If true, tool runs in background
     #[serde(default)]
     pub background: bool,
+    /// Agent label for sub-agent tools
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
 }
 
 impl ToolBlock {
@@ -253,6 +262,7 @@ impl ToolBlock {
             status: Status::Pending,
             text: String::new(),
             background,
+            agent_label: None,
         }
     }
 }
@@ -265,9 +275,10 @@ impl Block for ToolBlock {
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
-        // Tool name with status icon and optional [bg] prefix
+        // Tool name with status icon, optional agent label, and optional [bg] prefix
         lines.push(Line::from(vec![
             self.render_status(),
+            render_agent_label(self.agent_label.as_deref()),
             render_prefix(self.background),
             Span::styled(
                 &self.name,
@@ -324,6 +335,14 @@ impl Block for ToolBlock {
     fn params(&self) -> Option<&serde_json::Value> {
         Some(&self.params)
     }
+
+    fn set_agent_label(&mut self, label: String) {
+        self.agent_label = Some(label);
+    }
+
+    fn agent_label(&self) -> Option<&str> {
+        self.agent_label.as_deref()
+    }
 }
 
 /// Helper: render prefix for background tools - "[bg] " if true, empty otherwise
@@ -333,6 +352,15 @@ pub fn render_prefix(background: bool) -> Span<'static> {
         Span::styled("[bg] ", Style::default().fg(Color::Cyan))
     } else {
         Span::raw("")
+    }
+}
+
+/// Helper: render agent label prefix for sub-agent tools
+#[cfg(feature = "cli")]
+pub fn render_agent_label(label: Option<&str>) -> Span<'static> {
+    match label {
+        Some(l) => Span::styled(format!("[{}] ", l), Style::default().fg(Color::Cyan)),
+        None => Span::raw(""),
     }
 }
 

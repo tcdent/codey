@@ -154,7 +154,7 @@ impl ToolRegistry {
         registry
     }
 
-    /// Tools available to sub-agents (read-only, no spawn_agent) (CLI only)
+    /// Tools available to sub-agents (includes write tools - approval routed to user) (CLI only)
     #[cfg(feature = "cli")]
     pub fn subagent() -> Self {
         let mut registry = Self {
@@ -162,6 +162,8 @@ impl ToolRegistry {
         };
 
         registry.register(Arc::new(ReadFileTool));
+        registry.register(Arc::new(WriteFileTool));
+        registry.register(Arc::new(EditFileTool));
         registry.register(Arc::new(ShellTool::new()));
         registry.register(Arc::new(FetchUrlTool));
         registry.register(Arc::new(FetchHtmlTool));

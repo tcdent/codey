@@ -170,9 +170,8 @@ impl Tool for SpawnAgentTool {
 
     fn description(&self) -> &'static str {
         "Spawn a sub-agent to handle a subtask. Returns immediately with an agent_id. \
-         The sub-agent has read-only tool access (read_file, shell, fetch_url, web_search). \
-         Use list_agents to check status and get_agent to retrieve results when finished. \
-         Best for research, exploration, or analysis tasks that don't require file modifications."
+         The sub-agent has full tool access including edit_file and write_file (approval routed to user). \
+         Use list_agents to check status and get_agent to retrieve results when finished."
     }
 
     fn schema(&self) -> serde_json::Value {
