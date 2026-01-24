@@ -155,6 +155,10 @@ impl ToolRegistry {
     }
 
     /// Tools available to sub-agents (includes write tools - approval routed to user) (CLI only)
+    ///
+    /// TODO: Sub-agent tools shouldn't have a `background` parameter since sub-agents
+    /// are already non-blocking. We should either filter it out of the schema or
+    /// create separate tool variants for sub-agents.
     #[cfg(feature = "cli")]
     pub fn subagent() -> Self {
         let mut registry = Self {
