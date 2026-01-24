@@ -229,6 +229,118 @@ This ensures:
 
 ---
 
+## Handling Multiple Queued Notifications
+
+When several notifications arrive before a tool completes, we need a strategy for injection.
+
+### Option 1: Append All
+
+Simply append all pending notifications to the tool result:
+
+```
+ToolResult(id="edit_1"): "File updated successfully
+
+<notification source="file_watcher">
+src/lib.rs modified externally
+</notification>
+
+<notification source="file_watcher">
+src/main.rs modified externally
+</notification>
+
+<notification source="background_task">
+Build completed: 2 warnings
+</notification>"
+```
+
+**Pros**: Simple, complete information
+**Cons**: Can bloat tool results, token cost scales linearly
+
+### Option 2: Batch into Single Block
+
+Group notifications into one XML block:
+
+```
+ToolResult(id="edit_1"): "File updated successfully
+
+<notifications count="3">
+- [file_watcher] src/lib.rs modified externally
+- [file_watcher] src/main.rs modified externally
+- [background_task] Build completed: 2 warnings
+</notifications>"
+```
+
+**Pros**: Compact, clear count signals "catch up"
+**Cons**: Less structured for agent parsing
+
+### Option 3: Coalesce by Source
+
+Merge similar notifications:
+
+```
+ToolResult(id="edit_1"): "File updated successfully
+
+<notification source="file_watcher">
+Multiple files modified: src/lib.rs, src/main.rs
+</notification>
+
+<notification source="background_task">
+Build completed: 2 warnings
+</notification>"
+```
+
+**Pros**: Reduces noise from rapid file changes
+**Cons**: Loses individual event detail
+
+### Option 4: Cap with Overflow Indicator
+
+Limit injected notifications, indicate overflow:
+
+```
+ToolResult(id="edit_1"): "File updated successfully
+
+<notifications showing="3" total="7">
+- [file_watcher] src/lib.rs modified
+- [file_watcher] src/main.rs modified
+- [background_task] Build completed
+(4 more notifications pending)
+</notifications>"
+```
+
+**Pros**: Bounds token cost, agent knows there's more
+**Cons**: Agent may miss important notifications
+
+### Recommendation
+
+Combine approaches:
+
+1. **Coalesce** rapid same-source notifications (e.g., file watcher debounce)
+2. **Batch** into single `<notifications>` block with count
+3. **Cap** at reasonable limit (e.g., 5-10) with overflow indicator
+4. **Prioritize** if capping - show higher priority first
+
+```rust
+fn format_notifications(notifications: &[Notification], max: usize) -> String {
+    // Coalesce same-source notifications within time window
+    let coalesced = coalesce_by_source(notifications);
+
+    let total = coalesced.len();
+    let showing: Vec<_> = coalesced.into_iter().take(max).collect();
+
+    let mut result = format!("<notifications count=\"{}\">", total);
+    for n in &showing {
+        result.push_str(&format!("\n- [{}] {}", n.source, n.message));
+    }
+    if total > max {
+        result.push_str(&format!("\n({} more pending)", total - max));
+    }
+    result.push_str("\n</notifications>");
+    result
+}
+```
+
+---
+
 ## Open Questions
 
 1. **Activation modes**: Should some notifications auto-trigger agent response vs. passive accumulation?
