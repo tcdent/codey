@@ -612,47 +612,166 @@ fn build_tool_result(&self, call_id: &str, result: &str) -> ChatMessage {
 **Feasibility**: Implemented (current behavior)
 **When useful**: Non-urgent notifications, passive mode
 
-### Pseudo-Tool Injection (Recommended Approach)
+### Approach A: Tool Result Augmentation (Recommended)
 
-Instead of complicating injection with priorities and interruption logic, we can leverage the existing tool use pattern. Since the agent already expects interspersed tool calls and results, we can **synthesize** tool calls to carry notifications - the agent doesn't need to remember to check for them.
+**Observed in**: Claude Code's background agent system (`<system-reminder>` tags)
 
-#### The Insight
+The simplest approach: append notification content directly to existing tool results using XML delimiters. No synthetic tool calls, no new message types - just string concatenation with semantic markup.
 
-The agent's context already looks like this during a multi-tool turn:
+#### How It Works
 
-```
-User: "fix the bug and run tests"
-Assistant: [text] "Let me fix that..." [tool_call: Edit]
-Tool Result: "File updated successfully"
-Assistant: [text] "Now running tests..." [tool_call: Bash]
-Tool Result: "3 tests passed, 1 failed"
-Assistant: [text] "One test failed, let me check..."
-```
-
-We can inject a **synthetic tool call + result** that the agent didn't explicitly request:
+Tool results in the Anthropic API are text content, not parsed JSON. This means we can append arbitrary content to them:
 
 ```
-User: "fix the bug and run tests"
-Assistant: [text] "Let me fix that..." [tool_call: Edit]
-Tool Result: "File updated successfully"
-                                            ← INJECT HERE
-[Synthetic tool_call: _notification]        ← We add this
-[Synthetic result: "File src/lib.rs was     ← And this
- modified externally"]
+Assistant: [tool_call id="edit_1" name="Edit"]
+ToolResult(id="edit_1"): "File updated successfully
 
-### Turn Interruption Model
+<notification source=\"file_watcher\">
+src/lib.rs was modified externally
+</notification>"
+```
 
-For critical notifications, we may need to interrupt and restart:
+The agent receives this as a single tool result and interprets the XML semantically. Same `call_id` - just richer content.
+
+#### Implementation
+
+```rust
+fn submit_tool_result_with_notifications(
+    &mut self,
+    call_id: &str,
+    result: &str,
+    notifications: &[Notification],
+) {
+    let content = if notifications.is_empty() {
+        result.to_string()
+    } else {
+        let notif_xml = notifications.iter()
+            .map(|n| format!(
+                "<notification source=\"{:?}\">\n{}\n</notification>",
+                n.source, n.to_message()
+            ))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!("{result}\n\n{notif_xml}")
+    };
+
+    self.messages.push(ChatMessage::tool_response(call_id, &content));
+}
+```
+
+#### System Prompt Addition
+
+```
+You may see <notification> tags in tool results. These are external events
+(file changes, background task completions, etc.) that occurred while you
+were working. Consider them when deciding your next action.
+```
+
+#### Observed Example (Claude Code)
+
+When a user sends a message while the agent is mid-turn, it appears appended to tool results:
+
+```
+ToolResult(id="edit_1"): "<error>String not found...</error>
+
+<system-reminder>
+The user sent the following message:
+what about this other approach?
+
+Please address this message and continue with your tasks.
+</system-reminder>"
+```
+
+The agent sees this naturally and incorporates the message without needing a separate turn.
+
+#### Why This Works
+
+1. **API compatible**: Tool results are unstructured text - append anything
+2. **No ID management**: Reuses existing tool call ID
+3. **Proven pattern**: Claude Code uses this for mid-turn user message injection
+4. **Clear boundaries**: XML makes tool output vs notification unambiguous
+5. **Zero overhead**: Just string formatting
+
+---
+
+### Approach B: Synthetic Tool Injection (Alternative)
+
+For cases where notifications should appear as distinct "events" in the message history.
+
+#### How It Works
+
+Inject a synthetic tool call + result pair:
+
+```
+Assistant: [tool_call id="edit_1" name="Edit"]
+ToolResult(id="edit_1"): "Success"
+Assistant: [tool_call id="notif_1" name="_system_notification"]  ← Synthetic
+ToolResult(id="notif_1"): "File src/lib.rs modified externally"  ← Synthetic
+```
+
+#### Implementation
+
+```rust
+pub const NOTIFICATION_TOOL: &str = "_system_notification";
+
+fn inject_notification(&mut self, notification: Notification) {
+    let call_id = format!("notif_{}", Uuid::new_v4());
+
+    // Synthetic tool call
+    self.messages.push(ChatMessage {
+        role: ChatRole::Assistant,
+        content: MessageContent::default()
+            .append(ContentPart::ToolCall(GenaiToolCall {
+                id: call_id.clone(),
+                name: NOTIFICATION_TOOL.to_string(),
+                arguments: "{}".to_string(),
+            })),
+        options: None,
+    });
+
+    // Synthetic tool result
+    self.messages.push(ChatMessage::tool_response(
+        &call_id,
+        &notification.to_message(),
+    ));
+}
+```
+
+#### Trade-offs
+
+| Aspect | Tool Result Augmentation | Synthetic Tool Injection |
+|--------|-------------------------|-------------------------|
+| Complexity | Low | Medium |
+| API changes | None | Tool definition needed |
+| Message count | Same | +2 per notification |
+| Transcript clarity | Embedded in tool | Distinct events |
+| Proven | Yes (Claude Code) | Theoretical |
+| Token overhead | Minimal | Higher |
+
+---
+
+### Recommendation
+
+**Use Approach A** (Tool Result Augmentation) as primary:
+- Proven in production (Claude Code)
+- Simplest implementation
+- No schema changes needed
+
+**Consider Approach B** if:
+- Notifications need distinct transcript entries
+- Agent should explicitly acknowledge notifications
+
+---
+
+### Other Considered Approaches
+
+#### Turn Interruption (for critical notifications)
 
 ```rust
 pub enum TurnInterrupt {
-    // Continue current turn, agent will see notification in context
     InjectAndContinue { notification: Notification },
-
-    // Cancel current action, restart with notification
     CancelAndRestart { notification: Notification },
-
-    // Complete current turn, then handle notification
     QueueForNext { notification: Notification },
 }
 
