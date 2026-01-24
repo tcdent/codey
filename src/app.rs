@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 use crate::commands::Command;
 use crate::config::{AgentRuntimeConfig, Config};
 use crate::ide::{Ide, IdeEvent, Nvim};
-use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
+use crate::llm::{Agent, AgentId, AgentRegistry, AgentStatus, AgentStep, RequestMode};
 #[cfg(feature = "profiling")]
 use crate::{profile_frame, profile_span};
 use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, WELCOME_MESSAGE};
@@ -736,43 +736,71 @@ impl App {
                 tracing::warn!("Retrying request: attempt {}, error: {}", attempt, error);
             },
             AgentStep::Finished { usage } => {
-                self.input_mode = InputMode::Normal;
+                let is_primary = self.agents.primary_id() == Some(agent_id);
 
-                // Handle compaction completion
-                // TODO something more robust than checking active block type
-                if self
-                    .chat
-                    .transcript
-                    .is_streaming_block_type(BlockType::Compaction)
-                {
-                    self.chat.transcript.finish_turn();
-                    if let Err(e) = self.chat.transcript.save() {
-                        tracing::error!("Failed to save transcript before compaction: {}", e);
-                    }
-                    match self.chat.transcript.rotate() {
-                        Ok(new_transcript) => {
-                            tracing::info!(
-                                "Compaction complete, rotating to {:?}",
-                                new_transcript.path()
-                            );
-                            self.chat
-                                .reset_transcript(new_transcript, &mut self.terminal);
-                            self.draw();
-                        },
-                        Err(e) => {
-                            tracing::error!("Failed to rotate transcript: {}", e);
-                        },
+                if is_primary {
+                    self.input_mode = InputMode::Normal;
+
+                    // Handle compaction completion
+                    // TODO something more robust than checking active block type
+                    if self
+                        .chat
+                        .transcript
+                        .is_streaming_block_type(BlockType::Compaction)
+                    {
+                        self.chat.transcript.finish_turn();
+                        if let Err(e) = self.chat.transcript.save() {
+                            tracing::error!("Failed to save transcript before compaction: {}", e);
+                        }
+                        match self.chat.transcript.rotate() {
+                            Ok(new_transcript) => {
+                                tracing::info!(
+                                    "Compaction complete, rotating to {:?}",
+                                    new_transcript.path()
+                                );
+                                self.chat
+                                    .reset_transcript(new_transcript, &mut self.terminal);
+                                self.draw();
+                            },
+                            Err(e) => {
+                                tracing::error!("Failed to rotate transcript: {}", e);
+                            },
+                        }
+                    } else {
+                        // Normal completion
+                        self.chat.transcript.finish_turn();
+                        if let Err(e) = self.chat.transcript.save() {
+                            tracing::error!("Failed to save transcript: {}", e);
+                        }
+
+                        // Check if compaction is needed
+                        if usage.context_tokens >= self.config.general.compaction_threshold {
+                            self.queue_compaction();
+                        }
                     }
                 } else {
-                    // Normal completion
-                    self.chat.transcript.finish_turn();
-                    if let Err(e) = self.chat.transcript.save() {
-                        tracing::error!("Failed to save transcript: {}", e);
-                    }
+                    // Sub-agent finished - extract result and send through channel
+                    let result = {
+                        if let Some(agent_mutex) = self.agents.get(agent_id) {
+                            let agent = agent_mutex.lock().await;
+                            agent.last_message().unwrap_or_default()
+                        } else {
+                            String::new()
+                        }
+                    };
 
-                    // Check if compaction is needed
-                    if usage.context_tokens >= self.config.general.compaction_threshold {
-                        self.queue_compaction();
+                    // Send result through the stored channel
+                    if let Some(sender) = self.agents.finish(agent_id) {
+                        let label = self.agents.metadata(agent_id)
+                            .map(|m| m.label.clone())
+                            .unwrap_or_default();
+                        tracing::info!(
+                            "Sub-agent {} ({}) finished, sending result ({} chars)",
+                            agent_id,
+                            label,
+                            result.len()
+                        );
+                        let _ = sender.send(result);
                     }
                 }
             },
@@ -1138,6 +1166,67 @@ impl App {
                         task_id, tool_name, status, output
                     ))),
                     None => Ok(Some(format!("Task {} not found or still running", task_id))),
+                }
+            },
+            Effect::SpawnAgent {
+                agent,
+                label,
+                result_sender,
+            } => {
+                // Register the agent - it will be polled through agents.next()
+                let parent_id = _agent_id;
+                let agent_id = self.agents.register_spawned(agent, label.clone(), parent_id, result_sender);
+                tracing::info!("Spawned sub-agent {} with label '{}'", agent_id, label);
+                // Return the agent ID so the handler knows what was spawned
+                Ok(Some(format!("agent:{}", agent_id)))
+            },
+            Effect::ListAgents => {
+                let spawned = self.agents.list_spawned();
+                if spawned.is_empty() {
+                    Ok(Some("No spawned agents".to_string()))
+                } else {
+                    let output = spawned
+                        .iter()
+                        .map(|(id, meta)| {
+                            let elapsed = meta.created_at.elapsed().as_secs();
+                            format!(
+                                "agent:{} ({}) [{:?}] {}s",
+                                id, meta.label, meta.status, elapsed
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Ok(Some(output))
+                }
+            },
+            Effect::GetAgent { agent_id } => {
+                let meta = self.agents.metadata(agent_id);
+                match meta {
+                    Some(meta) => {
+                        let status_str = format!("{:?}", meta.status);
+                        if meta.status == AgentStatus::Finished {
+                            // Get the agent's last message
+                            if let Some(agent_mutex) = self.agents.get(agent_id) {
+                                let agent = agent_mutex.lock().await;
+                                let result = agent.last_message().unwrap_or_default();
+                                Ok(Some(format!(
+                                    "agent:{} ({}) [{}]:\n{}",
+                                    agent_id, meta.label, status_str, result
+                                )))
+                            } else {
+                                Ok(Some(format!(
+                                    "agent:{} ({}) [{}]: Agent not found",
+                                    agent_id, meta.label, status_str
+                                )))
+                            }
+                        } else {
+                            Ok(Some(format!(
+                                "agent:{} ({}) [{}]",
+                                agent_id, meta.label, status_str
+                            )))
+                        }
+                    }
+                    None => Ok(Some(format!("Agent {} not found", agent_id))),
                 }
             },
         }

@@ -416,6 +416,16 @@ impl Agent {
         self.total_usage
     }
 
+    /// Get the last assistant message text (for returning sub-agent results).
+    /// Returns the accumulated streaming text if present.
+    pub fn last_message(&self) -> Option<String> {
+        if self.streaming_text.is_empty() {
+            None
+        } else {
+            Some(self.streaming_text.clone())
+        }
+    }
+
     /// Reset the agent with a new context after compaction
     /// Preserves the system prompt and adds the compaction summary
     pub fn reset_with_summary(&mut self, summary: &str) {
