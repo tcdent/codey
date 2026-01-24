@@ -72,6 +72,12 @@ pub trait Ide: Send + Sync {
 
     // === Output: App → IDE ===
 
+    /// Try to claim the preview slot for this instance.
+    /// Returns true if successfully claimed, false if another instance owns it.
+    /// This is used for multi-instance coordination - only one instance can
+    /// show a preview at a time.
+    async fn try_claim_preview(&self) -> Result<bool>;
+
     /// Show a file preview in the IDE (for new file creation)
     async fn show_preview(&self, preview: &ToolPreview) -> Result<()>;
 

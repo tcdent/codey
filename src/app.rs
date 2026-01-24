@@ -1088,12 +1088,20 @@ impl App {
             },
             Effect::IdeShowPreview { preview } => {
                 if let Some(ide) = &self.ide {
+                    // Wait for preview slot to be available (multi-instance coordination)
+                    while !ide.try_claim_preview().await? {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
                     ide.show_preview(&preview).await?;
                 }
                 Ok(None)
             },
             Effect::IdeShowDiffPreview { path, edits } => {
                 if let Some(ide) = &self.ide {
+                    // Wait for preview slot to be available (multi-instance coordination)
+                    while !ide.try_claim_preview().await? {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
                     ide.show_diff_preview(&path.to_string_lossy(), &edits)
                         .await?;
                 }

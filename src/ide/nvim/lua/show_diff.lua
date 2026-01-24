@@ -1,7 +1,7 @@
 -- Display a side-by-side diff using nvim's built-in diff mode
--- Args: original_lines (table), modified_lines (table), title (string), lang (string)
+-- Args: original_lines (table), modified_lines (table), title (string), lang (string), channel_id (number)
 
-local original_lines, modified_lines, title, lang = ...
+local original_lines, modified_lines, title, lang, channel_id = ...
 
 -- Close any existing preview first
 if vim.g.codey_preview_tab and vim.api.nvim_tabpage_is_valid(vim.g.codey_preview_tab) then
@@ -10,6 +10,9 @@ if vim.g.codey_preview_tab and vim.api.nvim_tabpage_is_valid(vim.g.codey_preview
         vim.cmd('tabclose ' .. tab_nr)
     end
 end
+
+-- Set owner to this channel (should already be set by claim, but ensure it)
+vim.g.codey_preview_owner = channel_id
 
 -- Remember current tab to return to later
 local original_tab = vim.api.nvim_get_current_tabpage()
@@ -63,6 +66,7 @@ local function close_preview()
     vim.g.codey_preview_tab = nil
     vim.g.codey_preview_buf = nil
     vim.g.codey_preview_buf_right = nil
+    vim.g.codey_preview_owner = nil
     vim.cmd('tabclose')
     local orig = vim.g.codey_original_tab
     vim.g.codey_original_tab = nil
