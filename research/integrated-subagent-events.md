@@ -469,6 +469,80 @@ Example output:
 5. **Phase 5**: Add agent management tools (list/get)
 6. **Phase 6**: Add UI labels and status bar
 
+## Transcript & Persistence
+
+### Problem
+
+The current transcript has no concept of multiple agents:
+
+```rust
+pub struct Turn {
+    pub id: usize,
+    pub role: Role,
+    pub content: Vec<Box<dyn Block>>,
+    pub timestamp: DateTime<Utc>,
+}
+```
+
+If sub-agent turns are mixed in, restoring the transcript would load them into the primary agent's context - polluting it with tool calls that weren't its own.
+
+### Solution
+
+Add `agent_id` to Turn, filter on restore:
+
+```rust
+pub struct Turn {
+    pub id: usize,
+    pub agent_id: AgentId,  // New field
+    pub role: Role,
+    pub content: Vec<Box<dyn Block>>,
+    pub timestamp: DateTime<Utc>,
+}
+```
+
+**Display**: All turns render normally. Sub-agent tool blocks show with their label prefix and scroll into native scrollback like any other content. Users see full activity in real-time.
+
+**Persistence**: Transcript saves all turns (append-only log).
+
+**Restore**: Filter to primary agent only:
+
+```rust
+impl Transcript {
+    /// Convert transcript to messages for a specific agent
+    pub fn to_messages(&self, agent_id: AgentId) -> Vec<Message> {
+        self.turns
+            .iter()
+            .filter(|turn| turn.agent_id == agent_id)
+            .filter_map(|turn| turn.to_message())
+            .collect()
+    }
+
+    /// Restore primary agent context (default behavior)
+    pub fn to_primary_messages(&self) -> Vec<Message> {
+        let primary_id = self.turns
+            .first()
+            .map(|t| t.agent_id)
+            .unwrap_or(0);
+        self.to_messages(primary_id)
+    }
+}
+```
+
+**Native scrollback**: Since the terminal uses native scrollback, blocks render once and scroll off. No need to track or edit them after - simplifies the model to append-only.
+
+### Future: Sub-Agent Transcript Files
+
+Could save sub-agent transcripts to separate files for debugging/inspection:
+
+```
+~/.codey/transcripts/
+  session-abc123.json          # Primary agent
+  session-abc123.agent-1.json  # Sub-agent 1
+  session-abc123.agent-2.json  # Sub-agent 2
+```
+
+Not required for MVP - sub-agent context is ephemeral and their useful output is captured in the `spawn_agent` tool result.
+
 ## Open Questions
 
 1. **Timeout for sub-agents?** Should there be a maximum runtime?
