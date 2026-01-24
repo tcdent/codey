@@ -612,32 +612,33 @@ fn build_tool_result(&self, call_id: &str, result: &str) -> ChatMessage {
 **Feasibility**: Implemented (current behavior)
 **When useful**: Non-urgent notifications, passive mode
 
-### Hybrid Approach: Priority-Based Injection
+### Pseudo-Tool Injection (Recommended Approach)
 
-Different priorities use different injection points:
+Instead of complicating injection with priorities and interruption logic, we can leverage the existing tool use pattern. Since the agent already expects interspersed tool calls and results, we can **synthesize** tool calls to carry notifications - the agent doesn't need to remember to check for them.
 
-```rust
-pub enum NotificationPriority {
-    Low,       // Point 4: Wait for turn end
-    Normal,    // Point 4: Wait for turn end
-    High,      // Point 3: Inject with next tool result
-    Critical,  // Point 2: Interrupt before tool execution
-}
+#### The Insight
 
-impl NotificationManager {
-    pub fn check_for_injection(&mut self, injection_point: InjectionPoint)
-        -> Option<Vec<Notification>>
-    {
-        let threshold = match injection_point {
-            InjectionPoint::ToolResult => NotificationPriority::High,
-            InjectionPoint::BeforeTool => NotificationPriority::Critical,
-            InjectionPoint::TurnEnd => NotificationPriority::Low,
-        };
+The agent's context already looks like this during a multi-tool turn:
 
-        self.drain_at_priority(threshold)
-    }
-}
 ```
+User: "fix the bug and run tests"
+Assistant: [text] "Let me fix that..." [tool_call: Edit]
+Tool Result: "File updated successfully"
+Assistant: [text] "Now running tests..." [tool_call: Bash]
+Tool Result: "3 tests passed, 1 failed"
+Assistant: [text] "One test failed, let me check..."
+```
+
+We can inject a **synthetic tool call + result** that the agent didn't explicitly request:
+
+```
+User: "fix the bug and run tests"
+Assistant: [text] "Let me fix that..." [tool_call: Edit]
+Tool Result: "File updated successfully"
+                                            ← INJECT HERE
+[Synthetic tool_call: _notification]        ← We add this
+[Synthetic result: "File src/lib.rs was     ← And this
+ modified externally"]
 
 ### Turn Interruption Model
 
