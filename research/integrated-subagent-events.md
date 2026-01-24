@@ -488,15 +488,41 @@ If sub-agent turns are mixed in, restoring the transcript would load them into t
 
 ### Solution
 
-Add `agent_id` to Turn, filter on restore:
+Add `agent_id` to Turn, filter on restore. Use a simple convention: primary is always 0.
 
 ```rust
+pub type AgentId = u32;
+pub const PRIMARY_AGENT_ID: AgentId = 0;
+
 pub struct Turn {
     pub id: usize,
-    pub agent_id: AgentId,  // New field
+    pub agent_id: AgentId,  // 0 = primary, 1+ = spawned
     pub role: Role,
     pub content: Vec<Box<dyn Block>>,
     pub timestamp: DateTime<Utc>,
+}
+
+impl AgentRegistry {
+    pub fn new() -> Self {
+        Self {
+            agents: HashMap::new(),
+            next_id: 1,  // Sub-agents start at 1
+            primary: None,
+        }
+    }
+
+    pub fn register_primary(&mut self, agent: Agent) -> AgentId {
+        self.agents.insert(PRIMARY_AGENT_ID, Mutex::new(agent));
+        self.primary = Some(PRIMARY_AGENT_ID);
+        PRIMARY_AGENT_ID
+    }
+
+    pub fn register_spawned(&mut self, agent: Agent, ...) -> AgentId {
+        let id = self.next_id;
+        self.next_id += 1;
+        // ...
+        id
+    }
 }
 ```
 
@@ -508,22 +534,13 @@ pub struct Turn {
 
 ```rust
 impl Transcript {
-    /// Convert transcript to messages for a specific agent
-    pub fn to_messages(&self, agent_id: AgentId) -> Vec<Message> {
+    /// Restore primary agent context
+    pub fn to_primary_messages(&self) -> Vec<Message> {
         self.turns
             .iter()
-            .filter(|turn| turn.agent_id == agent_id)
+            .filter(|turn| turn.agent_id == PRIMARY_AGENT_ID)
             .filter_map(|turn| turn.to_message())
             .collect()
-    }
-
-    /// Restore primary agent context (default behavior)
-    pub fn to_primary_messages(&self) -> Vec<Message> {
-        let primary_id = self.turns
-            .first()
-            .map(|t| t.agent_id)
-            .unwrap_or(0);
-        self.to_messages(primary_id)
     }
 }
 ```
