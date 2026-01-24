@@ -382,9 +382,6 @@ pub fn render_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
 #[derive(Serialize, Deserialize)]
 pub struct Turn {
     pub id: usize,
-    /// Which agent this turn belongs to (0 = primary, 1+ = spawned)
-    #[serde(default)]
-    pub agent_id: u32,
     pub role: Role,
     pub content: Vec<Box<dyn Block>>,
     pub timestamp: DateTime<Utc>,
@@ -394,10 +391,9 @@ pub struct Turn {
 }
 
 impl Turn {
-    pub fn new(id: usize, agent_id: u32, role: Role, content: Vec<Box<dyn Block>>) -> Self {
+    pub fn new(id: usize, role: Role, content: Vec<Box<dyn Block>>) -> Self {
         Self {
             id,
-            agent_id,
             role,
             content,
             timestamp: Utc::now(),
@@ -488,9 +484,6 @@ pub struct Transcript {
     current_turn_id: Option<usize>,
 }
 
-/// Primary agent is always ID 0
-pub const PRIMARY_AGENT_ID: u32 = 0;
-
 impl Transcript {
     /// Create a new transcript with a specific path
     pub fn with_path(path: PathBuf) -> Self {
@@ -513,33 +506,18 @@ impl Transcript {
         id
     }
 
-    /// Add a new turn with a single block for a specific agent
-    pub fn add_turn_for(&mut self, agent_id: u32, role: Role, block: impl Block + 'static) -> usize {
-        let id = self.next_id();
-        self.turns.push(Turn::new(id, agent_id, role, vec![Box::new(block)]));
-        id
-    }
-
-    /// Add a new turn with a single block (primary agent)
+    /// Add a new turn with a single block
     pub fn add_turn(&mut self, role: Role, block: impl Block + 'static) -> usize {
-        self.add_turn_for(PRIMARY_AGENT_ID, role, block)
-    }
-
-    /// Add an empty turn for streaming for a specific agent
-    pub fn add_empty_for(&mut self, agent_id: u32, role: Role) -> usize {
         let id = self.next_id();
-        self.turns.push(Turn::new(id, agent_id, role, vec![]));
+        self.turns.push(Turn::new(id, role, vec![Box::new(block)]));
         id
     }
 
-    /// Add an empty turn for streaming (primary agent)
+    /// Add an empty turn (for streaming)
     pub fn add_empty(&mut self, role: Role) -> usize {
-        self.add_empty_for(PRIMARY_AGENT_ID, role)
-    }
-
-    /// Filter turns to only those belonging to the primary agent (for restore)
-    pub fn primary_turns(&self) -> impl Iterator<Item = &Turn> {
-        self.turns.iter().filter(|t| t.agent_id == PRIMARY_AGENT_ID)
+        let id = self.next_id();
+        self.turns.push(Turn::new(id, role, vec![]));
+        id
     }
 
     pub fn get_mut(&mut self, id: usize) -> Option<&mut Turn> {
@@ -763,7 +741,7 @@ mod tests {
     
     #[test]
     fn test_turn_streaming() {
-        let mut turn = Turn::new(0, PRIMARY_AGENT_ID, Role::Assistant, vec![]);
+        let mut turn = Turn::new(0, Role::Assistant, vec![]);
         
         // Start streaming - add a text block and get its index
         let idx = turn.add_block(Box::new(TextBlock::new("Hello")));

@@ -471,36 +471,65 @@ Example output:
 
 ## Transcript & Persistence
 
-### Problem
+### Key Insight
 
-The current transcript has no concept of multiple agents:
+Sub-agents don't add turns - they just render blocks. The transcript remains single-agent (primary only).
+
+- **Primary agent** → turns added to transcript (persist + render)
+- **Sub-agent** → blocks rendered directly to terminal (ephemeral, display only)
+
+This keeps the transcript clean:
+- No `agent_id` field needed on Turn
+- No filtering on restore
+- Transcript = primary agent context, always
+
+### Implementation
+
+Sub-agent blocks are "ephemeral" - they drop into the current turn's display, render once, and scroll into native scrollback. They don't need state updates (no tracking by call_id) because:
+- They render as "running"
+- Scroll away into native scrollback
+- The result comes back through the parent's `spawn_agent` tool
 
 ```rust
-pub struct Turn {
-    pub id: usize,
-    pub role: Role,
-    pub content: Vec<Box<dyn Block>>,
-    pub timestamp: DateTime<Utc>,
+impl Chat {
+    /// Render an ephemeral block into the current turn's display.
+    /// Used for sub-agent activity - visible but not tracked/persisted.
+    pub fn render_ephemeral_block(
+        &mut self,
+        block: &dyn Block,
+        agent_label: &str,
+        terminal: &mut Terminal<impl Backend>,
+    ) {
+        // Render block with agent label prefix
+        // Drops into current display, scrolls into native scrollback
+        // No call_id tracking, no state updates
+    }
 }
 ```
 
-If sub-agent turns are mixed in, restoring the transcript would load them into the primary agent's context - polluting it with tool calls that weren't its own.
-
-### Solution
-
-Add `agent_id` to Turn, filter on restore. Use a simple convention: primary is always 0.
+The App handles sub-agent tool events by rendering ephemerally:
 
 ```rust
-pub type AgentId = u32;
-pub const PRIMARY_AGENT_ID: AgentId = 0;
+// In handle_tool_event for non-primary agents
+if !is_primary {
+    let label = self.agents.metadata(agent_id)
+        .map(|m| m.label.as_str())
+        .unwrap_or("sub-agent");
 
-pub struct Turn {
-    pub id: usize,
-    pub agent_id: AgentId,  // 0 = primary, 1+ = spawned
-    pub role: Role,
-    pub content: Vec<Box<dyn Block>>,
-    pub timestamp: DateTime<Utc>,
+    let block = tool.create_block(&call_id, params, background);
+    self.chat.render_ephemeral_block(&*block, label, &mut self.terminal);
+
+    // Auto-approve or route to user based on tool type
+    // No block state tracking needed
 }
+```
+
+### Agent ID Convention
+
+Primary agent is always ID 0, sub-agents start at 1:
+
+```rust
+pub const PRIMARY_AGENT_ID: AgentId = 0;
 
 impl AgentRegistry {
     pub fn new() -> Self {
@@ -510,52 +539,18 @@ impl AgentRegistry {
             primary: None,
         }
     }
-
-    pub fn register_primary(&mut self, agent: Agent) -> AgentId {
-        self.agents.insert(PRIMARY_AGENT_ID, Mutex::new(agent));
-        self.primary = Some(PRIMARY_AGENT_ID);
-        PRIMARY_AGENT_ID
-    }
-
-    pub fn register_spawned(&mut self, agent: Agent, ...) -> AgentId {
-        let id = self.next_id;
-        self.next_id += 1;
-        // ...
-        id
-    }
 }
 ```
-
-**Display**: All turns render normally. Sub-agent tool blocks show with their label prefix and scroll into native scrollback like any other content. Users see full activity in real-time.
-
-**Persistence**: Transcript saves all turns (append-only log).
-
-**Restore**: Filter to primary agent only:
-
-```rust
-impl Transcript {
-    /// Restore primary agent context
-    pub fn to_primary_messages(&self) -> Vec<Message> {
-        self.turns
-            .iter()
-            .filter(|turn| turn.agent_id == PRIMARY_AGENT_ID)
-            .filter_map(|turn| turn.to_message())
-            .collect()
-    }
-}
-```
-
-**Native scrollback**: Since the terminal uses native scrollback, blocks render once and scroll off. No need to track or edit them after - simplifies the model to append-only.
 
 ### Future: Sub-Agent Transcript Files
 
-Could save sub-agent transcripts to separate files for debugging/inspection:
+Could save sub-agent activity to separate files for debugging:
 
 ```
 ~/.codey/transcripts/
-  session-abc123.json          # Primary agent
-  session-abc123.agent-1.json  # Sub-agent 1
-  session-abc123.agent-2.json  # Sub-agent 2
+  session-abc123.json          # Primary agent (main transcript)
+  session-abc123.agent-1.log   # Sub-agent 1 activity log
+  session-abc123.agent-2.log   # Sub-agent 2 activity log
 ```
 
 Not required for MVP - sub-agent context is ephemeral and their useful output is captured in the `spawn_agent` tool result.
