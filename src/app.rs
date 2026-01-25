@@ -62,6 +62,54 @@ enum MessageRequest {
     Command(String, usize),
 }
 
+/// Notification sources for mid-turn injections
+#[derive(Debug, Clone)]
+pub enum NotificationSource {
+    /// User sent a message while agent was streaming
+    User,
+    /// File was modified externally
+    FileWatcher,
+    /// Background task completed
+    BackgroundTask,
+    /// IDE event (diagnostics, etc.)
+    Ide,
+}
+
+impl std::fmt::Display for NotificationSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NotificationSource::User => write!(f, "user"),
+            NotificationSource::FileWatcher => write!(f, "file_watcher"),
+            NotificationSource::BackgroundTask => write!(f, "background_task"),
+            NotificationSource::Ide => write!(f, "ide"),
+        }
+    }
+}
+
+/// A notification to be injected into tool results
+#[derive(Debug, Clone)]
+pub struct Notification {
+    pub source: NotificationSource,
+    pub message: String,
+}
+
+impl Notification {
+    pub fn new(source: NotificationSource, message: impl Into<String>) -> Self {
+        Self {
+            source,
+            message: message.into(),
+        }
+    }
+
+    /// Format as XML for injection into tool results
+    pub fn to_xml(&self) -> String {
+        format!(
+            "<notification source=\"{}\">\n{}\n</notification>",
+            self.source, self.message
+        )
+    }
+}
+
 /// Actions that can be triggered by terminal events
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Action {
