@@ -313,6 +313,38 @@ No counting, no capping, no coalescing. If this becomes a problem (e.g., file wa
 
 ---
 
+## Implementation Progress
+
+### ✅ Completed
+
+**Data Structures** (`src/app.rs` lines 65-111):
+- `NotificationSource` enum: User, FileWatcher, BackgroundTask, Ide
+- `Notification` struct with `to_xml()` method for injection format
+
+**Ephemeral Block Support** (`src/transcript.rs`):
+- Added `is_ephemeral()` method to `Block` trait (default `false`)
+- `NotificationBlock` struct that returns `is_ephemeral() -> true`
+- Custom `Serialize` for `Turn` that filters out ephemeral blocks
+- Notification rendering with yellow styling and ⚡ icon
+
+### 🔲 Remaining
+
+**Wiring** (in `src/app.rs`):
+1. Add `pending_notifications: VecDeque<Notification>` to `App` struct
+2. Add `drain_notifications()` method to `App`
+3. Modify `queue_message()` (line ~529) - if `input_mode != Normal`, create notification instead of queuing message
+4. Modify `ToolEvent::Completed` handler (line ~1015) - drain notifications and append XML to content before calling `submit_tool_result`
+
+**System Prompt**:
+- Add explanation of `<notification>` tags (see "System Prompt Addition" section above)
+
+**Testing**:
+- Test notification injection into tool results
+- Test ephemeral block filtering during serialization
+- Test `queue_message()` behavior when streaming vs idle
+
+---
+
 ## Open Questions
 
 1. ~~**Activation modes**~~: Decided - unified flow based on agent state (see Decisions above)

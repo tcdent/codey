@@ -11,7 +11,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, ser::SerializeStruct};
 
 #[cfg(feature = "cli")]
 use crate::compaction::CompactionBlock;
@@ -97,6 +97,10 @@ pub trait Block: Send + Sync {
 
     /// Set the status of this block
     fn set_status(&mut self, status: Status);
+
+    /// Whether this block is ephemeral (rendered but not persisted)
+    /// Ephemeral blocks are filtered out during serialization.
+    fn is_ephemeral(&self) -> bool { false }
 
     /// Render status icon with appropriate color (CLI only)
     #[cfg(feature = "cli")]
@@ -347,6 +351,80 @@ impl Block for ToolBlock {
     }
 }
 
+/// Notification block for mid-turn injected messages
+/// These are ephemeral - rendered but not persisted to the transcript.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationBlock {
+    pub source: String,
+    pub message: String,
+    #[serde(skip_deserializing, default = "NotificationBlock::default_status")]
+    status: Status,
+}
+
+impl NotificationBlock {
+    pub fn new(source: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            message: message.into(),
+            status: Status::Complete,
+        }
+    }
+    
+    fn default_status() -> Status {
+        Status::Complete
+    }
+}
+
+#[typetag::serde]
+impl Block for NotificationBlock {
+    fn kind(&self) -> BlockType {
+        BlockType::Text  // Treat as text for streaming purposes
+    }
+
+    fn status(&self) -> Status {
+        self.status
+    }
+
+    fn set_status(&mut self, status: Status) {
+        self.status = status;
+    }
+
+    fn is_ephemeral(&self) -> bool {
+        true  // Key difference - not persisted
+    }
+
+    #[cfg(feature = "cli")]
+    fn render(&self, width: u16) -> Vec<Line<'_>> {
+        let mut lines = Vec::new();
+        
+        // Header: "⚡ notification (source)"
+        lines.push(Line::from(vec![
+            Span::styled("⚡ ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("notification ({})", self.source),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        
+        // Message content (wrapped)
+        let wrapped = textwrap::wrap(&self.message, width.saturating_sub(2) as usize);
+        for line in wrapped {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", line),
+                Style::default().fg(Color::Yellow),
+            )));
+        }
+        
+        lines
+    }
+
+    fn text(&self) -> Option<&str> {
+        Some(&self.message)
+    }
+}
+
 /// Helper: render prefix for background tools - "[bg] " if true, empty otherwise
 #[cfg(feature = "cli")]
 pub fn render_prefix(background: bool) -> Span<'static> {
@@ -410,7 +488,7 @@ pub fn render_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
 }
 
 /// A turn in the conversation - one user or assistant response
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 pub struct Turn {
     pub id: usize,
     pub role: Role,
@@ -419,6 +497,27 @@ pub struct Turn {
     /// Index of the currently active (streaming) block, if any
     #[serde(skip)]
     pub active_block_idx: Option<usize>,
+}
+
+/// Custom serialization that filters out ephemeral blocks
+impl Serialize for Turn {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Filter out ephemeral blocks before serializing
+        let persistent_content: Vec<&Box<dyn Block>> = self.content
+            .iter()
+            .filter(|b| !b.is_ephemeral())
+            .collect();
+        
+        let mut state = serializer.serialize_struct("Turn", 4)?;
+        state.serialize_field("id", &self.id)?;
+        state.serialize_field("role", &self.role)?;
+        state.serialize_field("content", &persistent_content)?;
+        state.serialize_field("timestamp", &self.timestamp)?;
+        state.end()
+    }
 }
 
 impl Turn {
