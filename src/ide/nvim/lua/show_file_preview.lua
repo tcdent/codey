@@ -1,7 +1,7 @@
 -- Display file content in a scratch buffer
--- Args: lines (table), title (string), lang (string)
+-- Args: lines (table), title (string), lang (string), channel_id (number)
 
-local lines, title, lang = ...
+local lines, title, lang, channel_id = ...
 
 -- Close any existing preview first
 if vim.g.codey_preview_tab and vim.api.nvim_tabpage_is_valid(vim.g.codey_preview_tab) then
@@ -10,6 +10,9 @@ if vim.g.codey_preview_tab and vim.api.nvim_tabpage_is_valid(vim.g.codey_preview
         vim.cmd('tabclose ' .. tab_nr)
     end
 end
+
+-- Set owner to this channel
+vim.g.codey_preview_owner = channel_id
 
 -- Remember current tab to return to later
 local original_tab = vim.api.nvim_get_current_tabpage()
@@ -46,6 +49,7 @@ vim.bo[buf].readonly = true
 vim.keymap.set('n', 'q', function()
     vim.g.codey_preview_tab = nil
     vim.g.codey_preview_buf = nil
+    vim.g.codey_preview_owner = nil
     vim.cmd('tabclose')
     local orig = vim.g.codey_original_tab
     vim.g.codey_original_tab = nil

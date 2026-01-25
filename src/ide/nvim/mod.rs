@@ -142,6 +142,8 @@ pub struct Nvim {
     show_diffs: bool,
     auto_reload: bool,
     event_rx: mpsc::Receiver<IdeEvent>,
+    /// Our RPC channel ID (for multi-instance coordination)
+    channel_id: i64,
 }
 
 impl Nvim {
@@ -173,12 +175,27 @@ impl Nvim {
         let version = client.get_api_info().await;
         debug!("Connected to nvim: {:?}", version.is_ok());
 
+        // Get our channel ID for multi-instance coordination
+        let channel_info = client
+            .exec_lua("return vim.api.nvim_get_chan_info(0)", vec![])
+            .await
+            .context("Failed to get channel info")?;
+
+        let channel_id = channel_info
+            .as_map()
+            .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("id")))
+            .and_then(|(_, v)| v.as_i64())
+            .unwrap_or(0);
+
+        debug!("Neovim assigned channel ID: {}", channel_id);
+
         let nvim = Self {
             client: Arc::new(Mutex::new(client)),
             socket_path,
             show_diffs,
             auto_reload,
             event_rx,
+            channel_id,
         };
 
         // Set up autocommands for selection tracking
@@ -255,30 +272,28 @@ impl Nvim {
 
     /// Set up autocommands to track visual mode selection changes
     async fn setup_selection_tracking(&self) -> Result<()> {
-        // First, store our channel ID in a global variable
-        let channel_info = self
-            .exec_lua("return vim.api.nvim_get_chan_info(0)", vec![])
-            .await?;
-
-        let channel_id = channel_info
-            .as_map()
-            .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some("id")))
-            .and_then(|(_, v)| v.as_i64())
-            .unwrap_or(0);
-
-        debug!("Neovim assigned channel ID: {}", channel_id);
-
         // Set the channel ID then load the selection tracking script
+        // The script will register this channel in the global list for broadcasting
         let setup_lua = format!(
             "vim.g.codey_channel_id = {}\n{}",
-            channel_id,
+            self.channel_id,
             include_str!("lua/selection_tracking.lua")
         );
 
         self.exec_lua(&setup_lua, vec![]).await?;
-        info!("Set up neovim selection tracking");
+        info!("Set up neovim selection tracking (channel {})", self.channel_id);
 
         Ok(())
+    }
+
+    /// Try to claim the preview slot atomically
+    /// Returns true if successfully claimed, false if another instance owns it
+    async fn try_claim_preview_internal(&self) -> Result<bool> {
+        let args = vec![Value::from(self.channel_id)];
+        let result = self
+            .exec_lua(include_str!("lua/claim_preview.lua"), args)
+            .await?;
+        Ok(result.as_bool().unwrap_or(false))
     }
 
     /// Execute a vim command
@@ -325,6 +340,7 @@ impl Nvim {
             Value::from(modified_lines),
             Value::from(title),
             Value::from(language.unwrap_or("")),
+            Value::from(self.channel_id),
         ];
 
         self.exec_lua(include_str!("lua/show_diff.lua"), args)
@@ -352,6 +368,7 @@ impl Nvim {
             Value::from(lines),
             Value::from(title),
             Value::from(language.unwrap_or("")),
+            Value::from(self.channel_id),
         ];
 
         self.exec_lua(include_str!("lua/show_file_preview.lua"), args)
@@ -397,6 +414,10 @@ impl Nvim {
 impl Ide for Nvim {
     fn name(&self) -> &'static str {
         "neovim"
+    }
+
+    async fn try_claim_preview(&self) -> Result<bool> {
+        self.try_claim_preview_internal().await
     }
 
     async fn show_preview(&self, preview: &ToolPreview) -> Result<()> {
