@@ -13,7 +13,7 @@ use serde_json::json;
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{
-    render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
+    render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
 };
 
 /// Fetch HTML display block
@@ -26,6 +26,8 @@ pub struct FetchHtmlBlock {
     pub text: String,
     #[serde(default)]
     pub background: bool,
+    #[serde(default)]
+    pub agent_label: Option<String>,
 }
 
 impl FetchHtmlBlock {
@@ -42,6 +44,7 @@ impl FetchHtmlBlock {
             status: Status::Pending,
             text: String::new(),
             background,
+            agent_label: None,
         }
     }
 
@@ -63,6 +66,7 @@ impl Block for FetchHtmlBlock {
         lines.push(Line::from(vec![
             self.render_status(),
             render_prefix(self.background),
+            render_agent_label(self.agent_label.as_deref()),
             Span::styled("fetch_html", Style::default().fg(Color::Magenta)),
             Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(url, Style::default().fg(Color::Blue)),
@@ -97,6 +101,14 @@ impl Block for FetchHtmlBlock {
 
     fn params(&self) -> Option<&serde_json::Value> {
         Some(&self.params)
+    }
+
+    fn set_agent_label(&mut self, label: String) {
+        self.agent_label = Some(label);
+    }
+
+    fn agent_label(&self) -> Option<&str> {
+        self.agent_label.as_deref()
     }
 }
 

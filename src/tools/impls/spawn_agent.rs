@@ -6,10 +6,9 @@ use super::{Tool, ToolPipeline};
 use crate::auth::OAuthCredentials;
 use crate::config::AgentRuntimeConfig;
 use crate::impl_base_block;
-use crate::llm::background::run_agent;
 use crate::llm::{Agent, RequestMode};
 use crate::prompts::SUB_AGENT_PROMPT;
-use crate::tools::pipeline::{EffectHandler, Step};
+use crate::tools::pipeline::{Effect, EffectHandler, Step};
 use crate::tools::ToolRegistry;
 use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, Status, ToolBlock};
 use ratatui::{
@@ -156,6 +155,8 @@ pub struct SpawnAgentTool;
 struct SpawnAgentParams {
     /// Description of the task for the sub-agent
     task: String,
+    /// Short label for the agent (1-2 hyphenated words, e.g. "code-review")
+    label: Option<String>,
     /// Optional context to provide to the sub-agent
     context: Option<String>,
 }
@@ -170,9 +171,9 @@ impl Tool for SpawnAgentTool {
     }
 
     fn description(&self) -> &'static str {
-        "Spawn a background agent to handle a subtask. The sub-agent has read-only tool access \
-         (read_file, shell, fetch_url, web_search) and will return its findings. \
-         Use this for research, exploration, or analysis tasks that don't require file modifications."
+        "Spawn a sub-agent to handle a subtask. Returns immediately with an agent_id. \
+         The sub-agent has full tool access including edit_file and write_file (approval routed to user). \
+         Use list_agents to check status and get_agent to retrieve results when finished."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -182,6 +183,10 @@ impl Tool for SpawnAgentTool {
                 "task": {
                     "type": "string",
                     "description": "Clear description of what the sub-agent should accomplish"
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Short label for the agent (1-2 hyphenated words, e.g. 'code-review', 'find-bugs')"
                 },
                 "context": {
                     "type": "string",
@@ -202,11 +207,13 @@ impl Tool for SpawnAgentTool {
             Err(e) => return ToolPipeline::error(format!("Invalid params: {}", e)),
         };
 
-        // Create handler - delegates to app for actual execution (Agent is not Send)
+        // Spawn agent via Effect - returns immediately with agent_id
+        // Use list_agents/get_agent to check status and retrieve results
         ToolPipeline::new()
             .await_approval()
-            .then(RunAgent {
+            .then(SpawnAgentHandler {
                 task: parsed.task,
+                label: parsed.label,
                 task_context: parsed.context,
             })
     }
@@ -221,17 +228,20 @@ impl Tool for SpawnAgentTool {
 }
 
 // =============================================================================
-// RunAgent handler - actually runs the sub-agent
+// SpawnAgentHandler - delegates to App via Effect::SpawnAgent
 // =============================================================================
 
-/// Handler that runs a sub-agent to completion
-struct RunAgent {
+/// Handler that spawns a sub-agent via Effect::SpawnAgent.
+/// The agent is registered with the App and polled through the main event loop.
+/// Returns immediately with agent_id - use list_agents/get_agent to check status.
+struct SpawnAgentHandler {
     task: String,
+    label: Option<String>,
     task_context: Option<String>,
 }
 
 #[async_trait::async_trait]
-impl EffectHandler for RunAgent {
+impl EffectHandler for SpawnAgentHandler {
     async fn call(self: Box<Self>) -> Step {
         // Get the agent context (initialized at app startup)
         let ctx = match agent_context() {
@@ -249,20 +259,25 @@ impl EffectHandler for RunAgent {
             SUB_AGENT_PROMPT.to_string()
         };
 
-        // Create the sub-agent with read-only tools
+        // Create the sub-agent with full tool access
+        // Write tools (edit_file, write_file, shell) route approval to user
         let tools = ToolRegistry::subagent();
         let mut agent = Agent::new(
             ctx.runtime_config.clone(),
             &system_prompt,
             oauth,
-            tools.clone(),
+            tools,
         );
         agent.send_request(&self.task, RequestMode::Normal);
 
-        // Run to completion
-        match run_agent(agent, tools).await {
-            Ok(output) => Step::Output(output),
-            Err(e) => Step::Error(e.to_string()),
-        }
+        // Use provided label or fall back to task
+        let label = self.label.unwrap_or_else(|| self.task.clone());
+
+        // Delegate to App to register the agent
+        // Returns "agent:{id}" - primary agent can use list_agents/get_agent
+        Step::Delegate(Effect::SpawnAgent {
+            agent,
+            label,
+        })
     }
 }

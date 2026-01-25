@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 use crate::commands::Command;
 use crate::config::{AgentRuntimeConfig, Config};
 use crate::ide::{Ide, IdeEvent, Nvim};
-use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
+use crate::llm::{Agent, AgentId, AgentRegistry, AgentStatus, AgentStep, RequestMode};
 #[cfg(feature = "profiling")]
 use crate::{profile_frame, profile_span};
 use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, WELCOME_MESSAGE};
@@ -415,7 +415,7 @@ impl App {
             .widget(
                 &self.config.agents.foreground.model,
                 context_tokens,
-                self.tool_executor.running_background_count(),
+                self.tool_executor.running_background_count() + self.agents.running_background_count(),
                 self.input_mode != InputMode::Normal,
             );
         let alert = self.alert.clone();
@@ -706,16 +706,21 @@ impl App {
 
     /// Handle a single agent step during streaming
     async fn handle_agent_step(&mut self, agent_id: AgentId, step: AgentStep) -> Result<()> {
+        let is_primary = self.agents.primary_id() == Some(agent_id);
+
         match step {
             AgentStep::TextDelta(text) => {
+                if !is_primary { return Ok(()); }
                 self.chat.transcript.stream_delta(BlockType::Text, &text);
             },
             AgentStep::CompactionDelta(text) => {
+                if !is_primary { return Ok(()); }
                 self.chat
                     .transcript
                     .stream_delta(BlockType::Compaction, &text);
             },
             AgentStep::ThinkingDelta(text) => {
+                if !is_primary { return Ok(()); }
                 self.chat
                     .transcript
                     .stream_delta(BlockType::Thinking, &text);
@@ -736,44 +741,54 @@ impl App {
                 tracing::warn!("Retrying request: attempt {}, error: {}", attempt, error);
             },
             AgentStep::Finished { usage } => {
-                self.input_mode = InputMode::Normal;
+                if is_primary {
+                    self.input_mode = InputMode::Normal;
 
-                // Handle compaction completion
-                // TODO something more robust than checking active block type
-                if self
-                    .chat
-                    .transcript
-                    .is_streaming_block_type(BlockType::Compaction)
-                {
-                    self.chat.transcript.finish_turn();
-                    if let Err(e) = self.chat.transcript.save() {
-                        tracing::error!("Failed to save transcript before compaction: {}", e);
-                    }
-                    match self.chat.transcript.rotate() {
-                        Ok(new_transcript) => {
-                            tracing::info!(
-                                "Compaction complete, rotating to {:?}",
-                                new_transcript.path()
-                            );
-                            self.chat
-                                .reset_transcript(new_transcript, &mut self.terminal);
-                            self.draw();
-                        },
-                        Err(e) => {
-                            tracing::error!("Failed to rotate transcript: {}", e);
-                        },
+                    // Handle compaction completion
+                    // TODO something more robust than checking active block type
+                    if self
+                        .chat
+                        .transcript
+                        .is_streaming_block_type(BlockType::Compaction)
+                    {
+                        self.chat.transcript.finish_turn();
+                        if let Err(e) = self.chat.transcript.save() {
+                            tracing::error!("Failed to save transcript before compaction: {}", e);
+                        }
+                        match self.chat.transcript.rotate() {
+                            Ok(new_transcript) => {
+                                tracing::info!(
+                                    "Compaction complete, rotating to {:?}",
+                                    new_transcript.path()
+                                );
+                                self.chat
+                                    .reset_transcript(new_transcript, &mut self.terminal);
+                                self.draw();
+                            },
+                            Err(e) => {
+                                tracing::error!("Failed to rotate transcript: {}", e);
+                            },
+                        }
+                    } else {
+                        // Normal completion
+                        self.chat.transcript.finish_turn();
+                        if let Err(e) = self.chat.transcript.save() {
+                            tracing::error!("Failed to save transcript: {}", e);
+                        }
+
+                        // Check if compaction is needed
+                        if usage.context_tokens >= self.config.general.compaction_threshold {
+                            self.queue_compaction();
+                        }
                     }
                 } else {
-                    // Normal completion
-                    self.chat.transcript.finish_turn();
-                    if let Err(e) = self.chat.transcript.save() {
-                        tracing::error!("Failed to save transcript: {}", e);
-                    }
-
-                    // Check if compaction is needed
-                    if usage.context_tokens >= self.config.general.compaction_threshold {
-                        self.queue_compaction();
-                    }
+                    // Sub-agent finished - just mark as finished and log
+                    // Result will be retrieved via get_agent tool when primary agent requests it
+                    let label = self.agents.metadata(agent_id)
+                        .map(|m| m.label.clone())
+                        .unwrap_or_default();
+                    self.agents.finish(agent_id);
+                    tracing::info!("Sub-agent {} ({}) finished", agent_id, label);
                 }
             },
             AgentStep::Error(msg) => {
@@ -832,12 +847,26 @@ impl App {
         // If there are more tools queued, activate the next one
         if let Some((next_call, _)) = self.pending_approvals.front() {
             tracing::debug!("decide_pending_tool: activating next tool {}", next_call.call_id);
+
+            // Get agent label for sub-agent tools
+            let is_primary = self.agents.primary_id() == Some(next_call.agent_id);
+            let agent_label = if !is_primary {
+                self.agents.metadata(next_call.agent_id)
+                    .map(|m| m.label.clone())
+            } else {
+                None
+            };
+
             // Create block for the next tool
             let tool = self.tool_executor.tools().get(&next_call.name);
-            self.chat.start_block(
-                tool.create_block(&next_call.call_id, next_call.params.clone(), next_call.background),
-                &mut self.terminal,
-            );
+            let mut block = tool.create_block(&next_call.call_id, next_call.params.clone(), next_call.background);
+
+            // Set agent label for sub-agent tools
+            if let Some(label) = agent_label {
+                block.set_agent_label(label);
+            }
+
+            self.chat.start_block(block, &mut self.terminal);
             self.draw(); // flush block before showing approval UI
             self.input_mode = InputMode::ToolApproval;
         } else {
@@ -878,56 +907,62 @@ impl App {
             } => {
                 let is_primary = self.agents.primary_id() == Some(agent_id);
 
-                if is_primary {
-                    // Create ToolCall and add to queue
-                    let tool_call = ToolCall {
-                        agent_id,
-                        call_id: call_id.clone(),
-                        name: name.clone(),
-                        params: params.clone(),
-                        decision: ToolDecision::Pending,
-                        background,
-                    };
-                    let is_first = self.pending_approvals.is_empty();
-                    self.pending_approvals.push_back((tool_call, responder));
+                // Get agent label for sub-agents (used in logging and future UI)
+                let agent_label = if !is_primary {
+                    self.agents.metadata(agent_id)
+                        .map(|m| m.label.clone())
+                } else {
+                    None
+                };
 
-                    // Only create block and show UI for the first tool in queue
-                    if is_first {
-                        self.draw(); // flush any pending text
-                        let tool = self.tool_executor.tools().get(&name);
-                        self.chat.start_block(
-                            tool.create_block(&call_id, params.clone(), background),
-                            &mut self.terminal,
-                        );
-                        self.draw();
+                // Create ToolCall and add to queue (same flow for primary and sub-agents)
+                let tool_call = ToolCall {
+                    agent_id,
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    params: params.clone(),
+                    decision: ToolDecision::Pending,
+                    background,
+                };
+                let is_first = self.pending_approvals.is_empty();
+                self.pending_approvals.push_back((tool_call, responder));
 
-                        // Check filters for auto-approve/deny
-                        match self.tool_filters.evaluate(&name, &params) {
-                            Some(decision) => {
-                                self.decide_pending_tool(decision).await;
-                            },
-                            None => {
-                                // Wait for user approval
+                // Only create block and show UI for the first tool in queue
+                if is_first {
+                    self.draw(); // flush any pending text
+                    let tool = self.tool_executor.tools().get(&name);
+                    let mut block = tool.create_block(&call_id, params.clone(), background);
+
+                    // Set agent label for sub-agent tools
+                    if let Some(ref label) = agent_label {
+                        tracing::info!("Sub-agent '{}' requesting approval for {}", label, name);
+                        block.set_agent_label(label.clone());
+                    }
+
+                    self.chat.start_block(block, &mut self.terminal);
+                    self.draw();
+
+                    // Check filters for auto-approve/deny
+                    match self.tool_filters.evaluate(&name, &params) {
+                        Some(decision) => {
+                            self.decide_pending_tool(decision).await;
+                        },
+                        None => {
+                            // Wait for user approval
+                            if is_primary {
                                 if let Err(e) = self.chat.transcript.save() {
                                     tracing::error!(
                                         "Failed to save transcript before tool approval: {}",
                                         e
                                     );
                                 }
-                                self.input_mode = InputMode::ToolApproval;
-                            },
-                        }
+                            }
+                            self.input_mode = InputMode::ToolApproval;
+                            self.draw();
+                        },
                     }
-                    // If not first, it's queued - no UI needed yet
-                } else {
-                    // Background agents: auto-approve without UI
-                    tracing::debug!(
-                        "Auto-approving tool {} for background agent {}",
-                        name,
-                        agent_id
-                    );
-                    let _ = responder.send(ToolDecision::Approve);
                 }
+                // If not first, it's queued - no UI needed yet
             },
 
             ToolEvent::Delegate {
@@ -945,20 +980,17 @@ impl App {
             },
 
             ToolEvent::Delta {
-                agent_id,
                 call_id,
                 content,
+                ..
             } => {
-                // Only stream output to transcript for primary agent
-                let is_primary = self.agents.primary_id() == Some(agent_id);
-                if is_primary {
-                    if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
-                        block.append_text(&content);
-                        // Re-render to show the delta (throttled)
-                        self.render_and_draw_throttled();
-                    } else {
-                        tracing::warn!("No block found for call_id: {}", call_id);
-                    }
+                // Stream output to block (works for both primary and sub-agent tools)
+                if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
+                    block.append_text(&content);
+                    // Re-render to show the delta (throttled)
+                    self.render_and_draw_throttled();
+                } else {
+                    tracing::warn!("No block found for call_id: {}", call_id);
                 }
             },
 
@@ -969,12 +1001,10 @@ impl App {
             } => {
                 let is_primary = self.agents.primary_id() == Some(agent_id);
 
-                if is_primary {
-                    // Set the output on the block and mark it complete (by call_id, not active block)
-                    if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
-                        block.append_text(&content);
-                        block.set_status(Status::Complete);
-                    }
+                // Update block status (works for both primary and sub-agent tools)
+                if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
+                    block.append_text(&content);
+                    block.set_status(Status::Complete);
                 }
 
                 // Tell agent about the result - route to the correct agent by ID
@@ -985,16 +1015,14 @@ impl App {
                         .submit_tool_result(&call_id, content);
                 }
 
-                if is_primary {
-                    // Tool is done - only switch to streaming if no more approvals pending
-                    if self.pending_approvals.is_empty() {
-                        self.input_mode = InputMode::Streaming;
-                    }
-
-                    // Render update
-                    self.chat.render(&mut self.terminal);
-                    self.draw();
+                // Tool is done - only switch to streaming if no more approvals pending
+                if self.pending_approvals.is_empty() {
+                    self.input_mode = InputMode::Streaming;
                 }
+
+                // Render update
+                self.chat.render(&mut self.terminal);
+                self.draw();
             },
 
             ToolEvent::Error {
@@ -1002,16 +1030,10 @@ impl App {
                 call_id,
                 content,
             } => {
-                let is_primary = self.agents.primary_id() == Some(agent_id);
-
-                if is_primary {
-                    // Set the output on the block before marking error
-                    if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
-                        block.append_text(&content);
-                    }
-
-                    // Update transcript status for primary agent
-                    self.chat.transcript.mark_active_block(Status::Error);
+                // Update block status (works for both primary and sub-agent tools)
+                if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
+                    block.append_text(&content);
+                    block.set_status(Status::Error);
                 }
 
                 // Tell agent about the error - route to the correct agent by ID
@@ -1022,16 +1044,14 @@ impl App {
                         .submit_tool_result(&call_id, content);
                 }
 
-                if is_primary {
-                    // Tool is done - only switch to streaming if no more approvals pending
-                    if self.pending_approvals.is_empty() {
-                        self.input_mode = InputMode::Streaming;
-                    }
-
-                    // Render update
-                    self.chat.render(&mut self.terminal);
-                    self.draw();
+                // Tool is done - only switch to streaming if no more approvals pending
+                if self.pending_approvals.is_empty() {
+                    self.input_mode = InputMode::Streaming;
                 }
+
+                // Render update
+                self.chat.render(&mut self.terminal);
+                self.draw();
             },
 
             ToolEvent::BackgroundStarted {
@@ -1088,12 +1108,20 @@ impl App {
             },
             Effect::IdeShowPreview { preview } => {
                 if let Some(ide) = &self.ide {
+                    // Wait for preview slot to be available (multi-instance coordination)
+                    while !ide.try_claim_preview().await? {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
                     ide.show_preview(&preview).await?;
                 }
                 Ok(None)
             },
             Effect::IdeShowDiffPreview { path, edits } => {
                 if let Some(ide) = &self.ide {
+                    // Wait for preview slot to be available (multi-instance coordination)
+                    while !ide.try_claim_preview().await? {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
                     ide.show_diff_preview(&path.to_string_lossy(), &edits)
                         .await?;
                 }
@@ -1138,6 +1166,75 @@ impl App {
                         task_id, tool_name, status, output
                     ))),
                     None => Ok(Some(format!("Task {} not found or still running", task_id))),
+                }
+            },
+            Effect::SpawnAgent {
+                agent,
+                label,
+            } => {
+                // Register the agent - it will be polled through agents.next()
+                let parent_id = _agent_id;
+                let agent_id = self.agents.register_spawned(agent, label.clone(), parent_id);
+                tracing::info!("Spawned sub-agent {} with label '{}'", agent_id, label);
+                // Return the agent ID so the handler knows what was spawned
+                Ok(Some(format!("agent:{}", agent_id)))
+            },
+            Effect::ListAgents => {
+                let spawned = self.agents.list_spawned();
+                if spawned.is_empty() {
+                    Ok(Some("No spawned agents".to_string()))
+                } else {
+                    let output = spawned
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (_, meta))| {
+                            let elapsed = meta.created_at.elapsed().as_secs();
+                            format!(
+                                "{}. {} [{:?}] {}s",
+                                i + 1, meta.label, meta.status, elapsed
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    Ok(Some(output))
+                }
+            },
+            Effect::GetAgent { label } => {
+                // Find agent by label
+                let agent_id = match self.agents.find_by_label(&label) {
+                    Some(id) => id,
+                    None => return Ok(Some(format!("Agent '{}' not found", label))),
+                };
+
+                // Check status
+                let status = self.agents.metadata(agent_id)
+                    .map(|m| m.status.clone());
+
+                match status {
+                    Some(status) => {
+                        let status_str = format!("{:?}", status);
+                        if status == AgentStatus::Finished {
+                            // Get result and remove agent (consume on retrieval)
+                            let result = if let Some(agent_mutex) = self.agents.get(agent_id) {
+                                let agent = agent_mutex.lock().await;
+                                agent.last_message().unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            self.agents.remove(agent_id);
+                            Ok(Some(format!(
+                                "[{}] [{}]:\n{}",
+                                label, status_str, result
+                            )))
+                        } else {
+                            // Still running - just return status
+                            Ok(Some(format!(
+                                "[{}] [{}]",
+                                label, status_str
+                            )))
+                        }
+                    }
+                    None => Ok(Some(format!("Agent '{}' not found", label))),
                 }
             },
         }

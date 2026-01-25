@@ -1,7 +1,7 @@
 //! Open file tool - opens a file in the IDE at a specific line
 
 use super::{handlers, Tool, ToolPipeline};
-use crate::transcript::{render_approval_prompt, render_prefix, Block, BlockType, Status};
+use crate::transcript::{render_agent_label, render_approval_prompt, render_prefix, Block, BlockType, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -94,6 +94,8 @@ pub struct OpenFileBlock {
     pub text: String,
     #[serde(default)]
     pub background: bool,
+    #[serde(default)]
+    pub agent_label: Option<String>,
 }
 
 impl OpenFileBlock {
@@ -105,6 +107,7 @@ impl OpenFileBlock {
             status: Status::Pending,
             text: String::new(),
             background,
+            agent_label: None,
         }
     }
 }
@@ -125,6 +128,7 @@ impl Block for OpenFileBlock {
         let mut lines = vec![Line::from(vec![
             self.render_status(),
             render_prefix(self.background),
+            render_agent_label(self.agent_label.as_deref()),
             Span::styled("open_file", Style::default().fg(Color::Magenta)),
             Span::styled("(", Style::default().fg(Color::DarkGray)),
             Span::styled(location, Style::default().fg(Color::Cyan)),
@@ -155,5 +159,13 @@ impl Block for OpenFileBlock {
 
     fn params(&self) -> Option<&serde_json::Value> {
         Some(&self.params)
+    }
+
+    fn set_agent_label(&mut self, label: String) {
+        self.agent_label = Some(label);
+    }
+
+    fn agent_label(&self) -> Option<&str> {
+        self.agent_label.as_deref()
     }
 }

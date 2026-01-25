@@ -103,6 +103,9 @@ fn primary_param(tool_name: &str) -> &'static str {
         names::WEB_SEARCH => "query",
         names::GET_BACKGROUND_TASK => "task_id",
         names::LIST_BACKGROUND_TASKS => "", // No params - empty string matches ".*"
+        names::SPAWN_AGENT => "task",
+        names::LIST_AGENTS => "", // No params - empty string matches ".*"
+        names::GET_AGENT => "label",
         _ => "command", // Default fallback
     }
 }
