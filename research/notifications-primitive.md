@@ -20,6 +20,70 @@ We need a way to inject **Notifications** into the agent's context without waiti
 
 ---
 
+## Decisions
+
+### Approach: Tool Result Augmentation
+
+We will use **Tool Result Augmentation** (Approach A below). This is the pattern Anthropic uses in Claude Code with `<system-reminder>` tags. It's proven, simple, and requires no API changes.
+
+### Unified Notification Flow
+
+All external events (user messages, file changes, background tasks, IDE diagnostics) use the same flow based on agent state:
+
+```
+External Event
+      │
+      ▼
+┌─────────────────┐
+│ Agent streaming? │
+└─────────────────┘
+      │
+  ┌───┴───┐
+  ▼       ▼
+ NO      YES
+  │       │
+  ▼       ▼
+Queue    Inject into next
+as new   tool result as
+message  <notification>
+```
+
+No special cases - user messages during a turn are handled the same as file watcher events or background task completions.
+
+### Simplifications
+
+- **No count**: Don't include notification counts
+- **No cap**: Include all pending notifications
+- **No coalescing**: Defer to the future if it becomes a problem
+- **Simple XML**: Just wrap in `<notification source="...">` and append
+
+### Transcript Representation
+
+`NotificationBlock` is **ephemeral** - rendered for display but not persisted:
+
+- User sees the interruption happened in the UI
+- Content actually lives in the tool result (which is persisted)
+- No need to reconstruct notifications when loading a saved conversation
+- Same pattern as sub-agent tool blocks (rendered but not saved)
+
+Example rendering:
+```
+┌─ shell ─────────────────────────────────
+│ cargo build
+│ ✓ Compiled successfully
+└─────────────────────────────────────────
+
+┌─ notification (user) ────────────────────
+│ actually wait, try a different approach
+└─────────────────────────────────────────
+
+┌─ edit_file ─────────────────────────────
+│ ...
+└─────────────────────────────────────────
+```
+
+---
+
 ## Key Insight: Tool Results Are Unstructured Text
 
 Tool definitions in the Anthropic API use JSON schemas for structured input:
@@ -93,11 +157,11 @@ fn submit_tool_result_with_notifications(
     } else {
         let notif_xml = notifications.iter()
             .map(|n| format!(
-                "<notification source=\"{:?}\">\n{}\n</notification>",
-                n.source, n.to_message()
+                "<notification source=\"{}\">\n{}\n</notification>",
+                n.source, n.message
             ))
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n\n");
 
         format!("{result}\n\n{notif_xml}")
     };
@@ -193,14 +257,10 @@ Tool {
 
 ## Recommendation
 
-**Use Approach A** (Tool Result Augmentation):
-- Proven in production
+**Decision: Use Approach A** (Tool Result Augmentation):
+- Proven in production (Claude Code uses this)
 - Simplest implementation
 - No schema changes
-
-**Consider Approach B** if:
-- Notifications need distinct transcript entries
-- Agent should explicitly acknowledge notifications
 
 ---
 
@@ -231,11 +291,7 @@ This ensures:
 
 ## Handling Multiple Queued Notifications
 
-When several notifications arrive before a tool completes, we need a strategy for injection.
-
-### Option 1: Append All
-
-Simply append all pending notifications to the tool result:
+**Decision**: Keep it simple - append all notifications as separate XML blocks:
 
 ```
 ToolResult(id="edit_1"): "File updated successfully
@@ -253,97 +309,13 @@ Build completed: 2 warnings
 </notification>"
 ```
 
-**Pros**: Simple, complete information
-**Cons**: Can bloat tool results, token cost scales linearly
-
-### Option 2: Batch into Single Block
-
-Group notifications into one XML block:
-
-```
-ToolResult(id="edit_1"): "File updated successfully
-
-<notifications count="3">
-- [file_watcher] src/lib.rs modified externally
-- [file_watcher] src/main.rs modified externally
-- [background_task] Build completed: 2 warnings
-</notifications>"
-```
-
-**Pros**: Compact, clear count signals "catch up"
-**Cons**: Less structured for agent parsing
-
-### Option 3: Coalesce by Source
-
-Merge similar notifications:
-
-```
-ToolResult(id="edit_1"): "File updated successfully
-
-<notification source="file_watcher">
-Multiple files modified: src/lib.rs, src/main.rs
-</notification>
-
-<notification source="background_task">
-Build completed: 2 warnings
-</notification>"
-```
-
-**Pros**: Reduces noise from rapid file changes
-**Cons**: Loses individual event detail
-
-### Option 4: Cap with Overflow Indicator
-
-Limit injected notifications, indicate overflow:
-
-```
-ToolResult(id="edit_1"): "File updated successfully
-
-<notifications showing="3" total="7">
-- [file_watcher] src/lib.rs modified
-- [file_watcher] src/main.rs modified
-- [background_task] Build completed
-(4 more notifications pending)
-</notifications>"
-```
-
-**Pros**: Bounds token cost, agent knows there's more
-**Cons**: Agent may miss important notifications
-
-### Recommendation
-
-Combine approaches:
-
-1. **Coalesce** rapid same-source notifications (e.g., file watcher debounce)
-2. **Batch** into single `<notifications>` block with count
-3. **Cap** at reasonable limit (e.g., 5-10) with overflow indicator
-4. **Prioritize** if capping - show higher priority first
-
-```rust
-fn format_notifications(notifications: &[Notification], max: usize) -> String {
-    // Coalesce same-source notifications within time window
-    let coalesced = coalesce_by_source(notifications);
-
-    let total = coalesced.len();
-    let showing: Vec<_> = coalesced.into_iter().take(max).collect();
-
-    let mut result = format!("<notifications count=\"{}\">", total);
-    for n in &showing {
-        result.push_str(&format!("\n- [{}] {}", n.source, n.message));
-    }
-    if total > max {
-        result.push_str(&format!("\n({} more pending)", total - max));
-    }
-    result.push_str("\n</notifications>");
-    result
-}
-```
+No counting, no capping, no coalescing. If this becomes a problem (e.g., file watcher storms), we can add coalescing later.
 
 ---
 
 ## Open Questions
 
-1. **Activation modes**: Should some notifications auto-trigger agent response vs. passive accumulation?
-2. **Coalescing**: How to batch rapid file changes?
-3. **Transcript representation**: Should notifications appear as a distinct block type?
-4. **Rate limiting**: Prevent notification storms from overwhelming context?
+1. ~~**Activation modes**~~: Decided - unified flow based on agent state (see Decisions above)
+2. **Coalescing**: Deferred - solve if it becomes a problem
+3. ~~**Transcript representation**~~: Decided - ephemeral `NotificationBlock` (see Decisions above)
+4. **Rate limiting**: Deferred - solve if it becomes a problem
