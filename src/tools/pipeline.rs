@@ -14,6 +14,8 @@
 
 use crate::ide::{Edit, ToolPreview};
 #[cfg(feature = "cli")]
+use crate::llm::Agent;
+#[cfg(feature = "cli")]
 use crate::transcript::Block;
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -41,7 +43,6 @@ pub trait EffectHandler: Send {
 }
 
 /// Effects that must be delegated to the app layer
-#[derive(Debug, Clone)]
 pub enum Effect {
     // === IDE ===
     IdeOpen { path: PathBuf, line: Option<u32>, column: Option<u32> },
@@ -51,10 +52,75 @@ pub enum Effect {
     IdeClosePreview,
     /// Check if IDE buffer has unsaved changes - fails pipeline if dirty
     IdeCheckUnsavedEdits { path: PathBuf },
-    
+
     // === Background Tasks ===
     ListBackgroundTasks,
     GetBackgroundTask { task_id: String },
+
+    // === Sub-Agents ===
+    /// Spawn a sub-agent. App registers it and polls through main loop.
+    #[cfg(feature = "cli")]
+    SpawnAgent {
+        agent: Agent,
+        label: String,
+    },
+
+    // === Agent Management ===
+    /// List all spawned agents
+    #[cfg(feature = "cli")]
+    ListAgents,
+    /// Get result from a finished agent
+    #[cfg(feature = "cli")]
+    GetAgent { label: String },
+}
+
+impl std::fmt::Debug for Effect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Effect::IdeOpen { path, line, column } => {
+                f.debug_struct("IdeOpen")
+                    .field("path", path)
+                    .field("line", line)
+                    .field("column", column)
+                    .finish()
+            }
+            Effect::IdeShowPreview { .. } => f.write_str("IdeShowPreview"),
+            Effect::IdeShowDiffPreview { path, .. } => {
+                f.debug_struct("IdeShowDiffPreview")
+                    .field("path", path)
+                    .finish_non_exhaustive()
+            }
+            Effect::IdeReloadBuffer { path } => {
+                f.debug_struct("IdeReloadBuffer").field("path", path).finish()
+            }
+            Effect::IdeClosePreview => f.write_str("IdeClosePreview"),
+            Effect::IdeCheckUnsavedEdits { path } => {
+                f.debug_struct("IdeCheckUnsavedEdits")
+                    .field("path", path)
+                    .finish()
+            }
+            Effect::ListBackgroundTasks => f.write_str("ListBackgroundTasks"),
+            Effect::GetBackgroundTask { task_id } => {
+                f.debug_struct("GetBackgroundTask")
+                    .field("task_id", task_id)
+                    .finish()
+            }
+            #[cfg(feature = "cli")]
+            Effect::SpawnAgent { label, .. } => {
+                f.debug_struct("SpawnAgent")
+                    .field("label", label)
+                    .finish_non_exhaustive()
+            }
+            #[cfg(feature = "cli")]
+            Effect::ListAgents => f.write_str("ListAgents"),
+            #[cfg(feature = "cli")]
+            Effect::GetAgent { label } => {
+                f.debug_struct("GetAgent")
+                    .field("label", &label)
+                    .finish()
+            }
+        }
+    }
 }
 
 /// When an effect should run

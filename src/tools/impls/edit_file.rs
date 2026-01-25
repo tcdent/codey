@@ -29,7 +29,7 @@ use crate::ide::Edit;
 use crate::impl_base_block;
 use crate::tools::pipeline::{EffectHandler, Step};
 use crate::transcript::{
-    render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
+    render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
 };
 
 // =============================================================================
@@ -86,6 +86,9 @@ pub struct EditFileBlock {
     pub text: String,
     #[serde(default)]
     pub background: bool,
+    /// Agent label for sub-agent tools
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
 }
 
 impl EditFileBlock {
@@ -102,6 +105,7 @@ impl EditFileBlock {
             status: Status::Pending,
             text: String::new(),
             background,
+            agent_label: None,
         }
     }
 
@@ -126,9 +130,10 @@ impl Block for EditFileBlock {
             .map(|a| a.len())
             .unwrap_or(0);
 
-        // Format: edit_file(path, N edits)
+        // Format: [agent_label] edit_file(path, N edits)
         lines.push(Line::from(vec![
             self.render_status(),
+            render_agent_label(self.agent_label.as_deref()),
             render_prefix(self.background),
             Span::styled("edit_file", Style::default().fg(Color::Magenta)),
             Span::styled("(", Style::default().fg(Color::DarkGray)),
@@ -172,6 +177,14 @@ impl Block for EditFileBlock {
 
     fn params(&self) -> Option<&serde_json::Value> {
         Some(&self.params)
+    }
+
+    fn set_agent_label(&mut self, label: String) {
+        self.agent_label = Some(label);
+    }
+
+    fn agent_label(&self) -> Option<&str> {
+        self.agent_label.as_deref()
     }
 }
 

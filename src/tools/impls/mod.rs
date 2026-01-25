@@ -1,3 +1,4 @@
+mod agent_management;
 mod background_tasks;
 mod edit_file;
 mod fetch_html;
@@ -12,6 +13,7 @@ mod write_file;
 pub use super::handlers;
 pub use super::pipeline::{Tool, ToolPipeline};
 
+pub use agent_management::{GetAgentTool, ListAgentsTool};
 pub use background_tasks::{GetBackgroundTaskTool, ListBackgroundTasksTool};
 pub use edit_file::EditFileTool;
 pub use fetch_html::FetchHtmlTool;

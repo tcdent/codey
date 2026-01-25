@@ -389,6 +389,34 @@ impl EffectHandler for GetBackgroundTask {
 }
 
 // =============================================================================
+// Agent management handlers
+// =============================================================================
+
+/// List all spawned sub-agents
+pub struct ListAgents;
+
+#[async_trait::async_trait]
+impl EffectHandler for ListAgents {
+    async fn call(self: Box<Self>) -> Step {
+        Step::Delegate(Effect::ListAgents)
+    }
+}
+
+/// Get a specific sub-agent's result
+pub struct GetAgent {
+    pub label: String,
+}
+
+#[async_trait::async_trait]
+impl EffectHandler for GetAgent {
+    async fn call(self: Box<Self>) -> Step {
+        Step::Delegate(Effect::GetAgent {
+            label: self.label,
+        })
+    }
+}
+
+// =============================================================================
 // HTML content handlers
 // =============================================================================
 

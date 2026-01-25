@@ -28,6 +28,8 @@ pub mod names {
     pub const SPAWN_AGENT: &str = "mcp_spawn_agent";
     pub const LIST_BACKGROUND_TASKS: &str = "mcp_list_background_tasks";
     pub const GET_BACKGROUND_TASK: &str = "mcp_get_background_task";
+    pub const LIST_AGENTS: &str = "mcp_list_agents";
+    pub const GET_AGENT: &str = "mcp_get_agent";
 }
 
 use std::collections::HashMap;
@@ -37,8 +39,8 @@ pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
 #[cfg(feature = "cli")]
 pub use impls::{
     init_agent_context, update_agent_oauth, EditFileTool, FetchHtmlTool, FetchUrlTool,
-    GetBackgroundTaskTool, ListBackgroundTasksTool, OpenFileTool, ReadFileTool, ShellTool,
-    SpawnAgentTool, WebSearchTool, WriteFileTool,
+    GetAgentTool, GetBackgroundTaskTool, ListAgentsTool, ListBackgroundTasksTool, OpenFileTool,
+    ReadFileTool, ShellTool, SpawnAgentTool, WebSearchTool, WriteFileTool,
 };
 #[cfg(feature = "cli")]
 pub use browser::init_browser_context;
@@ -146,11 +148,17 @@ impl ToolRegistry {
         registry.register(Arc::new(SpawnAgentTool));
         registry.register(Arc::new(ListBackgroundTasksTool));
         registry.register(Arc::new(GetBackgroundTaskTool));
+        registry.register(Arc::new(ListAgentsTool));
+        registry.register(Arc::new(GetAgentTool));
 
         registry
     }
 
-    /// Tools available to sub-agents (read-only, no spawn_agent) (CLI only)
+    /// Tools available to sub-agents (includes write tools - approval routed to user) (CLI only)
+    ///
+    /// TODO: Sub-agent tools shouldn't have a `background` parameter since sub-agents
+    /// are already non-blocking. We should either filter it out of the schema or
+    /// create separate tool variants for sub-agents.
     #[cfg(feature = "cli")]
     pub fn subagent() -> Self {
         let mut registry = Self {
@@ -158,6 +166,8 @@ impl ToolRegistry {
         };
 
         registry.register(Arc::new(ReadFileTool));
+        registry.register(Arc::new(WriteFileTool));
+        registry.register(Arc::new(EditFileTool));
         registry.register(Arc::new(ShellTool::new()));
         registry.register(Arc::new(FetchUrlTool));
         registry.register(Arc::new(FetchHtmlTool));
