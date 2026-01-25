@@ -404,14 +404,14 @@ impl EffectHandler for ListAgents {
 
 /// Get a specific sub-agent's result
 pub struct GetAgent {
-    pub agent_id: u32,
+    pub label: String,
 }
 
 #[async_trait::async_trait]
 impl EffectHandler for GetAgent {
     async fn call(self: Box<Self>) -> Step {
         Step::Delegate(Effect::GetAgent {
-            agent_id: self.agent_id,
+            label: self.label,
         })
     }
 }

@@ -124,16 +124,15 @@ impl Block for GetAgentBlock {
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
 
-        let agent_id = self.params["agent_id"].as_u64()
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "?".to_string());
+        let label = self.params["label"].as_str()
+            .unwrap_or("?");
 
         let spans = vec![
             self.render_status(),
             render_prefix(self.background),
             Span::styled("get_agent", Style::default().fg(Color::Magenta)),
             Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(agent_id, Style::default().fg(Color::White)),
+            Span::styled(label.to_string(), Style::default().fg(Color::Yellow)),
             Span::styled(")", Style::default().fg(Color::DarkGray)),
         ];
         lines.push(Line::from(spans));
@@ -218,8 +217,8 @@ pub struct GetAgentTool;
 
 #[derive(Debug, Deserialize)]
 struct GetAgentParams {
-    /// The agent_id returned when the agent was spawned
-    agent_id: u32,
+    /// The label of the agent to retrieve
+    label: String,
 }
 
 impl GetAgentTool {
@@ -232,7 +231,7 @@ impl Tool for GetAgentTool {
     }
 
     fn description(&self) -> &'static str {
-        "Retrieve the result of a finished sub-agent by its agent_id. \
+        "Retrieve the result of a finished sub-agent by its label. \
          Returns the agent's final message/output. \
          If the agent is still running, returns its current status."
     }
@@ -241,12 +240,12 @@ impl Tool for GetAgentTool {
         json!({
             "type": "object",
             "properties": {
-                "agent_id": {
-                    "type": "integer",
-                    "description": "The agent_id returned when the agent was spawned"
+                "label": {
+                    "type": "string",
+                    "description": "The label of the agent to retrieve"
                 }
             },
-            "required": ["agent_id"]
+            "required": ["label"]
         })
     }
 
@@ -259,7 +258,7 @@ impl Tool for GetAgentTool {
         ToolPipeline::new()
             .await_approval()
             .then(handlers::GetAgent {
-                agent_id: parsed.agent_id,
+                label: parsed.label,
             })
     }
 

@@ -325,6 +325,12 @@ pub struct ToolsConfig {
     pub list_background_tasks: ToolFilterConfig,
     /// Filter patterns for get_background_task tool (matches against task_id)
     pub get_background_task: ToolFilterConfig,
+    /// Filter patterns for spawn_agent tool (matches against task)
+    pub spawn_agent: ToolFilterConfig,
+    /// Filter patterns for list_agents tool (no params - use ".*" to auto-approve)
+    pub list_agents: ToolFilterConfig,
+    /// Filter patterns for get_agent tool (matches against agent_id)
+    pub get_agent: ToolFilterConfig,
 }
 
 #[cfg(feature = "cli")]
@@ -347,6 +353,9 @@ impl Default for ToolsConfig {
             web_search: ToolFilterConfig::default(),
             list_background_tasks: ToolFilterConfig::default(),
             get_background_task: ToolFilterConfig::default(),
+            spawn_agent: ToolFilterConfig::default(),
+            list_agents: ToolFilterConfig::default(),
+            get_agent: ToolFilterConfig::default(),
         }
     }
 }
@@ -364,6 +373,9 @@ impl ToolsConfig {
         map.insert(names::WEB_SEARCH.to_string(), self.web_search.clone());
         map.insert(names::LIST_BACKGROUND_TASKS.to_string(), self.list_background_tasks.clone());
         map.insert(names::GET_BACKGROUND_TASK.to_string(), self.get_background_task.clone());
+        map.insert(names::SPAWN_AGENT.to_string(), self.spawn_agent.clone());
+        map.insert(names::LIST_AGENTS.to_string(), self.list_agents.clone());
+        map.insert(names::GET_AGENT.to_string(), self.get_agent.clone());
         map
     }
 }

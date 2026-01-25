@@ -17,7 +17,7 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{oneshot, RwLock};
+use tokio::sync::RwLock;
 
 // =============================================================================
 // Agent Context - global state for spawning sub-agents
@@ -155,6 +155,8 @@ pub struct SpawnAgentTool;
 struct SpawnAgentParams {
     /// Description of the task for the sub-agent
     task: String,
+    /// Short label for the agent (1-2 hyphenated words, e.g. "code-review")
+    label: Option<String>,
     /// Optional context to provide to the sub-agent
     context: Option<String>,
 }
@@ -182,6 +184,10 @@ impl Tool for SpawnAgentTool {
                     "type": "string",
                     "description": "Clear description of what the sub-agent should accomplish"
                 },
+                "label": {
+                    "type": "string",
+                    "description": "Short label for the agent (1-2 hyphenated words, e.g. 'code-review', 'find-bugs')"
+                },
                 "context": {
                     "type": "string",
                     "description": "Optional context or background information for the sub-agent"
@@ -207,6 +213,7 @@ impl Tool for SpawnAgentTool {
             .await_approval()
             .then(SpawnAgentHandler {
                 task: parsed.task,
+                label: parsed.label,
                 task_context: parsed.context,
             })
     }
@@ -229,6 +236,7 @@ impl Tool for SpawnAgentTool {
 /// Returns immediately with agent_id - use list_agents/get_agent to check status.
 struct SpawnAgentHandler {
     task: String,
+    label: Option<String>,
     task_context: Option<String>,
 }
 
@@ -251,8 +259,8 @@ impl EffectHandler for SpawnAgentHandler {
             SUB_AGENT_PROMPT.to_string()
         };
 
-        // Create the sub-agent with read-only tools (for now)
-        // TODO: Consider allowing write tools with approval routing
+        // Create the sub-agent with full tool access
+        // Write tools (edit_file, write_file, shell) route approval to user
         let tools = ToolRegistry::subagent();
         let mut agent = Agent::new(
             ctx.runtime_config.clone(),
@@ -262,23 +270,14 @@ impl EffectHandler for SpawnAgentHandler {
         );
         agent.send_request(&self.task, RequestMode::Normal);
 
-        // Create label for display (truncate task)
-        let label = if self.task.len() > 30 {
-            format!("{}...", &self.task[..27])
-        } else {
-            self.task.clone()
-        };
-
-        // Create channel for result - App stores sender, we discard receiver
-        // (Agent result will be retrieved via get_agent tool)
-        let (result_sender, _result_receiver) = oneshot::channel();
+        // Use provided label or fall back to task
+        let label = self.label.unwrap_or_else(|| self.task.clone());
 
         // Delegate to App to register the agent
         // Returns "agent:{id}" - primary agent can use list_agents/get_agent
         Step::Delegate(Effect::SpawnAgent {
             agent,
             label,
-            result_sender,
         })
     }
 }

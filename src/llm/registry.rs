@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::Mutex;
 
 use super::agent::{Agent, AgentStep};
 
@@ -28,8 +28,6 @@ pub struct AgentMetadata {
     pub label: String,
     /// Parent agent that spawned this one
     pub parent_id: AgentId,
-    /// Channel to send result back to parent's tool pipeline
-    pub result_sender: Option<oneshot::Sender<String>>,
     /// When the agent was spawned
     pub created_at: Instant,
     /// Current status
@@ -69,25 +67,25 @@ impl AgentRegistry {
         agent: Agent,
         label: String,
         parent_id: AgentId,
-        result_sender: oneshot::Sender<String>,
     ) -> AgentId {
         let id = self.next_id;
         self.next_id += 1;
 
         self.agents.insert(id, Mutex::new(agent));
-        self.metadata.insert(id, AgentMetadata {
-            label,
-            parent_id,
-            result_sender: Some(result_sender),
-            created_at: Instant::now(),
-            status: AgentStatus::Running,
-        });
+        self.metadata.insert(
+            id,
+            AgentMetadata {
+                label,
+                parent_id,
+                created_at: Instant::now(),
+                status: AgentStatus::Running,
+            },
+        );
 
         id
     }
 
-    /// Remove an agent by ID
-    #[allow(dead_code)]
+    /// Remove an agent by ID (used for cleanup after get_agent retrieves result)
     pub fn remove(&mut self, id: AgentId) -> Option<Agent> {
         let agent = self.agents.remove(&id)?;
         self.metadata.remove(&id);
@@ -116,13 +114,10 @@ impl AgentRegistry {
         self.metadata.get_mut(&id)
     }
 
-    /// Mark agent as finished and extract result sender
-    pub fn finish(&mut self, id: AgentId) -> Option<oneshot::Sender<String>> {
+    /// Mark agent as finished
+    pub fn finish(&mut self, id: AgentId) {
         if let Some(meta) = self.metadata.get_mut(&id) {
             meta.status = AgentStatus::Finished;
-            meta.result_sender.take()
-        } else {
-            None
         }
     }
 
@@ -137,6 +132,22 @@ impl AgentRegistry {
     /// List all spawned agents with their status
     pub fn list_spawned(&self) -> Vec<(AgentId, &AgentMetadata)> {
         self.metadata.iter().map(|(&id, meta)| (id, meta)).collect()
+    }
+
+    /// Find a spawned agent by label
+    pub fn find_by_label(&self, label: &str) -> Option<AgentId> {
+        self.metadata
+            .iter()
+            .find(|(_, meta)| meta.label == label)
+            .map(|(&id, _)| id)
+    }
+
+    /// Count running background agents
+    pub fn running_background_count(&self) -> usize {
+        self.metadata
+            .values()
+            .filter(|meta| meta.status == AgentStatus::Running)
+            .count()
     }
 
     /// Get the primary agent ID
@@ -158,7 +169,8 @@ impl AgentRegistry {
             return None;
         }
 
-        let futures: FuturesUnordered<_> = self.agents
+        let futures: FuturesUnordered<_> = self
+            .agents
             .iter()
             .map(|(&id, agent_mutex)| async move {
                 let mut agent = agent_mutex.lock().await;

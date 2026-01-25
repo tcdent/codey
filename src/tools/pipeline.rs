@@ -19,8 +19,6 @@ use crate::llm::Agent;
 use crate::transcript::Block;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-#[cfg(feature = "cli")]
-use tokio::sync::oneshot;
 
 /// Result of calling an effect handler
 pub enum Step {
@@ -61,13 +59,10 @@ pub enum Effect {
 
     // === Sub-Agents ===
     /// Spawn a sub-agent. App registers it and polls through main loop.
-    /// Handler keeps the receiver, App stores the sender and sends result when agent completes.
     #[cfg(feature = "cli")]
     SpawnAgent {
         agent: Agent,
         label: String,
-        /// Sender for the agent's result (App stores this, handler keeps receiver)
-        result_sender: oneshot::Sender<String>,
     },
 
     // === Agent Management ===
@@ -76,7 +71,7 @@ pub enum Effect {
     ListAgents,
     /// Get result from a finished agent
     #[cfg(feature = "cli")]
-    GetAgent { agent_id: u32 },
+    GetAgent { label: String },
 }
 
 impl std::fmt::Debug for Effect {
@@ -119,9 +114,9 @@ impl std::fmt::Debug for Effect {
             #[cfg(feature = "cli")]
             Effect::ListAgents => f.write_str("ListAgents"),
             #[cfg(feature = "cli")]
-            Effect::GetAgent { agent_id } => {
+            Effect::GetAgent { label } => {
                 f.debug_struct("GetAgent")
-                    .field("agent_id", agent_id)
+                    .field("label", &label)
                     .finish()
             }
         }

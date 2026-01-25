@@ -415,7 +415,7 @@ impl App {
             .widget(
                 &self.config.agents.foreground.model,
                 context_tokens,
-                self.tool_executor.running_background_count(),
+                self.tool_executor.running_background_count() + self.agents.running_background_count(),
                 self.input_mode != InputMode::Normal,
             );
         let alert = self.alert.clone();
@@ -706,16 +706,21 @@ impl App {
 
     /// Handle a single agent step during streaming
     async fn handle_agent_step(&mut self, agent_id: AgentId, step: AgentStep) -> Result<()> {
+        let is_primary = self.agents.primary_id() == Some(agent_id);
+
         match step {
             AgentStep::TextDelta(text) => {
+                if !is_primary { return Ok(()); }
                 self.chat.transcript.stream_delta(BlockType::Text, &text);
             },
             AgentStep::CompactionDelta(text) => {
+                if !is_primary { return Ok(()); }
                 self.chat
                     .transcript
                     .stream_delta(BlockType::Compaction, &text);
             },
             AgentStep::ThinkingDelta(text) => {
+                if !is_primary { return Ok(()); }
                 self.chat
                     .transcript
                     .stream_delta(BlockType::Thinking, &text);
@@ -736,8 +741,6 @@ impl App {
                 tracing::warn!("Retrying request: attempt {}, error: {}", attempt, error);
             },
             AgentStep::Finished { usage } => {
-                let is_primary = self.agents.primary_id() == Some(agent_id);
-
                 if is_primary {
                     self.input_mode = InputMode::Normal;
 
@@ -779,29 +782,13 @@ impl App {
                         }
                     }
                 } else {
-                    // Sub-agent finished - extract result and send through channel
-                    let result = {
-                        if let Some(agent_mutex) = self.agents.get(agent_id) {
-                            let agent = agent_mutex.lock().await;
-                            agent.last_message().unwrap_or_default()
-                        } else {
-                            String::new()
-                        }
-                    };
-
-                    // Send result through the stored channel
-                    if let Some(sender) = self.agents.finish(agent_id) {
-                        let label = self.agents.metadata(agent_id)
-                            .map(|m| m.label.clone())
-                            .unwrap_or_default();
-                        tracing::info!(
-                            "Sub-agent {} ({}) finished, sending result ({} chars)",
-                            agent_id,
-                            label,
-                            result.len()
-                        );
-                        let _ = sender.send(result);
-                    }
+                    // Sub-agent finished - just mark as finished and log
+                    // Result will be retrieved via get_agent tool when primary agent requests it
+                    let label = self.agents.metadata(agent_id)
+                        .map(|m| m.label.clone())
+                        .unwrap_or_default();
+                    self.agents.finish(agent_id);
+                    tracing::info!("Sub-agent {} ({}) finished", agent_id, label);
                 }
             },
             AgentStep::Error(msg) => {
@@ -1183,11 +1170,10 @@ impl App {
             Effect::SpawnAgent {
                 agent,
                 label,
-                result_sender,
             } => {
                 // Register the agent - it will be polled through agents.next()
                 let parent_id = _agent_id;
-                let agent_id = self.agents.register_spawned(agent, label.clone(), parent_id, result_sender);
+                let agent_id = self.agents.register_spawned(agent, label.clone(), parent_id);
                 tracing::info!("Spawned sub-agent {} with label '{}'", agent_id, label);
                 // Return the agent ID so the handler knows what was spawned
                 Ok(Some(format!("agent:{}", agent_id)))
@@ -1199,11 +1185,12 @@ impl App {
                 } else {
                     let output = spawned
                         .iter()
-                        .map(|(id, meta)| {
+                        .enumerate()
+                        .map(|(i, (_, meta))| {
                             let elapsed = meta.created_at.elapsed().as_secs();
                             format!(
-                                "agent:{} ({}) [{:?}] {}s",
-                                id, meta.label, meta.status, elapsed
+                                "{}. {} [{:?}] {}s",
+                                i + 1, meta.label, meta.status, elapsed
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1211,34 +1198,42 @@ impl App {
                     Ok(Some(output))
                 }
             },
-            Effect::GetAgent { agent_id } => {
-                let meta = self.agents.metadata(agent_id);
-                match meta {
-                    Some(meta) => {
-                        let status_str = format!("{:?}", meta.status);
-                        if meta.status == AgentStatus::Finished {
-                            // Get the agent's last message
-                            if let Some(agent_mutex) = self.agents.get(agent_id) {
+            Effect::GetAgent { label } => {
+                // Find agent by label
+                let agent_id = match self.agents.find_by_label(&label) {
+                    Some(id) => id,
+                    None => return Ok(Some(format!("Agent '{}' not found", label))),
+                };
+
+                // Check status
+                let status = self.agents.metadata(agent_id)
+                    .map(|m| m.status.clone());
+
+                match status {
+                    Some(status) => {
+                        let status_str = format!("{:?}", status);
+                        if status == AgentStatus::Finished {
+                            // Get result and remove agent (consume on retrieval)
+                            let result = if let Some(agent_mutex) = self.agents.get(agent_id) {
                                 let agent = agent_mutex.lock().await;
-                                let result = agent.last_message().unwrap_or_default();
-                                Ok(Some(format!(
-                                    "agent:{} ({}) [{}]:\n{}",
-                                    agent_id, meta.label, status_str, result
-                                )))
+                                agent.last_message().unwrap_or_default()
                             } else {
-                                Ok(Some(format!(
-                                    "agent:{} ({}) [{}]: Agent not found",
-                                    agent_id, meta.label, status_str
-                                )))
-                            }
-                        } else {
+                                String::new()
+                            };
+                            self.agents.remove(agent_id);
                             Ok(Some(format!(
-                                "agent:{} ({}) [{}]",
-                                agent_id, meta.label, status_str
+                                "[{}] [{}]:\n{}",
+                                label, status_str, result
+                            )))
+                        } else {
+                            // Still running - just return status
+                            Ok(Some(format!(
+                                "[{}] [{}]",
+                                label, status_str
                             )))
                         }
                     }
-                    None => Ok(Some(format!("Agent {} not found", agent_id))),
+                    None => Ok(Some(format!("Agent '{}' not found", label))),
                 }
             },
         }
