@@ -2,7 +2,7 @@
 //!
 //! Executes tool pipelines with approval flow and streaming output.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -342,9 +342,11 @@ impl ToolExecutor {
         matches!(tool_call.decision, ToolDecision::Pending | ToolDecision::Approve)
     }
     
-    /// Check if any foreground tool is currently running
-    fn has_running_foreground(&self) -> bool {
-        self.active.values().any(|p| !p.background && p.status == Status::Running)
+    /// Check if a foreground tool is currently running for a specific agent
+    fn has_running_foreground_for_agent(&self, agent_id: AgentId) -> bool {
+        self.active.values().any(|p| 
+            p.agent_id == agent_id && !p.background && p.status == Status::Running
+        )
     }
     
     /// Count running background tasks
@@ -368,14 +370,23 @@ impl ToolExecutor {
         }
 
         // Start pending tools with these rules:
-        // - Foreground tools execute strictly in order (FIFO), one at a time
+        // - Foreground tools execute strictly in order (FIFO), one at a time per agent
         // - Background tools can start anytime, order not guaranteed
         
-        // Start one foreground tool if none is currently running
-        if !self.has_running_foreground() {
-            if let Some(idx) = self.pending.iter().position(|t| !t.background && Self::is_ready(t)) {
-                let tool_call = self.pending.remove(idx).unwrap();
-                self.start_tool(tool_call);
+        // Start one foreground tool per agent that doesn't already have one running
+        let fg_agent_ids: HashSet<_> = self.pending.iter()
+            .filter(|t| !t.background && Self::is_ready(t))
+            .map(|t| t.agent_id)
+            .collect();
+        
+        for agent_id in fg_agent_ids {
+            if !self.has_running_foreground_for_agent(agent_id) {
+                if let Some(idx) = self.pending.iter().position(|t| 
+                    t.agent_id == agent_id && !t.background && Self::is_ready(t)
+                ) {
+                    let tool_call = self.pending.remove(idx).unwrap();
+                    self.start_tool(tool_call);
+                }
             }
         }
         
@@ -1021,6 +1032,111 @@ mod tests {
         assert_eq!(completion_order.len(), 2, "Both tools should complete");
         assert_eq!(completion_order[0], "fg1", "Foreground should complete first");
         assert_eq!(completion_order[1], "bg1", "Background should complete second");
+    }
+
+    #[tokio::test]
+    async fn test_foreground_per_agent_lanes() {
+        // Foreground tools from different agents should run concurrently.
+        // Agent 0's slow foreground tool should NOT block agent 1's fast foreground tool.
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        // Agent 0: slow foreground tool (sleeps 0.1s)
+        // Agent 1: fast foreground tool (instant echo)
+        executor.enqueue(vec![
+            ToolCall {
+                agent_id: 0,
+                call_id: "agent0_slow".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "sleep 0.1 && echo agent0" }),
+                decision: ToolDecision::Approve,
+                background: false,
+            },
+            ToolCall {
+                agent_id: 1,
+                call_id: "agent1_fast".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo agent1" }),
+                decision: ToolDecision::Approve,
+                background: false,
+            },
+        ]);
+
+        // Collect events and track completion order
+        let mut completion_order: Vec<String> = vec![];
+        
+        while let Some(event) = executor.next().await {
+            if let ToolEvent::Completed { call_id, .. } = &event {
+                completion_order.push(call_id.clone());
+            }
+        }
+        
+        // Agent 1's fast tool should complete before agent 0's slow tool
+        assert_eq!(completion_order.len(), 2, "Both tools should complete");
+        assert_eq!(completion_order[0], "agent1_fast", 
+            "Agent 1's fast foreground should complete first (not blocked by agent 0)");
+        assert_eq!(completion_order[1], "agent0_slow", 
+            "Agent 0's slow foreground should complete second");
+    }
+
+    #[tokio::test]
+    async fn test_foreground_fifo_within_agent() {
+        // Foreground tools within the SAME agent should still be FIFO.
+        // This ensures per-agent lanes don't break intra-agent ordering.
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        // Agent 0: two foreground tools, first one sleeps
+        // Agent 1: one foreground tool (to prove cross-agent concurrency still works)
+        executor.enqueue(vec![
+            ToolCall {
+                agent_id: 0,
+                call_id: "agent0_first".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "sleep 0.05 && echo first" }),
+                decision: ToolDecision::Approve,
+                background: false,
+            },
+            ToolCall {
+                agent_id: 0,
+                call_id: "agent0_second".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo second" }),
+                decision: ToolDecision::Approve,
+                background: false,
+            },
+            ToolCall {
+                agent_id: 1,
+                call_id: "agent1_tool".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo agent1" }),
+                decision: ToolDecision::Approve,
+                background: false,
+            },
+        ]);
+
+        let mut completion_order: Vec<String> = vec![];
+        
+        while let Some(event) = executor.next().await {
+            if let ToolEvent::Completed { call_id, .. } = &event {
+                completion_order.push(call_id.clone());
+            }
+        }
+        
+        assert_eq!(completion_order.len(), 3, "All three tools should complete");
+        
+        // Agent 1 should complete first (instant, runs concurrently)
+        assert_eq!(completion_order[0], "agent1_tool",
+            "Agent 1's tool should complete first (concurrent with agent 0)");
+        
+        // Agent 0's tools should complete in FIFO order (first before second)
+        let agent0_order: Vec<_> = completion_order.iter()
+            .filter(|id| id.starts_with("agent0"))
+            .collect();
+        assert_eq!(agent0_order, vec!["agent0_first", "agent0_second"],
+            "Agent 0's foreground tools should complete in FIFO order");
     }
 
     #[tokio::test]

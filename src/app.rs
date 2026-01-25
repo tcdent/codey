@@ -958,6 +958,7 @@ impl App {
                                 }
                             }
                             self.input_mode = InputMode::ToolApproval;
+                            self.draw();
                         },
                     }
                 }
