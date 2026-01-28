@@ -9,6 +9,7 @@
 //! - Only one approval can be shown at a time
 //! - Only one IDE preview can be active at a time
 //! - Effects are polled until ready
+#![allow(dead_code)]
 
 #[cfg(feature = "cli")]
 use std::collections::{HashSet, VecDeque};

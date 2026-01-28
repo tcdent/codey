@@ -10,6 +10,7 @@
 //!
 //! - `OPENROUTER_API_KEY` - Required for OpenRouter models
 //! - `ANTHROPIC_API_KEY` - Required for native Anthropic models
+#![allow(dead_code)]
 
 use genai::adapter::AdapterKind;
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};

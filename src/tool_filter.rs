@@ -27,6 +27,7 @@
 //! 1. If any deny pattern matches → `Some(ToolDecision::Deny)`
 //! 2. If any allow pattern matches → `Some(ToolDecision::Approve)`
 //! 3. Otherwise → `None` (prompt user)
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 

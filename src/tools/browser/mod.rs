@@ -27,6 +27,7 @@
 //! 3. **Keychain Access**: chromiumoxide's default args include `--password-store=basic` and
 //!    `--use-mock-keychain`, which tell Chrome to use a mock keychain instead of the real one.
 //!    This breaks cookie decryption! We must disable these defaults when using a profile.
+#![allow(dead_code)]
 
 use std::fs;
 use std::path::Path;

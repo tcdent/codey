@@ -137,6 +137,7 @@ impl EffectHandler for Output {
 }
 
 /// Emit streaming delta
+#[allow(dead_code)]
 pub struct Delta {
     pub content: String,
 }

@@ -174,6 +174,7 @@ impl TextBlock {
         }
     }
 
+    #[allow(dead_code)]
     pub fn pending(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
@@ -181,6 +182,7 @@ impl TextBlock {
         }
     }
 
+    #[allow(dead_code)]
     pub fn complete(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),

@@ -13,15 +13,17 @@
 //! The app holds an `Option<Box<dyn Ide>>` and calls these methods at appropriate
 //! points in the tool execution flow. Tools can define what previews they produce
 //! and what actions they need after execution.
+#![allow(dead_code)]
 
 #[cfg(feature = "cli")]
 pub mod nvim;
+#[cfg(feature = "cli")]
+#[allow(unused_imports)]
+pub use nvim::Nvim;
 
 use anyhow::Result;
 use async_trait::async_trait;
 
-#[cfg(feature = "cli")]
-pub use nvim::Nvim;
 
 // ============================================================================
 // Core Types

@@ -16,6 +16,7 @@ mod io;
 mod pipeline;
 
 /// Tool name constants (always available for configuration)
+#[allow(dead_code)]
 pub mod names {
     pub const READ_FILE: &str = "mcp_read_file";
     pub const WRITE_FILE: &str = "mcp_write_file";
@@ -35,20 +36,30 @@ pub mod names {
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub use crate::effect::EffectResult;
-pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
+pub use exec::{ToolCall, ToolDecision};
 #[cfg(feature = "cli")]
+#[allow(unused_imports)]
+pub use exec::{ToolEvent, ToolExecutor};
+#[cfg(feature = "cli")]
+#[allow(unused_imports)]
 pub use impls::{
-    init_agent_context, update_agent_oauth, EditFileTool, FetchHtmlTool, FetchUrlTool,
+    EditFileTool, FetchHtmlTool, FetchUrlTool,
     GetAgentTool, GetBackgroundTaskTool, ListAgentsTool, ListBackgroundTasksTool, OpenFileTool,
     ReadFileTool, ShellTool, SpawnAgentTool, WebSearchTool, WriteFileTool,
 };
+pub use pipeline::{Tool, ToolPipeline};
 #[cfg(feature = "cli")]
+#[allow(unused_imports)]
 pub use browser::init_browser_context;
-pub use pipeline::{Effect, Step, Tool, ToolPipeline};
+#[cfg(feature = "cli")]
+#[allow(unused_imports)]
+pub use crate::effect::EffectResult;
+#[cfg(feature = "cli")]
+#[allow(unused_imports)]
+pub use impls::{init_agent_context, update_agent_oauth};
 
 #[cfg(feature = "cli")]
-use crate::transcript::{Block, BlockType, ToolBlock};
+use crate::transcript::{Block, ToolBlock};
 
 /// A simple tool definition for library users.
 ///
@@ -81,12 +92,14 @@ use crate::transcript::{Block, BlockType, ToolBlock};
 /// let mut tools = ToolRegistry::empty();
 /// tools.register(Arc::new(weather_tool));
 /// ```
+#[allow(dead_code)]
 pub struct SimpleTool {
     name: &'static str,
     description: &'static str,
     schema: serde_json::Value,
 }
 
+#[allow(dead_code)]
 impl SimpleTool {
     /// Create a new simple tool definition.
     ///
@@ -179,6 +192,7 @@ impl ToolRegistry {
     }
 
     #[cfg(feature = "cli")]
+    #[allow(dead_code)]
     pub fn read_only() -> Self {
         let mut registry = Self {
             tools: HashMap::new(),
@@ -194,6 +208,7 @@ impl ToolRegistry {
         registry
     }
 
+    #[allow(dead_code)]
     pub fn empty() -> Self {
         Self {
             tools: HashMap::new(),
@@ -211,6 +226,7 @@ impl ToolRegistry {
             .expect("unknown tool")
     }
 
+    #[allow(dead_code)]
     pub fn get_arc(&self, name: &str) -> Arc<dyn Tool> {
         self.tools
             .get(name)

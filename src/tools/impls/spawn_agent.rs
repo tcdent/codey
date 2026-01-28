@@ -1,4 +1,5 @@
 //! Spawn agent tool for creating sub-agents
+#![allow(dead_code)]
 
 use std::sync::OnceLock;
 

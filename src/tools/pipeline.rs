@@ -25,6 +25,7 @@ pub enum Step {
     /// Set pipeline output
     Output(String),
     /// Emit streaming content
+    #[allow(dead_code)]
     Delta(String),
     /// Delegate effect to app layer
     Delegate(Effect),

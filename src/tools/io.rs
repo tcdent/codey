@@ -14,6 +14,7 @@ use tokio::process::Command;
 #[derive(Debug)]
 pub struct ShellResult {
     pub output: String,
+    #[allow(dead_code)]
     pub exit_code: i32,
     pub success: bool,
 }

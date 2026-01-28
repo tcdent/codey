@@ -1,4 +1,5 @@
 //! OAuth authentication for Anthropic API (Claude Max)
+#![allow(dead_code)]
 
 use std::path::PathBuf;
 
