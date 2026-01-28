@@ -4,7 +4,8 @@ set -euo pipefail
 PATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$(dirname "$(dirname "$PATCH_DIR")")"
 OUTPUT_DIR="$LIB_DIR/genai"
-GENAI_TAG="v0.4.4"
+# Use 0.5.1 release as base (latest stable)
+GENAI_TAG="v0.5.1"
 
 [ -d "$OUTPUT_DIR" ] && rm -rf "$OUTPUT_DIR"
 
@@ -17,10 +18,11 @@ git clone --depth 1 --branch "$GENAI_TAG" --quiet \
 cp -r "$TEMP_DIR/genai" "$OUTPUT_DIR"
 
 echo "Applying patches..."
-# patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/anthropic-extra-headers.patch"
-patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/thinking-blocks-tool-use.patch"
-patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/empty-tool-arguments.patch"
-patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/openai-tool-call-index.patch"
+# Thinking blocks with signatures for extended thinking + tool use
+patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/thinking-blocks-signatures.patch"
+
+# OAuth support for Authorization header detection
+patch -d "$OUTPUT_DIR" -p1 -s < "$PATCH_DIR/oauth-support.patch"
 
 touch "$OUTPUT_DIR/.patched"
 echo "Done."
