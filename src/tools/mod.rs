@@ -12,7 +12,7 @@ pub mod browser;
 pub mod handlers;
 #[cfg(feature = "cli")]
 mod impls;
-mod io;
+pub mod io;
 mod pipeline;
 
 /// Tool name constants (always available for configuration)

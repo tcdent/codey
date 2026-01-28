@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "cli")]
 use crate::compaction::CompactionBlock;
 use crate::config::{CODEY_DIR, TRANSCRIPTS_DIR};
+#[cfg(feature = "cli")]
+use crate::tools::io::{format_for_user, DEFAULT_TAB_WIDTH};
 
 
 /// Role of the message sender
@@ -392,8 +394,9 @@ pub fn render_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let preview_lines: Vec<&str> = result.lines().take(max_lines).collect();
     for line in &preview_lines {
+        let formatted = format_for_user(line, DEFAULT_TAB_WIDTH);
         lines.push(Line::from(Span::styled(
-            format!("  {}", line),
+            format!("  {}", formatted),
             Style::default().fg(Color::DarkGray),
         )));
     }

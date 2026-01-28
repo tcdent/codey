@@ -33,6 +33,25 @@ pub struct SearchResult {
     pub url: String,
 }
 
+/// Default tab width for user display
+pub const DEFAULT_TAB_WIDTH: usize = 4;
+
+/// Format text for the agent (LLM)
+/// 
+/// Converts tabs to literal `\t` escape sequences so the agent can see
+/// and correctly reproduce them in edits.
+pub fn format_for_agent(text: &str) -> String {
+    text.replace('\t', "\\t")
+}
+
+/// Format text for user display in the terminal
+/// 
+/// Expands escaped `\t` sequences to spaces based on tab_width for proper visual alignment.
+pub fn format_for_user(text: &str, tab_width: usize) -> String {
+    let spaces: String = " ".repeat(tab_width);
+    text.replace("\\t", &spaces)
+}
+
 /// Read a file and format with line numbers
 ///
 /// If `start_line` and/or `end_line` are provided, only the specified line range is returned.
@@ -85,7 +104,7 @@ pub fn read_file(
         output.push_str(&format!(
             "{:>width$}│{}\n",
             i + 1, // Line numbers are 1-indexed
-            line,
+            format_for_agent(line),
             width = line_num_width
         ));
     }
