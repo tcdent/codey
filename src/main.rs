@@ -3,6 +3,7 @@ mod auth;
 mod commands;
 mod compaction;
 mod config;
+mod effect;
 mod ide;
 mod llm;
 #[cfg(feature = "profiling")]

@@ -10,6 +10,7 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use tokio::sync::oneshot;
 
+use crate::effect::EffectResult;
 use crate::llm::AgentId;
 use crate::transcript::Status;
 use crate::tools::pipeline::{Effect, Step, ToolPipeline};
@@ -36,12 +37,6 @@ fn poll_receiver<T>(rx: &mut oneshot::Receiver<T>) -> Poll<Result<T, oneshot::er
 // Types
 // =============================================================================
 
-/// Result of executing a delegated effect
-/// Ok(None) = success, continue pipeline
-/// Ok(Some(output)) = success, set this as pipeline output
-/// Err(msg) = failure, abort pipeline
-pub type EffectResult = Result<Option<String>, String>;
-
 /// What an active pipeline is waiting for (mutually exclusive states)
 enum WaitingFor {
     /// Not waiting - ready to execute next step
@@ -50,8 +45,8 @@ enum WaitingFor {
     Handler(oneshot::Receiver<Step>),
     /// Waiting for delegated effect to complete
     Effect(oneshot::Receiver<EffectResult>),
-    /// Waiting for user approval
-    Approval(oneshot::Receiver<ToolDecision>),
+    /// Waiting for user approval (Ok = approved, Err = denied)
+    Approval(oneshot::Receiver<EffectResult>),
 }
 
 /// A tool call pending execution
@@ -86,18 +81,7 @@ pub enum ToolDecision {
 /// Events emitted by the tool executor
 #[derive(Debug)]
 pub enum ToolEvent {
-    /// Tool needs user approval
-    AwaitingApproval {
-        agent_id: AgentId,
-        call_id: String,
-        name: String,
-        params: serde_json::Value,
-        /// If true, tool will run in background after approval
-        background: bool,
-        /// Send decision back to executor
-        responder: oneshot::Sender<ToolDecision>,
-    },
-    /// Effect delegated to app (IDE, agents, etc)
+    /// Effect delegated to app (IDE, agents, approvals, etc)
     Delegate {
         agent_id: AgentId,
         call_id: String,
@@ -172,21 +156,6 @@ impl ToolEvent {
                 agent_id: active.agent_id,
                 call_id: active.call_id.clone(),
                 effect,
-                responder: tx,
-            },
-            rx,
-        )
-    }
-
-    fn awaiting_approval(active: &ActivePipeline) -> (Self, oneshot::Receiver<ToolDecision>) {
-        let (tx, rx) = oneshot::channel();
-        (
-            Self::AwaitingApproval {
-                agent_id: active.agent_id,
-                call_id: active.call_id.clone(),
-                name: active.name.clone(),
-                params: active.params.clone(),
-                background: active.background,
                 responder: tx,
             },
             rx,
@@ -566,7 +535,8 @@ impl ToolExecutor {
                 let poll_result = poll_receiver(&mut rx);
                 
                 match poll_result {
-                    Poll::Ready(Ok(ToolDecision::Approve)) => {
+                    Poll::Ready(Ok(Ok(_))) => {
+                        // Approved - continue pipeline
                         // For background tools, emit BackgroundStarted now
                         if active.background {
                             Some(ToolEvent::BackgroundStarted {
@@ -578,18 +548,15 @@ impl ToolExecutor {
                             None
                         }
                     },
-                    Poll::Ready(Ok(ToolDecision::Deny)) => {
+                    Poll::Ready(Ok(Err(reason))) => {
+                        // Denied - skip to finally
                         active.pipeline.skip_to_finally();
                         active.set_denied();
                         Some(ToolEvent::Error {
                             agent_id: active.agent_id,
                             call_id: active.call_id.clone(),
-                            content: "Denied by user".to_string(),
+                            content: reason,
                         })
-                    },
-                    Poll::Ready(Ok(_)) => {
-                        tracing::warn!("poll_waiting: unexpected approval decision");
-                        None
                     },
                     Poll::Ready(Err(_)) => {
                         tracing::warn!("poll_waiting: approval channel dropped");
@@ -683,7 +650,13 @@ impl ToolExecutor {
                         None  // Continue to next step
                     }
                 } else {
-                    let (event, rx) = ToolEvent::awaiting_approval(active);
+                    // Delegate approval to app via Effect::AwaitApproval
+                    let effect = Effect::AwaitApproval {
+                        name: active.name.clone(),
+                        params: active.params.clone(),
+                        background: active.background,
+                    };
+                    let (event, rx) = ToolEvent::delegate(active, effect);
                     active.waiting = WaitingFor::Approval(rx);
                     Some(event)
                 }
@@ -1166,19 +1139,19 @@ mod tests {
             },
         ]);
 
-        // First event should be AwaitingApproval for fg1
+        // First event should be Delegate with AwaitApproval for fg1
         let event1 = executor.next().await.unwrap();
         let responder = match event1 {
-            ToolEvent::AwaitingApproval { call_id, responder, .. } => {
+            ToolEvent::Delegate { call_id, effect: Effect::AwaitApproval { .. }, responder, .. } => {
                 assert_eq!(call_id, "fg1");
                 responder
             }
-            other => panic!("Expected AwaitingApproval for fg1, got {:?}", other),
+            other => panic!("Expected Delegate/AwaitApproval for fg1, got {:?}", other),
         };
 
         // fg2 should NOT have started yet (no events available without blocking)
         // Approve fg1
-        responder.send(ToolDecision::Approve).unwrap();
+        responder.send(Ok(None)).unwrap();  // Approve
 
         // Now collect remaining events
         let events = collect_events(&mut executor).await;
@@ -1221,17 +1194,17 @@ mod tests {
         // Get approval request for fg1
         let event1 = executor.next().await.unwrap();
         let responder1 = match event1 {
-            ToolEvent::AwaitingApproval { call_id, responder, .. } => {
+            ToolEvent::Delegate { call_id, effect: Effect::AwaitApproval { .. }, responder, .. } => {
                 assert_eq!(call_id, "fg1");
                 responder
             }
-            other => panic!("Expected AwaitingApproval for fg1, got {:?}", other),
+            other => panic!("Expected Delegate/AwaitApproval for fg1, got {:?}", other),
         };
 
         // Deny fg1
-        responder1.send(ToolDecision::Deny).unwrap();
+        responder1.send(Err("Denied by user".to_string())).unwrap();
 
-        // Should get Error for fg1, then AwaitingApproval for fg2
+        // Should get Error for fg1, then Delegate/AwaitApproval for fg2
         let mut saw_fg1_error = false;
         let mut saw_fg2_approval = false;
         let mut responder2 = None;
@@ -1241,7 +1214,7 @@ mod tests {
                 ToolEvent::Error { call_id, .. } if call_id == "fg1" => {
                     saw_fg1_error = true;
                 }
-                ToolEvent::AwaitingApproval { call_id, responder, .. } if call_id == "fg2" => {
+                ToolEvent::Delegate { call_id, effect: Effect::AwaitApproval { .. }, responder, .. } if call_id == "fg2" => {
                     saw_fg2_approval = true;
                     responder2 = Some(responder);
                     break; // Got what we need
@@ -1254,7 +1227,7 @@ mod tests {
         assert!(saw_fg2_approval, "fg2 should get approval request after fg1 denied");
         
         // Approve fg2 and verify it completes
-        responder2.unwrap().send(ToolDecision::Approve).unwrap();
+        responder2.unwrap().send(Ok(None)).unwrap();  // Approve
         let events = collect_events(&mut executor).await;
         
         let fg2_completed = events.iter().any(|e| {
@@ -1289,7 +1262,7 @@ mod tests {
             },
         ]);
 
-        // Should get both: AwaitingApproval for fg1 AND BackgroundStarted for bg1
+        // Should get both: Delegate/AwaitApproval for fg1 AND BackgroundStarted for bg1
         let mut saw_fg1_approval = false;
         let mut saw_bg1_started = false;
         let mut responder = None;
@@ -1298,7 +1271,7 @@ mod tests {
         for _ in 0..5 {
             if let Some(event) = executor.next().await {
                 match event {
-                    ToolEvent::AwaitingApproval { call_id, responder: r, .. } if call_id == "fg1" => {
+                    ToolEvent::Delegate { call_id, effect: Effect::AwaitApproval { .. }, responder: r, .. } if call_id == "fg1" => {
                         saw_fg1_approval = true;
                         responder = Some(r);
                     }
@@ -1316,7 +1289,7 @@ mod tests {
         
         // Cleanup: approve fg1 so test exits cleanly
         if let Some(r) = responder {
-            let _ = r.send(ToolDecision::Approve);
+            let _ = r.send(Ok(None));  // Approve
         }
     }
 }

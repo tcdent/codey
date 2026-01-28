@@ -8,6 +8,76 @@ The current effect handling has two issues:
 
 2. **Duplicate patterns**: `pending_approvals` and `pending_ide_slots` are similar queue structures that track responders waiting for some condition. This suggests a more generic abstraction.
 
+## Implementation Progress
+
+### Completed
+
+1. **Unified responder type**: Changed `ToolEvent::AwaitingApproval` to use `EffectResult` instead of `ToolDecision`
+   - `ToolDecision::Approve` → `Ok(None)`
+   - `ToolDecision::Deny` → `Err("Denied by user")`
+   - Updated `WaitingFor::Approval` in exec.rs to use `EffectResult`
+   - Updated executor's `poll_waiting` to handle `Ok(_)` as approve, `Err(_)` as deny
+   - Updated tests in exec.rs
+
+2. **Added new types to app.rs**:
+   - `Resource` enum: `ApprovalSlot`, `IdePreview`
+   - `EffectPoll` enum: `Ready(Result<Option<String>>)`, `Pending`
+   - `PendingEffect` struct: `call_id`, `agent_id`, `effect`, `responder`, `decision`
+
+3. **Added `Effect::AwaitApproval`** to pipeline.rs:
+   ```rust
+   Effect::AwaitApproval {
+       name: String,
+       params: serde_json::Value,
+       background: bool,
+   }
+   ```
+
+4. **Converted App struct**:
+   - Replaced `pending_approvals: VecDeque<(ToolCall, oneshot::Sender<ToolDecision>)>`
+   - With `pending_effects: VecDeque<PendingEffect>`
+
+5. **Updated `ToolEvent::AwaitingApproval` handler**:
+   - Creates `PendingEffect` with `Effect::AwaitApproval`
+   - Queues in `pending_effects`
+   - Checks for first approval using `iter().any()`
+
+6. **Updated `decide_pending_tool`**:
+   - Finds first approval in `pending_effects` using `iter().position()`
+   - Removes it and sends `EffectResult` via responder
+   - Activates next approval if present
+
+### Completed (continued)
+
+7. **Implemented `poll_pending_effects()`**:
+   - Drains pending_effects queue and processes each
+   - Tracks resource exclusivity (only poll first effect for each Resource)
+   - Approval effects stay in queue until user decides
+   - IDE preview effects use `try_claim_preview()` - return Pending if slot unavailable
+   - Completed effects send result via responder and are removed
+
+8. **Implemented `try_execute_effect()`**:
+   - Handles all effect types
+   - IDE preview effects check slot availability first
+   - Other effects execute immediately and return Ready
+
+9. **Added polling to main event loop**:
+   - `poll_pending_effects()` called after each event in the select! loop
+   - No timer needed - events naturally trigger polling
+
+10. **Converted `ToolEvent::Delegate` handler**:
+    - Now queues effects in `pending_effects` instead of executing immediately
+    - Effects processed via polling mechanism
+
+### Future Improvements
+
+1. **Consider removing `ToolEvent::AwaitingApproval`** entirely:
+   - Could be replaced with `ToolEvent::Delegate` + `Effect::AwaitApproval`
+   - Requires executor changes
+
+2. **Co-locate response types with Effect variants**:
+   - Make PendingEffect truly generic by having response type live on Effect struct
+
 ## Current Architecture
 
 ### Effects
@@ -252,6 +322,12 @@ Effect::AwaitApproval { tool_call } => {
 4. **Ordering**: Within a resource, should effects be strictly FIFO, or could priority matter?
 
 5. **Multiple resources**: Could an effect need multiple resources? (Probably not, but worth considering)
+
+6. **Response type co-location**: The response type should be associated with the Effect itself, making PendingEffect truly generic. Currently approvals use `ToolDecision` while other effects use `EffectResult`. Ideally, each Effect variant would declare its own response type, and PendingEffect would be generic over this. Possible approaches:
+   - Associated types on an Effect trait
+   - Generic `PendingEffect<R>` with type erasure for storage
+   - Effect variants carry their own responder internally
+   - Unify all responses to a single type with semantic conversion
 
 ## Related Files
 

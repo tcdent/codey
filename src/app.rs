@@ -14,10 +14,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     Terminal, TerminalOptions, Viewport,
 };
-use tokio::sync::oneshot;
 
 use crate::commands::Command;
 use crate::config::{AgentRuntimeConfig, Config};
+use crate::effect::{Effect, EffectPoll, EffectQueue, PendingEffect};
 use crate::ide::{Ide, IdeEvent, Nvim};
 use crate::llm::{Agent, AgentId, AgentRegistry, AgentStatus, AgentStep, RequestMode};
 #[cfg(feature = "profiling")]
@@ -25,8 +25,8 @@ use crate::{profile_frame, profile_span};
 use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, WELCOME_MESSAGE};
 use crate::tool_filter::ToolFilters;
 use crate::tools::{
-    init_agent_context, init_browser_context, update_agent_oauth, Effect, ToolCall, ToolDecision, ToolEvent,
-    ToolExecutor, ToolRegistry,
+    init_agent_context, init_browser_context, update_agent_oauth, EffectResult,
+    ToolDecision, ToolEvent, ToolExecutor, ToolRegistry,
 };
 use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
 use crate::ui::{Attachment, ChatView, InputBox};
@@ -193,8 +193,8 @@ pub struct App {
     tool_executor: ToolExecutor,
     /// OAuth credentials for agent creation
     oauth: Option<crate::auth::OAuthCredentials>,
-    /// Queue of tools awaiting approval - front is currently displayed
-    pending_approvals: VecDeque<(ToolCall, oneshot::Sender<ToolDecision>)>,
+    /// Queue for pending effects (approvals, IDE previews, etc.)
+    effects: EffectQueue,
 }
 
 impl App {
@@ -303,7 +303,7 @@ impl App {
             agents: AgentRegistry::new(),
             tool_executor: ToolExecutor::new(ToolRegistry::new()),
             oauth: None,
-            pending_approvals: VecDeque::new(),
+            effects: EffectQueue::new(),
         })
     }
 
@@ -368,6 +368,14 @@ impl App {
                 // Handle queued messages when in normal input mode
                 Some(request) = async { self.message_queue.pop_front() }, if self.input_mode == InputMode::Normal => {
                     self.handle_message(request).await?;
+                }
+                // Handle pending effects (IDE previews waiting for slot, etc.)
+                _ = std::future::ready(()), if self.effects.has_pollable() => {
+                    if let Some(pending) = self.effects.poll_next() {
+                        self.handle_pending_effect(pending).await;
+                        // Ensure UI is updated after handling effects (especially for background agent approvals)
+                        self.draw();
+                    }
                 }
             }
 
@@ -816,13 +824,188 @@ impl App {
         Ok(())
     }
 
+    /// Handle a pending effect - execute it and either complete or re-queue.
+    async fn handle_pending_effect(&mut self, mut pending: PendingEffect) {
+        // Special handling for approval effects
+        if let Effect::AwaitApproval { ref name, ref params, background } = pending.effect {
+            if !pending.acknowledged {
+                // Clone values before mutating pending
+                let call_id = pending.call_id.clone();
+                let agent_id = pending.agent_id;
+                let name = name.clone();
+                let params = params.clone();
+                
+                // Mark as acknowledged and requeue BEFORE showing UI
+                // This is needed because acknowledge_approval may auto-decide,
+                // which calls decide_pending_tool, which looks for the effect in the queue
+                pending.acknowledge();
+                self.effects.requeue(pending);
+                
+                // Now show approval UI (may auto-decide)
+                self.acknowledge_approval(&call_id, agent_id, &name, params, background).await;
+                return;
+            }
+            // Already acknowledged - stays in queue waiting for user input
+            self.effects.requeue(pending);
+            return;
+        }
+        
+        // IDE preview effects need polling (resource contention)
+        if matches!(pending.effect, Effect::IdeShowPreview { .. } | Effect::IdeShowDiffPreview { .. }) {
+            let poll_result = self.try_execute_effect(&pending.effect).await;
+            match poll_result {
+                EffectPoll::Ready(result) => {
+                    pending.complete(result.map_err(|e: anyhow::Error| e.to_string()));
+                }
+                EffectPoll::Pending => {
+                    self.effects.requeue(pending);
+                }
+            }
+            return;
+        }
+        
+        // All other effects execute immediately
+        let PendingEffect { agent_id, effect, responder, .. } = pending;
+        let result = self.apply_effect(agent_id, effect).await;
+        let _ = responder.send(result.map_err(|e| e.to_string()));
+    }
+    
+    /// Show approval UI for an effect (create block, check filters, set mode)
+    async fn acknowledge_approval(
+        &mut self,
+        call_id: &str,
+        agent_id: AgentId,
+        name: &str,
+        params: serde_json::Value,
+        background: bool,
+    ) {
+        let is_primary = self.agents.primary_id() == Some(agent_id);
+        
+        // Get agent label for sub-agents
+        let agent_label = if !is_primary {
+            self.agents.metadata(agent_id).map(|m| m.label.clone())
+        } else {
+            None
+        };
+        
+        self.draw(); // flush any pending text
+        let tool = self.tool_executor.tools().get(name);
+        let mut block = tool.create_block(call_id, params.clone(), background);
+        
+        // Set agent label for sub-agent tools
+        if let Some(ref label) = agent_label {
+            tracing::info!("Sub-agent '{}' requesting approval for {}", label, name);
+            block.set_agent_label(label.clone());
+        }
+        
+        self.chat.start_block(block, &mut self.terminal);
+        self.draw();
+        
+        // Check filters for auto-approve/deny
+        match self.tool_filters.evaluate(name, &params) {
+            Some(decision) => {
+                self.decide_pending_tool(decision).await;
+            }
+            None => {
+                // Wait for user approval
+                if is_primary {
+                    if let Err(e) = self.chat.transcript.save() {
+                        tracing::error!("Failed to save transcript before tool approval: {}", e);
+                    }
+                }
+                self.input_mode = InputMode::ToolApproval;
+                self.draw();
+            }
+        }
+    }
+    
+    /// Try to execute an IDE preview effect. Returns Ready if completed, Pending if slot not available.
+    /// Only handles IdeShowPreview and IdeShowDiffPreview - all other effects go through apply_effect.
+    async fn try_execute_effect(&mut self, effect: &Effect) -> EffectPoll {
+        match effect {
+            Effect::IdeShowPreview { preview } => {
+                if let Some(ide) = &self.ide {
+                    match ide.try_claim_preview().await {
+                        Ok(true) => {
+                            match ide.show_preview(preview).await {
+                                Ok(_) => EffectPoll::Ready(Ok(None)),
+                                Err(e) => EffectPoll::Ready(Err(e)),
+                            }
+                        }
+                        Ok(false) => EffectPoll::Pending,
+                        Err(e) => EffectPoll::Ready(Err(e)),
+                    }
+                } else {
+                    EffectPoll::Ready(Ok(None))
+                }
+            }
+            
+            Effect::IdeShowDiffPreview { path, edits } => {
+                if let Some(ide) = &self.ide {
+                    match ide.try_claim_preview().await {
+                        Ok(true) => {
+                            match ide.show_diff_preview(&path.to_string_lossy(), edits).await {
+                                Ok(_) => EffectPoll::Ready(Ok(None)),
+                                Err(e) => EffectPoll::Ready(Err(e)),
+                            }
+                        }
+                        Ok(false) => EffectPoll::Pending,
+                        Err(e) => EffectPoll::Ready(Err(e)),
+                    }
+                } else {
+                    EffectPoll::Ready(Ok(None))
+                }
+            }
+            
+            // All other effects should go through apply_effect, not here
+            _ => EffectPoll::Ready(Err(anyhow::anyhow!(
+                "Effect {:?} should not be polled - use apply_effect", effect
+            ))),
+        }
+    }
+    
+    /// Get output from an agent by label (for GetAgent effect)
+    #[cfg(feature = "cli")]
+    async fn get_agent_output(&mut self, label: &str) -> String {
+        // Find agent by label
+        let agent_id = match self.agents.find_by_label(label) {
+            Some(id) => id,
+            None => return format!("Agent '{}' not found", label),
+        };
+
+        // Check status
+        let status = self.agents.metadata(agent_id)
+            .map(|m| m.status.clone());
+
+        match status {
+            Some(status) => {
+                let status_str = format!("{:?}", status);
+                if status == AgentStatus::Finished {
+                    // Get result and remove agent (consume on retrieval)
+                    let result = if let Some(agent_mutex) = self.agents.get(agent_id) {
+                        let agent = agent_mutex.lock().await;
+                        agent.last_message().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    self.agents.remove(agent_id);
+                    format!("[{}] [{}]:\n{}", label, status_str, result)
+                } else {
+                    // Still running - just return status
+                    format!("[{}] [{}]", label, status_str)
+                }
+            }
+            None => format!("Agent '{}' status unknown", label),
+        }
+    }
+
     /// Execute a tool decision (approve/deny) for the currently active tool
     async fn decide_pending_tool(&mut self, decision: ToolDecision) {
         tracing::debug!("decide_pending_tool: decision={:?}", decision);
 
-        // Pop the front of the queue (the currently displayed tool)
-        let (tool_call, responder) = match self.pending_approvals.pop_front() {
-            Some(t) => t,
+        // Take the currently active approval
+        let pending = match self.effects.take_active_approval() {
+            Some(p) => p,
             None => {
                 tracing::warn!("No tool awaiting approval");
                 return;
@@ -830,7 +1013,7 @@ impl App {
         };
 
         // Update block status based on decision
-        if let Some(block) = self.chat.transcript.find_tool_block_mut(&tool_call.call_id) {
+        if let Some(block) = self.chat.transcript.find_tool_block_mut(&pending.call_id) {
             block.set_status(match decision {
                 ToolDecision::Approve => Status::Running,
                 ToolDecision::Deny => Status::Denied,
@@ -838,39 +1021,18 @@ impl App {
             });
         }
 
-        // Send decision to executor
-        tracing::debug!("decide_pending_tool: sending decision for {}", tool_call.call_id);
-        if responder.send(decision).is_err() {
-            tracing::warn!("Failed to send decision (receiver dropped)");
-        }
+        // Convert decision to EffectResult and send to executor
+        let result: EffectResult = match decision {
+            ToolDecision::Approve => Ok(None),
+            ToolDecision::Deny => Err("Denied by user".to_string()),
+            _ => Err("Unexpected decision".to_string()),
+        };
+        tracing::debug!("decide_pending_tool: sending decision for {}", pending.call_id);
+        pending.complete(result);
 
-        // If there are more tools queued, activate the next one
-        if let Some((next_call, _)) = self.pending_approvals.front() {
-            tracing::debug!("decide_pending_tool: activating next tool {}", next_call.call_id);
-
-            // Get agent label for sub-agent tools
-            let is_primary = self.agents.primary_id() == Some(next_call.agent_id);
-            let agent_label = if !is_primary {
-                self.agents.metadata(next_call.agent_id)
-                    .map(|m| m.label.clone())
-            } else {
-                None
-            };
-
-            // Create block for the next tool
-            let tool = self.tool_executor.tools().get(&next_call.name);
-            let mut block = tool.create_block(&next_call.call_id, next_call.params.clone(), next_call.background);
-
-            // Set agent label for sub-agent tools
-            if let Some(label) = agent_label {
-                block.set_agent_label(label);
-            }
-
-            self.chat.start_block(block, &mut self.terminal);
-            self.draw(); // flush block before showing approval UI
-            self.input_mode = InputMode::ToolApproval;
-        } else {
-            // No more pending - switch to streaming mode
+        // If no more acknowledged approvals, switch mode
+        // (next unacknowledged approval will be handled by polling)
+        if !self.effects.has_active_approval() {
             self.input_mode = InputMode::Streaming;
         }
 
@@ -883,7 +1045,6 @@ impl App {
         tracing::debug!(
             "handle_tool_event: {:?}",
             match &event {
-                ToolEvent::AwaitingApproval { name, .. } => format!("AwaitingApproval({})", name),
                 ToolEvent::Delegate { effect, .. } => format!("Delegate({:?})", effect),
                 ToolEvent::Delta { .. } => "Delta".to_string(),
                 ToolEvent::Completed { content, .. } =>
@@ -897,86 +1058,15 @@ impl App {
         );
 
         match event {
-            ToolEvent::AwaitingApproval {
-                agent_id,
-                call_id,
-                name,
-                params,
-                background,
-                responder,
-            } => {
-                let is_primary = self.agents.primary_id() == Some(agent_id);
-
-                // Get agent label for sub-agents (used in logging and future UI)
-                let agent_label = if !is_primary {
-                    self.agents.metadata(agent_id)
-                        .map(|m| m.label.clone())
-                } else {
-                    None
-                };
-
-                // Create ToolCall and add to queue (same flow for primary and sub-agents)
-                let tool_call = ToolCall {
-                    agent_id,
-                    call_id: call_id.clone(),
-                    name: name.clone(),
-                    params: params.clone(),
-                    decision: ToolDecision::Pending,
-                    background,
-                };
-                let is_first = self.pending_approvals.is_empty();
-                self.pending_approvals.push_back((tool_call, responder));
-
-                // Only create block and show UI for the first tool in queue
-                if is_first {
-                    self.draw(); // flush any pending text
-                    let tool = self.tool_executor.tools().get(&name);
-                    let mut block = tool.create_block(&call_id, params.clone(), background);
-
-                    // Set agent label for sub-agent tools
-                    if let Some(ref label) = agent_label {
-                        tracing::info!("Sub-agent '{}' requesting approval for {}", label, name);
-                        block.set_agent_label(label.clone());
-                    }
-
-                    self.chat.start_block(block, &mut self.terminal);
-                    self.draw();
-
-                    // Check filters for auto-approve/deny
-                    match self.tool_filters.evaluate(&name, &params) {
-                        Some(decision) => {
-                            self.decide_pending_tool(decision).await;
-                        },
-                        None => {
-                            // Wait for user approval
-                            if is_primary {
-                                if let Err(e) = self.chat.transcript.save() {
-                                    tracing::error!(
-                                        "Failed to save transcript before tool approval: {}",
-                                        e
-                                    );
-                                }
-                            }
-                            self.input_mode = InputMode::ToolApproval;
-                            self.draw();
-                        },
-                    }
-                }
-                // If not first, it's queued - no UI needed yet
-            },
-
             ToolEvent::Delegate {
                 agent_id,
+                call_id,
                 effect,
                 responder,
                 ..
             } => {
-                let result = match self.apply_effect(agent_id, effect).await {
-                    Ok(output) => Ok(output),
-                    Err(e) => Err(e.to_string()),
-                };
-                // Send result back to executor (ignore if receiver dropped)
-                let _ = responder.send(result);
+                // Queue effect for polling
+                self.effects.push(PendingEffect::new(call_id, agent_id, effect, responder));
             },
 
             ToolEvent::Delta {
@@ -1016,7 +1106,7 @@ impl App {
                 }
 
                 // Tool is done - only switch to streaming if no more approvals pending
-                if self.pending_approvals.is_empty() {
+                if !self.effects.has_pending_approvals() {
                     self.input_mode = InputMode::Streaming;
                 }
 
@@ -1045,7 +1135,7 @@ impl App {
                 }
 
                 // Tool is done - only switch to streaming if no more approvals pending
-                if self.pending_approvals.is_empty() {
+                if !self.effects.has_pending_approvals() {
                     self.input_mode = InputMode::Streaming;
                 }
 
@@ -1093,6 +1183,14 @@ impl App {
     async fn apply_effect(&mut self, _agent_id: AgentId, effect: Effect) -> Result<Option<String>> {
         tracing::debug!("Applying effect: {:?}", effect);
         match effect {
+            // AwaitApproval is handled via the EffectQueue, not here
+            Effect::AwaitApproval { .. } => {
+                unreachable!("AwaitApproval should be handled via EffectQueue, not apply_effect")
+            },
+            // Preview effects are polled via try_execute_effect, not here
+            Effect::IdeShowPreview { .. } | Effect::IdeShowDiffPreview { .. } => {
+                unreachable!("IDE preview effects should be polled via try_execute_effect, not apply_effect")
+            },
             Effect::IdeReloadBuffer { path } => {
                 if let Some(ide) = &self.ide {
                     ide.reload_buffer(&path.to_string_lossy()).await?;
@@ -1102,27 +1200,6 @@ impl App {
             Effect::IdeOpen { path, line, column } => {
                 if let Some(ide) = &self.ide {
                     ide.navigate_to(&path.to_string_lossy(), line, column)
-                        .await?;
-                }
-                Ok(None)
-            },
-            Effect::IdeShowPreview { preview } => {
-                if let Some(ide) = &self.ide {
-                    // Wait for preview slot to be available (multi-instance coordination)
-                    while !ide.try_claim_preview().await? {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    ide.show_preview(&preview).await?;
-                }
-                Ok(None)
-            },
-            Effect::IdeShowDiffPreview { path, edits } => {
-                if let Some(ide) = &self.ide {
-                    // Wait for preview slot to be available (multi-instance coordination)
-                    while !ide.try_claim_preview().await? {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    }
-                    ide.show_diff_preview(&path.to_string_lossy(), &edits)
                         .await?;
                 }
                 Ok(None)

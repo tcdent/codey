@@ -35,6 +35,7 @@ pub mod names {
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub use crate::effect::EffectResult;
 pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
 #[cfg(feature = "cli")]
 pub use impls::{
