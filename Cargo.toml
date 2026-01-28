@@ -1,6 +1,6 @@
 [package]
 name = "codey"
-version = "0.1.0-rc.7"
+version = "0.1.0-rc.8"
 edition = "2021"
 authors = ["Codey Contributors"]
 description = "A terminal-based AI coding assistant"
