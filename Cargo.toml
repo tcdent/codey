@@ -25,7 +25,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
 # LLM client (multi-provider) - using patched version for thinking blocks + OAuth
-genai = { path = "lib/genai" }
+genai = { git = "https://github.com/tcdent/rust-genai.git", branch = "codey-dev" }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
