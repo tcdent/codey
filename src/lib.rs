@@ -42,6 +42,7 @@
 // Core modules (always available)
 mod auth;
 mod config;
+mod effect;
 mod ide;
 mod llm;
 mod tools;

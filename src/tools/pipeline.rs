@@ -1,4 +1,4 @@
-//! Effect-based tool definitions
+//! Tool pipeline definitions.
 //!
 //! Tools are defined as a chain of effect handlers:
 //! ```text
@@ -12,11 +12,11 @@
 //! ]
 //! ```
 
-use crate::ide::{Edit, ToolPreview};
 #[cfg(feature = "cli")]
 use crate::transcript::Block;
 use std::collections::VecDeque;
-use std::path::PathBuf;
+
+pub use crate::effect::Effect;
 
 /// Result of calling an effect handler
 pub enum Step {
@@ -38,23 +38,6 @@ pub enum Step {
 #[async_trait::async_trait]
 pub trait EffectHandler: Send {
     async fn call(self: Box<Self>) -> Step;
-}
-
-/// Effects that must be delegated to the app layer
-#[derive(Debug, Clone)]
-pub enum Effect {
-    // === IDE ===
-    IdeOpen { path: PathBuf, line: Option<u32>, column: Option<u32> },
-    IdeShowPreview { preview: ToolPreview },
-    IdeShowDiffPreview { path: PathBuf, edits: Vec<Edit> },
-    IdeReloadBuffer { path: PathBuf },
-    IdeClosePreview,
-    /// Check if IDE buffer has unsaved changes - fails pipeline if dirty
-    IdeCheckUnsavedEdits { path: PathBuf },
-    
-    // === Background Tasks ===
-    ListBackgroundTasks,
-    GetBackgroundTask { task_id: String },
 }
 
 /// When an effect should run

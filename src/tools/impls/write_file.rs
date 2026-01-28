@@ -14,7 +14,7 @@
 use super::{handlers, Tool, ToolPipeline};
 use crate::ide::ToolPreview;
 use crate::impl_base_block;
-use crate::transcript::{render_approval_prompt, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
+use crate::transcript::{render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -33,6 +33,9 @@ pub struct WriteFileBlock {
     pub text: String,
     #[serde(default)]
     pub background: bool,
+    /// Agent label for sub-agent tools
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
 }
 
 impl WriteFileBlock {
@@ -44,6 +47,7 @@ impl WriteFileBlock {
             status: Status::Pending,
             text: String::new(),
             background,
+            agent_label: None,
         }
     }
 
@@ -63,9 +67,10 @@ impl Block for WriteFileBlock {
         let path = self.params["path"].as_str().unwrap_or("");
         let content_len = self.params.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
 
-        // Format: write_file(path, N bytes)
+        // Format: [agent_label] write_file(path, N bytes)
         lines.push(Line::from(vec![
             self.render_status(),
+            render_agent_label(self.agent_label.as_deref()),
             render_prefix(self.background),
             Span::styled("write_file", Style::default().fg(Color::Magenta)),
             Span::styled("(", Style::default().fg(Color::DarkGray)),
@@ -102,6 +107,14 @@ impl Block for WriteFileBlock {
 
     fn params(&self) -> Option<&serde_json::Value> {
         Some(&self.params)
+    }
+
+    fn set_agent_label(&mut self, label: String) {
+        self.agent_label = Some(label);
+    }
+
+    fn agent_label(&self) -> Option<&str> {
+        self.agent_label.as_deref()
     }
 }
 

@@ -16,6 +16,7 @@ if not vim.api.nvim_tabpage_is_valid(preview_tab) then
     vim.g.codey_preview_buf = nil
     vim.g.codey_preview_buf_right = nil
     vim.g.codey_original_tab = nil
+    vim.g.codey_preview_owner = nil
     return
 end
 
@@ -63,3 +64,4 @@ vim.g.codey_preview_tab = nil
 vim.g.codey_preview_buf = nil
 vim.g.codey_preview_buf_right = nil
 vim.g.codey_original_tab = nil
+vim.g.codey_preview_owner = nil
