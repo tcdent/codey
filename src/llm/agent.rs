@@ -10,6 +10,9 @@ use genai::chat::{
 };
 use genai::{Client, Headers};
 
+use super::client::build_client;
+use super::client::is_openrouter_model;
+
 use crate::auth::OAuthCredentials;
 use crate::config::AgentRuntimeConfig;
 use crate::transcript::{BlockType, Role, Transcript};
@@ -193,7 +196,7 @@ impl Agent {
         tools: ToolRegistry,
     ) -> Self {
         Self {
-            client: Client::default(),
+            client: build_client(),
             config,
             tools,
             messages: vec![ChatMessage::system(system_prompt)],
@@ -227,7 +230,7 @@ impl Agent {
     ) -> Self {
         let system_prompt = prompt_builder();
         Self {
-            client: Client::default(),
+            client: build_client(),
             config,
             tools,
             messages: vec![ChatMessage::system(&system_prompt)],
@@ -504,8 +507,15 @@ impl Agent {
             request = request.with_tools(self.get_tools());
         }
 
-        // Build headers based on OAuth availability
-        let headers = if let Some(ref oauth) = self.oauth {
+        // Build headers based on provider and OAuth availability
+        let headers = if is_openrouter_model(&self.config.model) {
+            // OpenRouter uses standard Bearer auth (handled by client resolver)
+            // Add recommended headers for app attribution
+            Headers::from([
+                ("HTTP-Referer".to_string(), "https://github.com/tcdent/codey".to_string()),
+                ("X-Title".to_string(), "Codey".to_string()),
+            ])
+        } else if let Some(ref oauth) = self.oauth {
             Headers::from([
                 (
                     "authorization".to_string(),
@@ -524,13 +534,19 @@ impl Agent {
             )])
         };
 
-        let chat_options = ChatOptions::default()
+        // Build chat options - reasoning_effort is only for Anthropic models
+        let mut chat_options = ChatOptions::default()
             .with_max_tokens(self.config.max_tokens)
             .with_capture_usage(true)
             .with_capture_tool_calls(mode_opts.capture_tool_calls)
-            .with_capture_reasoning_content(true)
-            .with_reasoning_effort(ReasoningEffort::Budget(mode_opts.thinking_budget))
             .with_extra_headers(headers);
+        
+        // Only add reasoning/thinking options for Anthropic models
+        if !is_openrouter_model(&self.config.model) {
+            chat_options = chat_options
+                .with_capture_reasoning_content(true)
+                .with_reasoning_effort(ReasoningEffort::Budget(mode_opts.thinking_budget));
+        }
 
         let mut attempt = 0u32;
 
@@ -609,6 +625,7 @@ impl Agent {
                     match stream.next().await {
                         Some(Ok(event)) => match event {
                             ChatStreamEvent::Start => {
+                                debug!("Agent: got ChatStreamEvent::Start");
                                 // Continue polling
                             },
                             ChatStreamEvent::Chunk(chunk) => {
@@ -622,6 +639,7 @@ impl Agent {
                                 });
                             },
                             ChatStreamEvent::ToolCallChunk(_) => {
+                                debug!("Agent: got ToolCallChunk");
                                 // Continue polling
                             },
                             ChatStreamEvent::ReasoningChunk(chunk) => {
@@ -632,6 +650,7 @@ impl Agent {
                                 // Gemini thought signatures - continue polling
                             },
                             ChatStreamEvent::End(mut end) => {
+                                debug!("Agent: got ChatStreamEvent::End");
                                 if let Some(ref genai_usage) = end.captured_usage {
                                     let turn_usage = Self::extract_turn_usage(genai_usage);
                                     self.total_usage += turn_usage;
@@ -655,6 +674,7 @@ impl Agent {
                             return Some(AgentStep::Error(format!("Stream error: {:?}", e)));
                         },
                         None => {
+                            debug!("Agent: stream returned None (closed)");
                             // Stream ended, clean up stream
                             self.active_stream = None;
 
