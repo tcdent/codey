@@ -33,6 +33,10 @@ struct Args {
     #[arg(short, long)]
     r#continue: bool,
 
+    /// Override the model (e.g., "openrouter::anthropic/claude-3.5-sonnet")
+    #[arg(short, long)]
+    model: Option<String>,
+
     /// OAuth login - without code prints auth URL, with code exchanges for token
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     login: Option<String>,
@@ -112,6 +116,9 @@ async fn main() -> Result<()> {
     // Apply CLI overrides
     if let Some(working_dir) = args.working_dir {
         config.general.working_dir = Some(working_dir);
+    }
+    if let Some(model) = args.model {
+        config.agents.foreground.model = model;
     }
 
     // Set working directory
