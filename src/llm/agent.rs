@@ -309,6 +309,7 @@ impl Agent {
                                         call_id: call_id.to_string(),
                                         fn_name: tool_name.to_string(),
                                         fn_arguments: params.clone(),
+                                        thought_signatures: None,
                                     });
                                     tool_responses.push(ToolResponse::new(
                                         call_id.to_string(),
@@ -626,6 +627,9 @@ impl Agent {
                             ChatStreamEvent::ReasoningChunk(chunk) => {
                                 // State remains Streaming
                                 return Some(AgentStep::ThinkingDelta(chunk.content));
+                            },
+                            ChatStreamEvent::ThoughtSignatureChunk(_) => {
+                                // Gemini thought signatures - continue polling
                             },
                             ChatStreamEvent::End(mut end) => {
                                 if let Some(ref genai_usage) = end.captured_usage {
