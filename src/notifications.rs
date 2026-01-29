@@ -2,6 +2,7 @@
 //!
 //! Notifications allow events (user messages, background completions, etc.) to be
 //! delivered to the agent even when it's busy executing tools.
+#![allow(dead_code)]
 //!
 //! - User messages → `Notification::Message`
 //! - Background tool completions → `Notification::BackgroundTool`

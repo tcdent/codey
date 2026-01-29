@@ -37,6 +37,7 @@ pub const APP_NAME: &str = "Codey";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Result of handling an action
+#[allow(dead_code)]
 enum ActionResult {
     NoOp,
     Continue,
@@ -543,13 +544,14 @@ impl App {
             },
         };
 
-        // Update block status based on decision
-        if let Some(block) = self.chat.transcript.find_tool_block_mut(&pending.call_id) {
+        // Find block in stage, update status, and promote to transcript
+        if let Some(mut block) = self.chat.transcript.stage.remove_by_call_id(&pending.call_id) {
             block.set_status(match decision {
                 ToolDecision::Approve => Status::Running,
                 ToolDecision::Deny => Status::Denied,
                 _ => Status::Pending,
             });
+            self.chat.transcript.start_block(block);
         }
 
         // Convert decision to EffectResult and send to executor
@@ -885,7 +887,7 @@ impl App {
                 call_id,
                 content,
             } => {
-                let is_primary = self.agents.primary_id() == Some(agent_id);
+                let _is_primary = self.agents.primary_id() == Some(agent_id);
 
                 // Update block status (works for both primary and sub-agent tools)
                 if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
@@ -1257,7 +1259,9 @@ impl App {
             block.set_agent_label(label.clone());
         }
 
-        self.chat.start_block(block, &mut self.terminal);
+        // Add to stage (stays at bottom while awaiting approval)
+        self.chat.transcript.stage.push(block);
+        self.chat.render(&mut self.terminal);
         self.draw();
 
         // Check filters for auto-approve/deny
@@ -1453,6 +1457,7 @@ impl App {
 
     /// Get output from an agent by label (for GetAgent effect)
     #[cfg(feature = "cli")]
+    #[allow(dead_code)]
     async fn get_agent_output(&mut self, label: &str) -> String {
         // Find agent by label
         let agent_id = match self.agents.find_by_label(label) {

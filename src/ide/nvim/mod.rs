@@ -9,6 +9,7 @@
 //! 1. Explicitly configured via `nvim.socket` in config
 //! 2. Auto-discovered from tmux session name: `/tmp/nvim-{session}.sock`
 //! 3. Set via `$NVIM_LISTEN_ADDRESS` environment variable
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
