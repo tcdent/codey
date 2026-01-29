@@ -62,8 +62,7 @@ When fetching web pages with `fetch_html`, consider using `spawn_agent` to deleg
 ### Background Execution
 For long-running operations, you can execute tools in the background by adding `"background": true` to the tool call. This returns immediately with a task ID while the tool runs asynchronously.
 Use `list_background_tasks` to check status and `get_background_task` to retrieve results when complete.
-
-When running background agents, use `shell("sleep N")` (where N is seconds) to keep your execution loop active. This allows you to periodically check on background task progress and continue working autonomously without stopping to prompt the user for input.
+You will be notified with a message when background tasks finish.
 
 ### General
 - Be concise but thorough

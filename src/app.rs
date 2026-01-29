@@ -544,13 +544,14 @@ impl App {
             },
         };
 
-        // Update block status based on decision
-        if let Some(block) = self.chat.transcript.find_tool_block_mut(&pending.call_id) {
+        // Find block in stage, update status, and promote to transcript
+        if let Some(mut block) = self.chat.transcript.stage.remove_by_call_id(&pending.call_id) {
             block.set_status(match decision {
                 ToolDecision::Approve => Status::Running,
                 ToolDecision::Deny => Status::Denied,
                 _ => Status::Pending,
             });
+            self.chat.transcript.start_block(block);
         }
 
         // Convert decision to EffectResult and send to executor
@@ -1258,7 +1259,9 @@ impl App {
             block.set_agent_label(label.clone());
         }
 
-        self.chat.start_block(block, &mut self.terminal);
+        // Add to stage (stays at bottom while awaiting approval)
+        self.chat.transcript.stage.push(block);
+        self.chat.render(&mut self.terminal);
         self.draw();
 
         // Check filters for auto-approve/deny

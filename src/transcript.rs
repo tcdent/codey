@@ -593,6 +593,20 @@ impl Stage {
         self.blocks.drain(..).collect()
     }
 
+    /// Find a tool block by call_id and return mutable reference
+    pub fn find_by_call_id(&mut self, call_id: &str) -> Option<&mut Box<dyn Block>> {
+        self.blocks.iter_mut().find(|b| b.call_id() == Some(call_id))
+    }
+
+    /// Remove a tool block by call_id (for promotion to transcript)
+    pub fn remove_by_call_id(&mut self, call_id: &str) -> Option<Box<dyn Block>> {
+        if let Some(pos) = self.blocks.iter().position(|b| b.call_id() == Some(call_id)) {
+            Some(self.blocks.remove(pos))
+        } else {
+            None
+        }
+    }
+
     /// Render all staged blocks with given width (CLI only)
     #[cfg(feature = "cli")]
     pub fn render(&self, width: u16) -> Vec<Line<'_>> {
@@ -1074,5 +1088,222 @@ mod tests {
 
         // Clean up
         let _ = std::fs::remove_file(path);
+    }
+
+    // ========================================================================
+    // Stage Tests - Simulating concurrent agent behavior
+    // ========================================================================
+
+    #[test]
+    fn test_stage_push_and_find_by_call_id() {
+        let mut stage = Stage::new();
+
+        // Add multiple tool blocks with different call_ids
+        let block1 = ToolBlock::new("call_1", "shell", serde_json::json!({"cmd": "ls"}), false);
+        let block2 = ToolBlock::new("call_2", "read_file", serde_json::json!({"path": "foo"}), false);
+        let block3 = ToolBlock::new("call_3", "shell", serde_json::json!({"cmd": "pwd"}), false);
+
+        stage.push(Box::new(block1));
+        stage.push(Box::new(block2));
+        stage.push(Box::new(block3));
+
+        assert_eq!(stage.len(), 3);
+
+        // Find by call_id should work for all
+        assert!(stage.find_by_call_id("call_1").is_some());
+        assert!(stage.find_by_call_id("call_2").is_some());
+        assert!(stage.find_by_call_id("call_3").is_some());
+        assert!(stage.find_by_call_id("call_999").is_none());
+    }
+
+    #[test]
+    fn test_stage_remove_by_call_id_ordering() {
+        let mut stage = Stage::new();
+
+        // Simulate rapid queuing from multiple agents
+        for i in 0..10 {
+            let block = ToolBlock::new(
+                &format!("call_{}", i),
+                "shell",
+                serde_json::json!({"cmd": format!("echo {}", i)}),
+                false,
+            );
+            stage.push(Box::new(block));
+        }
+
+        assert_eq!(stage.len(), 10);
+
+        // Remove in non-sequential order (simulating different approval timing)
+        let removed = stage.remove_by_call_id("call_5");
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().call_id(), Some("call_5"));
+        assert_eq!(stage.len(), 9);
+
+        let removed = stage.remove_by_call_id("call_0");
+        assert!(removed.is_some());
+        assert_eq!(stage.len(), 8);
+
+        let removed = stage.remove_by_call_id("call_9");
+        assert!(removed.is_some());
+        assert_eq!(stage.len(), 7);
+
+        // Verify remaining blocks are still findable
+        assert!(stage.find_by_call_id("call_1").is_some());
+        assert!(stage.find_by_call_id("call_2").is_some());
+        assert!(stage.find_by_call_id("call_7").is_some());
+
+        // Removed blocks should not be findable
+        assert!(stage.find_by_call_id("call_0").is_none());
+        assert!(stage.find_by_call_id("call_5").is_none());
+        assert!(stage.find_by_call_id("call_9").is_none());
+    }
+
+    #[test]
+    fn test_stage_interleaved_push_and_remove() {
+        let mut stage = Stage::new();
+
+        // Simulate interleaved operations like what happens with auto-approve
+        // Agent 1 queues
+        stage.push(Box::new(ToolBlock::new("agent1_call1", "shell", serde_json::json!({}), false)));
+
+        // Agent 2 queues (before agent 1's is processed)
+        stage.push(Box::new(ToolBlock::new("agent2_call1", "shell", serde_json::json!({}), false)));
+
+        // Agent 1's call is auto-approved, removed
+        let removed = stage.remove_by_call_id("agent1_call1");
+        assert!(removed.is_some());
+
+        // Agent 3 queues
+        stage.push(Box::new(ToolBlock::new("agent3_call1", "read_file", serde_json::json!({}), false)));
+
+        // Agent 1 queues another
+        stage.push(Box::new(ToolBlock::new("agent1_call2", "shell", serde_json::json!({}), false)));
+
+        assert_eq!(stage.len(), 3);
+
+        // Process in arrival order
+        let removed = stage.remove_by_call_id("agent2_call1");
+        assert!(removed.is_some());
+        let removed = stage.remove_by_call_id("agent3_call1");
+        assert!(removed.is_some());
+        let removed = stage.remove_by_call_id("agent1_call2");
+        assert!(removed.is_some());
+
+        assert!(stage.is_empty());
+    }
+
+    #[test]
+    fn test_stage_double_remove_returns_none() {
+        let mut stage = Stage::new();
+
+        stage.push(Box::new(ToolBlock::new("call_1", "shell", serde_json::json!({}), false)));
+
+        // First remove succeeds
+        let removed = stage.remove_by_call_id("call_1");
+        assert!(removed.is_some());
+
+        // Second remove returns None (important for race condition handling)
+        let removed = stage.remove_by_call_id("call_1");
+        assert!(removed.is_none());
+    }
+
+    #[test]
+    fn test_stage_with_transcript_promotion() {
+        // Simulate the full flow: Stage -> Transcript
+        let mut stage = Stage::new();
+        let mut transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test_promo.md"));
+
+        // Queue multiple approvals
+        stage.push(Box::new(ToolBlock::new("call_a", "shell", serde_json::json!({"cmd": "ls"}), false)));
+        stage.push(Box::new(ToolBlock::new("call_b", "read_file", serde_json::json!({"path": "x"}), false)));
+        stage.push(Box::new(ToolBlock::new("call_c", "write_file", serde_json::json!({"path": "y"}), false)));
+
+        // Start an assistant turn for the transcript
+        transcript.begin_turn(Role::Assistant);
+
+        // User approves call_b first (out of order)
+        if let Some(mut block) = stage.remove_by_call_id("call_b") {
+            block.set_status(Status::Running);
+            transcript.start_block(block);
+        }
+
+        assert_eq!(stage.len(), 2);
+
+        // Auto-approve call_a
+        if let Some(mut block) = stage.remove_by_call_id("call_a") {
+            block.set_status(Status::Running);
+            transcript.start_block(block);
+        }
+
+        // User denies call_c
+        if let Some(mut block) = stage.remove_by_call_id("call_c") {
+            block.set_status(Status::Denied);
+            transcript.start_block(block);
+        }
+
+        assert!(stage.is_empty());
+        // All blocks added to the same turn
+        assert_eq!(transcript.turns().len(), 1);
+        assert_eq!(transcript.turns()[0].content.len(), 3);
+    }
+
+    #[test]
+    fn test_stage_high_volume_stress() {
+        let mut stage = Stage::new();
+
+        // Simulate 100 rapid tool calls from multiple agents
+        let agents = ["primary", "agent1", "agent2", "agent3"];
+        for i in 0..100 {
+            let agent = agents[i % agents.len()];
+            let block = ToolBlock::new(
+                &format!("{}_{}", agent, i),
+                if i % 3 == 0 { "shell" } else { "read_file" },
+                serde_json::json!({"n": i}),
+                i % 5 == 0, // Some are background
+            );
+            stage.push(Box::new(block));
+        }
+
+        assert_eq!(stage.len(), 100);
+
+        // Remove in random-ish order (simulating different approval timings)
+        let removal_order: Vec<usize> = vec![
+            50, 25, 75, 10, 90, 5, 95, 0, 99, 33, 66, 42, 58, 17, 83,
+        ];
+
+        for i in removal_order {
+            let agent = agents[i % agents.len()];
+            let call_id = format!("{}_{}", agent, i);
+            let removed = stage.remove_by_call_id(&call_id);
+            assert!(removed.is_some(), "Failed to remove {}", call_id);
+        }
+
+        assert_eq!(stage.len(), 85); // 100 - 15 removed
+
+        // Verify double-remove protection
+        assert!(stage.remove_by_call_id("primary_50").is_none());
+        assert!(stage.remove_by_call_id("agent1_25").is_none());
+    }
+
+    #[test]
+    fn test_stage_drain_all() {
+        let mut stage = Stage::new();
+
+        for i in 0..5 {
+            stage.push(Box::new(ToolBlock::new(
+                &format!("call_{}", i),
+                "shell",
+                serde_json::json!({}),
+                false,
+            )));
+        }
+
+        let drained = stage.drain_all();
+        assert_eq!(drained.len(), 5);
+        assert!(stage.is_empty());
+
+        // Draining again returns empty
+        let drained = stage.drain_all();
+        assert!(drained.is_empty());
     }
 }
