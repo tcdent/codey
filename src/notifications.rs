@@ -1,13 +1,16 @@
-//! Notification queue for mid-turn message injection.
+//! Notification system for asynchronous events.
 //!
-//! All user input flows through the notification queue:
+//! Notifications allow events (user messages, background completions, etc.) to be
+//! delivered to the agent even when it's busy executing tools.
+//!
 //! - User messages → `Notification::Message`
+//! - Background tool completions → `Notification::BackgroundTool`
+//! - Background agent completions → `Notification::BackgroundAgent`
 //! - Slash commands → `Notification::Command`
-//! - Background task completions → `Notification::BackgroundTask`
 //!
-//! The queue handles draining based on context:
-//! - `drain_injectable()` - for tool result injection (Message, BackgroundTask only)
-//! - `pop()` - for idle processing (all notification types)
+//! The queue supports two drain modes:
+//! - `drain_injectable()` - for tool result injection (Message, BackgroundTool, BackgroundAgent)
+//! - `drain_all()` - for idle processing (all notification types)
 
 use std::collections::VecDeque;
 
@@ -29,8 +32,15 @@ pub enum Notification {
         block_id: usize,
     },
 
-    /// Background task completed
-    BackgroundTask {
+    /// Background tool (mcp_shell with background: true, etc.) completed
+    BackgroundTool {
+        label: String,
+        result: String,
+        block_id: usize,
+    },
+
+    /// Background agent (mcp_spawn_agent) completed
+    BackgroundAgent {
         label: String,
         result: String,
         block_id: usize,
@@ -48,16 +58,19 @@ impl Notification {
         match self {
             Notification::Message { block_id, .. } => *block_id,
             Notification::Command { block_id, .. } => *block_id,
-            Notification::BackgroundTask { block_id, .. } => *block_id,
+            Notification::BackgroundTool { block_id, .. } => *block_id,
+            Notification::BackgroundAgent { block_id, .. } => *block_id,
             Notification::Compaction { block_id } => *block_id,
         }
     }
 
     /// Whether this notification can interrupt a streaming turn.
-    /// Commands and Compaction must wait for idle; messages and background tasks can be injected.
+    /// Commands and Compaction must wait for idle; background results can be injected.
     fn can_interrupt(&self) -> bool {
         match self {
-            Notification::Message { .. } | Notification::BackgroundTask { .. } => true,
+            Notification::Message { .. } 
+            | Notification::BackgroundTool { .. } 
+            | Notification::BackgroundAgent { .. } => true,
             Notification::Command { .. } | Notification::Compaction { .. } => false,
         }
     }
@@ -70,8 +83,12 @@ impl Notification {
                 "<notification source=\"user\">\n{}\n</notification>",
                 content
             )),
-            Notification::BackgroundTask { label, result, .. } => Some(format!(
+            Notification::BackgroundTool { label, result, .. } => Some(format!(
                 "<notification source=\"background_task\" label=\"{}\">\n{}\n</notification>",
+                label, result
+            )),
+            Notification::BackgroundAgent { label, result, .. } => Some(format!(
+                "<notification source=\"background_agent\" label=\"{}\">\n{}\n</notification>",
                 label, result
             )),
             Notification::Command { .. } | Notification::Compaction { .. } => None,
@@ -108,7 +125,7 @@ impl NotificationQueue {
     }
 
     /// Drain notifications that can be injected into tool results.
-    /// Returns Message and BackgroundTask notifications; Commands remain queued.
+    /// Returns Message and BackgroundTool notifications; Commands remain queued.
     pub fn drain_injectable(&mut self) -> Vec<Notification> {
         let mut injectable = Vec::new();
         let mut remaining = VecDeque::new();
@@ -173,7 +190,7 @@ mod tests {
 
     #[test]
     fn test_background_task_can_interrupt() {
-        let task = Notification::BackgroundTask {
+        let task = Notification::BackgroundTool {
             label: "build".to_string(),
             result: "success".to_string(),
         };
@@ -232,7 +249,7 @@ mod tests {
             content: "hello".to_string(),
             turn_id: 0,
         });
-        queue.push(Notification::BackgroundTask {
+        queue.push(Notification::BackgroundTool {
             label: "build".to_string(),
             result: "done".to_string(),
         });

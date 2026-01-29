@@ -28,7 +28,7 @@ use crate::tools::{
     init_agent_context, init_browser_context, update_agent_oauth, EffectResult, ToolDecision,
     ToolEvent, ToolExecutor, ToolRegistry,
 };
-use crate::transcript::{Block, BlockType, Role, Status, TextBlock, Transcript};
+use crate::transcript::{Block, BlockType, NotificationBlock, Role, Status, TextBlock, Transcript};
 use crate::ui::{Attachment, ChatView, InputBox};
 
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
@@ -689,7 +689,8 @@ impl App {
         // Separate by type: messages get batched, commands execute individually
         let mut messages: Vec<(String, usize)> = Vec::new();  // (content, block_id)
         let mut commands: Vec<(String, usize)> = Vec::new();  // (name, block_id)
-        let mut background_tasks: Vec<(String, String, usize)> = Vec::new();  // (label, result, block_id)
+        let mut background_tools: Vec<(String, String, usize)> = Vec::new();  // (label, result, block_id)
+        let mut background_agents: Vec<(String, String, usize)> = Vec::new();  // (label, result, block_id)
         let mut has_compaction = false;
 
         for notification in notifications {
@@ -700,8 +701,11 @@ impl App {
                 Notification::Command { name, block_id } => {
                     commands.push((name, block_id));
                 }
-                Notification::BackgroundTask { label, result, block_id } => {
-                    background_tasks.push((label, result, block_id));
+                Notification::BackgroundTool { label, result, block_id } => {
+                    background_tools.push((label, result, block_id));
+                }
+                Notification::BackgroundAgent { label, result, block_id } => {
+                    background_agents.push((label, result, block_id));
                 }
                 Notification::Compaction { block_id } => {
                     has_compaction = true;
@@ -766,13 +770,26 @@ impl App {
             combined_content.push_str(content);
         }
 
-        for (label, result, block_id) in &background_tasks {
+        for (label, result, block_id) in &background_tools {
             // Collect block for promotion
             if let Some(mut block) = self.chat.transcript.stage.remove(*block_id) {
                 block.set_status(Status::Complete);
                 blocks_to_promote.push(block);
             }
-            let content = format!("Background task '{}' completed:\n{}", label, result);
+            let content = format!("Background tool '{}' completed:\n{}", label, result);
+            if !combined_content.is_empty() {
+                combined_content.push_str("\n\n");
+            }
+            combined_content.push_str(&content);
+        }
+
+        for (label, result, block_id) in &background_agents {
+            // Collect block for promotion
+            if let Some(mut block) = self.chat.transcript.stage.remove(*block_id) {
+                block.set_status(Status::Complete);
+                blocks_to_promote.push(block);
+            }
+            let content = format!("Background agent '{}' completed:\n{}", label, result);
             if !combined_content.is_empty() {
                 combined_content.push_str("\n\n");
             }
@@ -976,14 +993,35 @@ impl App {
                 call_id,
                 name,
             } => {
-                // Background task completed - status available via list_background_tasks
                 tracing::info!(
                     "Background task completed: {} ({}) for agent {}",
                     name,
                     call_id,
                     agent_id
                 );
+                
+                // Take the result and queue a notification
+                if let Some((task_name, output, status)) = self.tool_executor.take_result(&call_id) {
+                    let result = if status == Status::Error {
+                        format!("Error: {}", output)
+                    } else {
+                        output
+                    };
+                    
+                    // Stage a block for the notification
+                    let block = NotificationBlock::new("background_tool", format!("[{}] completed", task_name));
+                    let block_id = self.chat.transcript.stage.push(Box::new(block));
+                    
+                    // Queue the notification
+                    self.notifications.push(Notification::BackgroundTool {
+                        label: call_id.clone(),
+                        result,
+                        block_id,
+                    });
+                }
+                
                 // Redraw to update background task indicator
+                self.chat.render(&mut self.terminal);
                 self.draw();
             },
         }
@@ -1074,15 +1112,36 @@ impl App {
                         }
                     }
                 } else {
-                    // Sub-agent finished - just mark as finished and log
-                    // Result will be retrieved via get_agent tool when primary agent requests it
+                    // Sub-agent finished - queue notification with result
                     let label = self
                         .agents
                         .metadata(agent_id)
                         .map(|m| m.label.clone())
                         .unwrap_or_default();
+                    
+                    // Get the result before marking as finished
+                    let result = if let Some(agent_mutex) = self.agents.get(agent_id) {
+                        let agent = agent_mutex.lock().await;
+                        agent.last_message().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    
                     self.agents.finish(agent_id);
                     tracing::info!("Sub-agent {} ({}) finished", agent_id, label);
+                    
+                    // Stage a block and queue notification
+                    let block = NotificationBlock::new("background_agent", format!("[{}] completed", label));
+                    let block_id = self.chat.transcript.stage.push(Box::new(block));
+                    self.notifications.push(Notification::BackgroundAgent {
+                        label: label.clone(),
+                        result,
+                        block_id,
+                    });
+                    
+                    // Render to show pending notification
+                    self.chat.render(&mut self.terminal);
+                    self.draw();
                 }
             },
             AgentStep::Error(msg) => {
