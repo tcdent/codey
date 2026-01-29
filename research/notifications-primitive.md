@@ -26,29 +26,92 @@ We need a way to inject **Notifications** into the agent's context without waiti
 
 We will use **Tool Result Augmentation** (Approach A below). This is the pattern Anthropic uses in Claude Code with `<system-reminder>` tags. It's proven, simple, and requires no API changes.
 
-### Unified Notification Flow
+### Unified Notification Queue
 
-All external events (user messages, file changes, background tasks, IDE diagnostics) use the same flow based on agent state:
+All user input flows through a single notification queue:
 
 ```
-External Event
-      │
-      ▼
-┌─────────────────┐
-│ Agent streaming? │
-└─────────────────┘
-      │
-  ┌───┴───┐
-  ▼       ▼
- NO      YES
-  │       │
-  ▼       ▼
-Queue    Inject into next
-as new   tool result as
-message  <notification>
+User Input
+    │
+    ▼
+┌──────────────────┐
+│ Parse input      │
+└──────────────────┘
+    │
+    ├─► Message ────► Notification::Message(content)
+    │
+    └─► /command ───► Notification::Command { name, turn_id }
+    │
+    ▼
+pending_notifications queue
 ```
 
-No special cases - user messages during a turn are handled the same as file watcher events or background task completions.
+Drain behavior depends on notification type and agent state:
+
+```
+pending_notifications
+        │
+        ▼
+┌───────────────────────────────┐
+│ Agent idle (Normal mode)?     │
+└───────────────────────────────┘
+        │
+    ┌───┴───┐
+    ▼       ▼
+   YES      NO (streaming)
+    │       │
+    ▼       ▼
+  Drain   Tool completes?
+  all     │
+    │     ├─► YES: Drain injectable
+    │     │        (Message, BackgroundTask)
+    │     │        → inject as XML
+    │     │
+    │     └─► NO: Keep queued
+    ▼
+  Handle:
+  - Message → send to agent
+  - Command → execute
+  - BackgroundTask → send to agent
+```
+
+### Notification Types
+
+`Notification` is an enum where each variant carries its own data:
+
+```rust
+pub enum Notification {
+    /// User message to send to agent
+    Message(String),
+    
+    /// Slash command to execute  
+    Command {
+        name: String,
+        turn_id: usize,
+    },
+    
+    /// Background task completed
+    BackgroundTask {
+        label: String,
+        result: String,
+    },
+}
+```
+
+**Injectable vs Deferred:**
+- `Message` and `BackgroundTask` can be injected into tool results mid-turn
+- `Command` is always deferred until agent is idle (commands execute in app context, not agent context)
+
+```rust
+impl Notification {
+    fn can_interrupt(&self) -> bool {
+        match self {
+            Notification::Message(_) | Notification::BackgroundTask { .. } => true,
+            Notification::Command { .. } => false,
+        }
+    }
+}
+```
 
 ### Simplifications
 
@@ -119,8 +182,8 @@ Append notification content directly to tool results using XML delimiters. Same 
 Assistant: [tool_call id="edit_1" name="Edit"]
 ToolResult(id="edit_1"): "File updated successfully
 
-<notification source="file_watcher">
-src/lib.rs was modified externally
+<notification source="user">
+actually wait, try a different approach
 </notification>"
 ```
 
@@ -146,36 +209,50 @@ The notification is concatenated to the tool result. The agent incorporates it w
 ### Implementation
 
 ```rust
-fn submit_tool_result_with_notifications(
-    &mut self,
-    call_id: &str,
-    result: &str,
-    notifications: &[Notification],
-) {
-    let content = if notifications.is_empty() {
-        result.to_string()
-    } else {
-        let notif_xml = notifications.iter()
-            .map(|n| format!(
-                "<notification source=\"{}\">\n{}\n</notification>",
-                n.source, n.message
-            ))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        format!("{result}\n\n{notif_xml}")
-    };
-
-    self.messages.push(ChatMessage::tool_response(call_id, &content));
+impl Notification {
+    /// Format as XML for injection into tool results
+    /// Returns None for notifications that shouldn't be injected (e.g., Commands)
+    fn to_xml(&self) -> Option<String> {
+        match self {
+            Notification::Message(content) => Some(format!(
+                "<notification source=\"user\">\n{}\n</notification>",
+                content
+            )),
+            Notification::BackgroundTask { label, result } => Some(format!(
+                "<notification source=\"background_task\" label=\"{}\">\n{}\n</notification>",
+                label, result
+            )),
+            Notification::Command { .. } => None,
+        }
+    }
 }
+
+// In ToolEvent::Completed handler:
+let injectable: Vec<_> = self.pending_notifications
+    .drain(..)
+    .filter(|n| n.can_interrupt())
+    .collect();
+
+let content = if injectable.is_empty() {
+    content
+} else {
+    let xml = injectable.iter()
+        .filter_map(|n| n.to_xml())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    format!("{}\n\n{}", content, xml)
+};
+
+agent.submit_tool_result(&call_id, content);
+```
 ```
 
 ### System Prompt Addition
 
 ```
-You may see <notification> tags in tool results. These are external events
-(file changes, background task completions, etc.) that occurred while you
-were working. Consider them when deciding your next action.
+You may see <notification> tags in tool results. These are messages from the user
+or background task completions that occurred while you were working. Consider them 
+when deciding your next action.
 ```
 
 ### Why This Works
@@ -266,19 +343,31 @@ Tool {
 
 ## Injection Timing
 
-The natural injection point is **after any tool completes**:
+The natural injection point is **after any tool completes**, but only for injectable notifications:
 
 ```rust
 ToolEvent::Completed { agent_id, call_id, content } => {
-    // Drain pending notifications
-    let notifications = self.notification_manager.drain();
-
-    // Submit result with notifications appended
-    agent.submit_tool_result_with_notifications(
-        &call_id,
-        &content,
-        &notifications,
-    );
+    // Drain only injectable notifications (Message, BackgroundTask)
+    // Commands stay queued for when agent becomes idle
+    let (injectable, deferred): (Vec<_>, Vec<_>) = self.pending_notifications
+        .drain(..)
+        .partition(|n| n.can_interrupt());
+    
+    // Put deferred notifications back
+    self.pending_notifications.extend(deferred);
+    
+    // Append injectable notifications as XML
+    let content = if injectable.is_empty() {
+        content
+    } else {
+        let xml = injectable.iter()
+            .filter_map(|n| n.to_xml())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        format!("{}\n\n{}", content, xml)
+    };
+    
+    agent.submit_tool_result(&call_id, content);
 }
 ```
 
@@ -296,15 +385,11 @@ This ensures:
 ```
 ToolResult(id="edit_1"): "File updated successfully
 
-<notification source="file_watcher">
-src/lib.rs modified externally
+<notification source="user">
+actually wait, try a different approach
 </notification>
 
-<notification source="file_watcher">
-src/main.rs modified externally
-</notification>
-
-<notification source="background_task">
+<notification source="background_task" label="build-check">
 Build completed: 2 warnings
 </notification>"
 ```
@@ -317,23 +402,27 @@ No counting, no capping, no coalescing. If this becomes a problem (e.g., file wa
 
 ### ✅ Completed
 
-**Data Structures** (`src/app.rs` lines 65-111):
-- `NotificationSource` enum: User, FileWatcher, BackgroundTask, Ide
-- `Notification` struct with `to_xml()` method for injection format
-
 **Ephemeral Block Support** (`src/transcript.rs`):
 - Added `is_ephemeral()` method to `Block` trait (default `false`)
 - `NotificationBlock` struct that returns `is_ephemeral() -> true`
 - Custom `Serialize` for `Turn` that filters out ephemeral blocks
 - Notification rendering with yellow styling and ⚡ icon
 
+### 🔲 In Progress
+
+**Data Structures** (`src/app.rs`):
+- `Notification` enum with variants: `Message`, `Command`, `BackgroundTask`
+- `can_interrupt()` method to determine if notification can be injected mid-turn
+- `to_xml()` method for injectable notifications
+- `pending_notifications: VecDeque<Notification>` on `App` struct
+
 ### 🔲 Remaining
 
 **Wiring** (in `src/app.rs`):
-1. Add `pending_notifications: VecDeque<Notification>` to `App` struct
-2. Add `drain_notifications()` method to `App`
-3. Modify `queue_message()` (line ~529) - if `input_mode != Normal`, create notification instead of queuing message
-4. Modify `ToolEvent::Completed` handler (line ~1015) - drain notifications and append XML to content before calling `submit_tool_result`
+1. Modify `queue_message()` (line ~586) - always create Notification (Message or Command)
+2. Add event loop branch to drain notifications when idle (InputMode::Normal)
+3. Modify `ToolEvent::Completed` handler (line ~1135) - drain injectable notifications and append XML
+4. Wire `BackgroundTask` notifications when background tasks complete
 
 **System Prompt**:
 - Add explanation of `<notification>` tags (see "System Prompt Addition" section above)
@@ -341,13 +430,15 @@ No counting, no capping, no coalescing. If this becomes a problem (e.g., file wa
 **Testing**:
 - Test notification injection into tool results
 - Test ephemeral block filtering during serialization
-- Test `queue_message()` behavior when streaming vs idle
+- Test `queue_message()` routing (Message vs Command)
+- Test Command deferral (not injected, waits for idle)
 
 ---
 
 ## Open Questions
 
-1. ~~**Activation modes**~~: Decided - unified flow based on agent state (see Decisions above)
+1. ~~**Activation modes**~~: Decided - unified notification queue (see Decisions above)
 2. **Coalescing**: Deferred - solve if it becomes a problem
 3. ~~**Transcript representation**~~: Decided - ephemeral `NotificationBlock` (see Decisions above)
 4. **Rate limiting**: Deferred - solve if it becomes a problem
+5. ~~**Command handling**~~: Decided - Commands always deferred until idle

@@ -114,7 +114,7 @@ impl OpenFileBlock {
 
 #[typetag::serde]
 impl Block for OpenFileBlock {
-    crate::impl_base_block!(BlockType::Tool);
+    crate::impl_tool_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let path = self.params["path"].as_str().unwrap_or("");

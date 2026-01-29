@@ -4,6 +4,7 @@
 //! A Transcript contains Turns, and each Turn contains Blocks.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 #[cfg(feature = "cli")]
@@ -18,6 +19,14 @@ use crate::compaction::CompactionBlock;
 use crate::config::{CODEY_DIR, TRANSCRIPTS_DIR};
 #[cfg(feature = "cli")]
 use crate::tools::io::{format_for_user, DEFAULT_TAB_WIDTH};
+
+/// Global counter for unique block IDs
+static NEXT_BLOCK_ID: AtomicUsize = AtomicUsize::new(1);
+
+/// Generate a unique block ID
+pub fn next_block_id() -> usize {
+    NEXT_BLOCK_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 
 /// Role of the message sender
@@ -92,6 +101,12 @@ pub trait Block: Send + Sync {
     #[cfg(feature = "cli")]
     fn render(&self, width: u16) -> Vec<Line<'_>>;
 
+    /// Get the block's unique ID (0 if unassigned)
+    fn id(&self) -> usize { 0 }
+
+    /// Set the block's ID (called by container when adding)
+    fn set_id(&mut self, _id: usize) {}
+
     /// Get the status of this block
     fn status(&self) -> Status;
 
@@ -146,6 +161,41 @@ macro_rules! impl_base_block {
             $block_type
         }
 
+        fn id(&self) -> usize {
+            self.id
+        }
+
+        fn set_id(&mut self, id: usize) {
+            self.id = id;
+        }
+
+        fn status(&self) -> Status {
+            self.status
+        }
+
+        fn set_status(&mut self, status: Status) {
+            self.status = status;
+        }
+
+        fn append_text(&mut self, text: &str) {
+            self.text.push_str(text);
+        }
+
+        fn text(&self) -> Option<&str> {
+            Some(&self.text)
+        }
+    };
+}
+
+/// Macro for tool blocks that don't have their own ID field.
+/// These blocks use call_id for identification instead.
+#[macro_export]
+macro_rules! impl_tool_block {
+    ($block_type:expr) => {
+        fn kind(&self) -> BlockType {
+            $block_type
+        }
+
         fn status(&self) -> Status {
             self.status
         }
@@ -167,6 +217,8 @@ macro_rules! impl_base_block {
 /// Simple text content
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextBlock {
+    #[serde(default = "next_block_id")]
+    pub id: usize,
     pub text: String,
     pub status: Status,
 }
@@ -175,6 +227,7 @@ impl TextBlock {
     // TODO Delete `new` and force using a keyword to create
     pub fn new(text: impl Into<String>) -> Self {
         Self { 
+            id: next_block_id(),
             text: text.into(),
             status: Status::Running,
         }
@@ -182,6 +235,7 @@ impl TextBlock {
 
     pub fn pending(text: impl Into<String>) -> Self {
         Self {
+            id: next_block_id(),
             text: text.into(),
             status: Status::Pending,
         }
@@ -189,6 +243,7 @@ impl TextBlock {
 
     pub fn complete(text: impl Into<String>) -> Self {
         Self {
+            id: next_block_id(),
             text: text.into(),
             status: Status::Complete,
         }
@@ -211,6 +266,8 @@ impl Block for TextBlock {
 /// Thinking/reasoning content (extended thinking)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingBlock {
+    #[serde(default = "next_block_id")]
+    pub id: usize,
     pub text: String,
     pub status: Status,
 }
@@ -218,6 +275,7 @@ pub struct ThinkingBlock {
 impl ThinkingBlock {
     pub fn new(text: impl Into<String>) -> Self {
         Self { 
+            id: next_block_id(),
             text: text.into(),
             status: Status::Running,
         }
@@ -246,6 +304,8 @@ impl Block for ThinkingBlock {
 /// Generic tool content (fallback for tools without specialized display)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolBlock {
+    #[serde(default = "next_block_id")]
+    pub id: usize,
     pub call_id: String,
     pub name: String,
     pub params: serde_json::Value,
@@ -262,6 +322,7 @@ pub struct ToolBlock {
 impl ToolBlock {
     pub fn new(call_id: impl Into<String>, name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
         Self {
+            id: next_block_id(),
             call_id: call_id.into(),
             name: name.into(),
             params,
@@ -355,17 +416,20 @@ impl Block for ToolBlock {
 /// These are ephemeral - rendered but not persisted to the transcript.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationBlock {
+    #[serde(default = "next_block_id")]
+    pub id: usize,
     pub source: String,
-    pub message: String,
+    pub text: String,
     #[serde(skip_deserializing, default = "NotificationBlock::default_status")]
     status: Status,
 }
 
 impl NotificationBlock {
-    pub fn new(source: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(source: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
+            id: next_block_id(),
             source: source.into(),
-            message: message.into(),
+            text: text.into(),
             status: Status::Complete,
         }
     }
@@ -377,17 +441,7 @@ impl NotificationBlock {
 
 #[typetag::serde]
 impl Block for NotificationBlock {
-    fn kind(&self) -> BlockType {
-        BlockType::Text  // Treat as text for streaming purposes
-    }
-
-    fn status(&self) -> Status {
-        self.status
-    }
-
-    fn set_status(&mut self, status: Status) {
-        self.status = status;
-    }
+    impl_base_block!(BlockType::Text);
 
     fn is_ephemeral(&self) -> bool {
         true  // Key difference - not persisted
@@ -409,7 +463,7 @@ impl Block for NotificationBlock {
         ]));
         
         // Message content (wrapped)
-        let wrapped = textwrap::wrap(&self.message, width.saturating_sub(2) as usize);
+        let wrapped = textwrap::wrap(&self.text, width.saturating_sub(2) as usize);
         for line in wrapped {
             lines.push(Line::from(Span::styled(
                 format!("  {}", line),
@@ -418,10 +472,6 @@ impl Block for NotificationBlock {
         }
         
         lines
-    }
-
-    fn text(&self) -> Option<&str> {
-        Some(&self.message)
     }
 }
 
@@ -485,6 +535,79 @@ pub fn render_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
         )));
     }
     lines
+}
+
+/// Staging area for pending blocks (notifications, approvals) awaiting consumption.
+/// Similar to Turn but without role/timestamp - blocks here haven't entered the conversation yet.
+#[derive(Default)]
+pub struct Stage {
+    blocks: Vec<Box<dyn Block>>,
+}
+
+impl Stage {
+    pub fn new() -> Self {
+        Self { blocks: Vec::new() }
+    }
+
+    /// Add a block to staging, returns its ID
+    pub fn push(&mut self, block: Box<dyn Block>) -> usize {
+        let id = block.id();
+        self.blocks.push(block);
+        id
+    }
+
+    /// Get a block by ID
+    pub fn get(&self, id: usize) -> Option<&Box<dyn Block>> {
+        self.blocks.iter().find(|b| b.id() == id)
+    }
+
+    /// Get a mutable block by ID
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut Box<dyn Block>> {
+        self.blocks.iter_mut().find(|b| b.id() == id)
+    }
+
+    /// Remove and return a block by ID (for promotion to transcript)
+    pub fn remove(&mut self, id: usize) -> Option<Box<dyn Block>> {
+        if let Some(pos) = self.blocks.iter().position(|b| b.id() == id) {
+            Some(self.blocks.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    /// Check if staging is empty
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    /// Number of staged blocks
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Iterate over blocks (for rendering)
+    pub fn iter(&self) -> impl Iterator<Item = &Box<dyn Block>> {
+        self.blocks.iter()
+    }
+
+    /// Drain all blocks (for batch promotion)
+    pub fn drain_all(&mut self) -> Vec<Box<dyn Block>> {
+        self.blocks.drain(..).collect()
+    }
+
+    /// Render all staged blocks with given width (CLI only)
+    #[cfg(feature = "cli")]
+    pub fn render(&self, width: u16) -> Vec<Line<'_>> {
+        let mut lines = Vec::new();
+        for (i, block) in self.blocks.iter().enumerate() {
+            lines.extend(block.render(width));
+            // Add blank line between blocks (but not after last)
+            if i < self.blocks.len() - 1 {
+                lines.push(Line::from(""));
+            }
+        }
+        lines
+    }
 }
 
 /// A turn in the conversation - one user or assistant response
@@ -612,6 +735,9 @@ pub struct Transcript {
     /// ID of the current turn being streamed to (if any)
     #[serde(skip)]
     current_turn_id: Option<usize>,
+    /// Staging area for pending blocks
+    #[serde(skip)]
+    pub stage: Stage,
 }
 
 impl Transcript {
@@ -622,6 +748,7 @@ impl Transcript {
             next_id: 0,
             path: Some(path),
             current_turn_id: None,
+            stage: Stage::new(),
         }
     }
 

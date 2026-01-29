@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde::{Deserialize, Serialize};
 
-use crate::impl_base_block;
+use crate::impl_tool_block;
 use crate::transcript::{Block, BlockType, Status};
 
 /// Compaction summary block - shown when context was compacted
@@ -29,7 +29,7 @@ impl CompactionBlock {
 
 #[typetag::serde]
 impl Block for CompactionBlock {
-    impl_base_block!(BlockType::Compaction);
+    impl_tool_block!(BlockType::Compaction);
 
     fn render(&self, width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
