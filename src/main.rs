@@ -6,6 +6,7 @@ mod config;
 mod effect;
 mod ide;
 mod llm;
+mod notifications;
 #[cfg(feature = "profiling")]
 mod profiler;
 mod prompts;

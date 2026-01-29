@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use super::{Tool, ToolPipeline};
 use crate::auth::OAuthCredentials;
 use crate::config::AgentRuntimeConfig;
-use crate::impl_base_block;
+use crate::impl_tool_block;
 use crate::llm::{Agent, RequestMode};
 use crate::prompts::SUB_AGENT_PROMPT;
 use crate::tools::pipeline::{Effect, EffectHandler, Step};
@@ -90,7 +90,7 @@ impl SpawnAgentBlock {
 
 #[typetag::serde]
 impl Block for SpawnAgentBlock {
-    impl_base_block!(BlockType::Tool);
+    impl_tool_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();

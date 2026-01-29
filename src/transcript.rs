@@ -4,6 +4,7 @@
 //! A Transcript contains Turns, and each Turn contains Blocks.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 #[cfg(feature = "cli")]
@@ -11,7 +12,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
 };
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Serialize};
 
 #[cfg(feature = "cli")]
 use crate::compaction::CompactionBlock;
@@ -19,6 +20,13 @@ use crate::config::{CODEY_DIR, TRANSCRIPTS_DIR};
 #[cfg(feature = "cli")]
 use crate::tools::io::{format_for_user, DEFAULT_TAB_WIDTH};
 
+/// Global counter for unique block IDs
+static NEXT_BLOCK_ID: AtomicUsize = AtomicUsize::new(1);
+
+/// Generate a unique block ID
+pub fn next_block_id() -> usize {
+    NEXT_BLOCK_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Role of the message sender
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,7 +89,6 @@ fn transcript_path(dir: &Path, number: u32) -> PathBuf {
     dir.join(format!("{:06}.json", number))
 }
 
-
 /// Trait for all blocks in a turn
 #[typetag::serde(tag = "type")]
 pub trait Block: Send + Sync {
@@ -92,11 +99,25 @@ pub trait Block: Send + Sync {
     #[cfg(feature = "cli")]
     fn render(&self, width: u16) -> Vec<Line<'_>>;
 
+    /// Get the block's unique ID (0 if unassigned)
+    fn id(&self) -> usize {
+        0
+    }
+
+    /// Set the block's ID (called by container when adding)
+    fn set_id(&mut self, _id: usize) {}
+
     /// Get the status of this block
     fn status(&self) -> Status;
 
     /// Set the status of this block
     fn set_status(&mut self, status: Status);
+
+    /// Whether this block is ephemeral (rendered but not persisted)
+    /// Ephemeral blocks are filtered out during serialization.
+    fn is_ephemeral(&self) -> bool {
+        false
+    }
 
     /// Render status icon with appropriate color (CLI only)
     #[cfg(feature = "cli")]
@@ -116,27 +137,72 @@ pub trait Block: Send + Sync {
     fn append_text(&mut self, _text: &str) {}
 
     /// Get the text content of this block (for restoring agent context)
-    fn text(&self) -> Option<&str> { None }
+    fn text(&self) -> Option<&str> {
+        None
+    }
 
     /// Get the tool call ID (for restoring agent context)
-    fn call_id(&self) -> Option<&str> { None }
+    fn call_id(&self) -> Option<&str> {
+        None
+    }
 
     /// Get the tool name (for restoring agent context)
-    fn tool_name(&self) -> Option<&str> { None }
+    fn tool_name(&self) -> Option<&str> {
+        None
+    }
 
     /// Get the tool params (for restoring agent context)
-    fn params(&self) -> Option<&serde_json::Value> { None }
+    fn params(&self) -> Option<&serde_json::Value> {
+        None
+    }
 
     /// Set the agent label (for sub-agent tools)
     fn set_agent_label(&mut self, _label: String) {}
 
     /// Get the agent label (for sub-agent tools)
-    fn agent_label(&self) -> Option<&str> { None }
+    fn agent_label(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Macro to implement common Block trait methods for blocks with text and status fields
 #[macro_export]
 macro_rules! impl_base_block {
+    ($block_type:expr) => {
+        fn kind(&self) -> BlockType {
+            $block_type
+        }
+
+        fn id(&self) -> usize {
+            self.id
+        }
+
+        fn set_id(&mut self, id: usize) {
+            self.id = id;
+        }
+
+        fn status(&self) -> Status {
+            self.status
+        }
+
+        fn set_status(&mut self, status: Status) {
+            self.status = status;
+        }
+
+        fn append_text(&mut self, text: &str) {
+            self.text.push_str(text);
+        }
+
+        fn text(&self) -> Option<&str> {
+            Some(&self.text)
+        }
+    };
+}
+
+/// Macro for tool blocks that don't have their own ID field.
+/// These blocks use call_id for identification instead.
+#[macro_export]
+macro_rules! impl_tool_block {
     ($block_type:expr) => {
         fn kind(&self) -> BlockType {
             $block_type
@@ -163,6 +229,8 @@ macro_rules! impl_base_block {
 /// Simple text content
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextBlock {
+    #[serde(default = "next_block_id")]
+    pub id: usize,
     pub text: String,
     pub status: Status,
 }
@@ -170,7 +238,8 @@ pub struct TextBlock {
 impl TextBlock {
     // TODO Delete `new` and force using a keyword to create
     pub fn new(text: impl Into<String>) -> Self {
-        Self { 
+        Self {
+            id: next_block_id(),
             text: text.into(),
             status: Status::Running,
         }
@@ -178,6 +247,7 @@ impl TextBlock {
 
     pub fn pending(text: impl Into<String>) -> Self {
         Self {
+            id: next_block_id(),
             text: text.into(),
             status: Status::Pending,
         }
@@ -185,6 +255,7 @@ impl TextBlock {
 
     pub fn complete(text: impl Into<String>) -> Self {
         Self {
+            id: next_block_id(),
             text: text.into(),
             status: Status::Complete,
         }
@@ -207,13 +278,16 @@ impl Block for TextBlock {
 /// Thinking/reasoning content (extended thinking)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThinkingBlock {
+    #[serde(default = "next_block_id")]
+    pub id: usize,
     pub text: String,
     pub status: Status,
 }
 
 impl ThinkingBlock {
     pub fn new(text: impl Into<String>) -> Self {
-        Self { 
+        Self {
+            id: next_block_id(),
             text: text.into(),
             status: Status::Running,
         }
@@ -242,6 +316,8 @@ impl Block for ThinkingBlock {
 /// Generic tool content (fallback for tools without specialized display)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolBlock {
+    #[serde(default = "next_block_id")]
+    pub id: usize,
     pub call_id: String,
     pub name: String,
     pub params: serde_json::Value,
@@ -256,8 +332,14 @@ pub struct ToolBlock {
 }
 
 impl ToolBlock {
-    pub fn new(call_id: impl Into<String>, name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
+    pub fn new(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        params: serde_json::Value,
+        background: bool,
+    ) -> Self {
         Self {
+            id: next_block_id(),
             call_id: call_id.into(),
             name: name.into(),
             params,
@@ -347,6 +429,51 @@ impl Block for ToolBlock {
     }
 }
 
+/// Notification block for mid-turn injected messages
+/// These are ephemeral - rendered but not persisted to the transcript.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationBlock {
+    #[serde(default = "next_block_id")]
+    pub id: usize,
+    pub source: String,
+    pub text: String,
+    #[serde(skip_deserializing, default = "NotificationBlock::default_status")]
+    status: Status,
+}
+
+impl NotificationBlock {
+    pub fn new(source: impl Into<String>, text: impl Into<String>) -> Self {
+        Self {
+            id: next_block_id(),
+            source: source.into(),
+            text: text.into(),
+            status: Status::Complete,
+        }
+    }
+
+    fn default_status() -> Status {
+        Status::Complete
+    }
+}
+
+#[typetag::serde]
+impl Block for NotificationBlock {
+    impl_base_block!(BlockType::Text);
+
+    fn is_ephemeral(&self) -> bool {
+        true // Key difference - not persisted
+    }
+
+    #[cfg(feature = "cli")]
+    fn render(&self, _width: u16) -> Vec<Line<'_>> {
+        // Single line: » source: text
+        vec![Line::from(vec![
+            Span::styled("» ", Style::default().fg(Color::Yellow)),
+            Span::styled(&self.text, Style::default().fg(Color::Yellow)),
+        ])]
+    }
+}
+
 /// Helper: render prefix for background tools - "[bg] " if true, empty otherwise
 #[cfg(feature = "cli")]
 pub fn render_prefix(background: bool) -> Span<'static> {
@@ -380,9 +507,7 @@ pub fn render_approval_prompt() -> Line<'static> {
         Span::styled("]es  [", Style::default().fg(Color::DarkGray)),
         Span::styled(
             "n",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
         Span::styled("]o", Style::default().fg(Color::DarkGray)),
     ])
@@ -409,8 +534,81 @@ pub fn render_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// Staging area for pending blocks (notifications, approvals) awaiting consumption.
+/// Similar to Turn but without role/timestamp - blocks here haven't entered the conversation yet.
+#[derive(Default)]
+pub struct Stage {
+    blocks: Vec<Box<dyn Block>>,
+}
+
+impl Stage {
+    pub fn new() -> Self {
+        Self { blocks: Vec::new() }
+    }
+
+    /// Add a block to staging, returns its ID
+    pub fn push(&mut self, block: Box<dyn Block>) -> usize {
+        let id = block.id();
+        self.blocks.push(block);
+        id
+    }
+
+    /// Get a block by ID
+    pub fn get(&self, id: usize) -> Option<&Box<dyn Block>> {
+        self.blocks.iter().find(|b| b.id() == id)
+    }
+
+    /// Get a mutable block by ID
+    pub fn get_mut(&mut self, id: usize) -> Option<&mut Box<dyn Block>> {
+        self.blocks.iter_mut().find(|b| b.id() == id)
+    }
+
+    /// Remove and return a block by ID (for promotion to transcript)
+    pub fn remove(&mut self, id: usize) -> Option<Box<dyn Block>> {
+        if let Some(pos) = self.blocks.iter().position(|b| b.id() == id) {
+            Some(self.blocks.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    /// Check if staging is empty
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    /// Number of staged blocks
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Iterate over blocks (for rendering)
+    pub fn iter(&self) -> impl Iterator<Item = &Box<dyn Block>> {
+        self.blocks.iter()
+    }
+
+    /// Drain all blocks (for batch promotion)
+    pub fn drain_all(&mut self) -> Vec<Box<dyn Block>> {
+        self.blocks.drain(..).collect()
+    }
+
+    /// Render all staged blocks with given width (CLI only)
+    #[cfg(feature = "cli")]
+    pub fn render(&self, width: u16) -> Vec<Line<'_>> {
+        let mut lines = Vec::new();
+        for (i, block) in self.blocks.iter().enumerate() {
+            lines.extend(block.render(width));
+            // Add blank line between blocks (but not after last)
+            if i < self.blocks.len() - 1 {
+                lines.push(Line::from(""));
+            }
+        }
+        lines
+    }
+}
+
 /// A turn in the conversation - one user or assistant response
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 pub struct Turn {
     pub id: usize,
     pub role: Role,
@@ -419,6 +617,25 @@ pub struct Turn {
     /// Index of the currently active (streaming) block, if any
     #[serde(skip)]
     pub active_block_idx: Option<usize>,
+}
+
+/// Custom serialization that filters out ephemeral blocks
+impl Serialize for Turn {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Filter out ephemeral blocks before serializing
+        let persistent_content: Vec<&Box<dyn Block>> =
+            self.content.iter().filter(|b| !b.is_ephemeral()).collect();
+
+        let mut state = serializer.serialize_struct("Turn", 4)?;
+        state.serialize_field("id", &self.id)?;
+        state.serialize_field("role", &self.role)?;
+        state.serialize_field("content", &persistent_content)?;
+        state.serialize_field("timestamp", &self.timestamp)?;
+        state.end()
+    }
 }
 
 impl Turn {
@@ -485,7 +702,8 @@ impl Turn {
 
     /// Get a mutable reference to the active block
     pub fn get_active_block_mut(&mut self) -> Option<&mut (dyn Block + 'static)> {
-        self.active_block_idx.and_then(|idx| self.get_block_mut(idx))
+        self.active_block_idx
+            .and_then(|idx| self.get_block_mut(idx))
     }
 
     /// Render all blocks with given width (CLI only)
@@ -513,6 +731,9 @@ pub struct Transcript {
     /// ID of the current turn being streamed to (if any)
     #[serde(skip)]
     current_turn_id: Option<usize>,
+    /// Staging area for pending blocks
+    #[serde(skip)]
+    pub stage: Stage,
 }
 
 impl Transcript {
@@ -523,6 +744,7 @@ impl Transcript {
             next_id: 0,
             path: Some(path),
             current_turn_id: None,
+            stage: Stage::new(),
         }
     }
 
@@ -580,10 +802,10 @@ impl Transcript {
 
     /// Get mutable reference to the current turn. Panics if no turn is active.
     fn current_turn_mut(&mut self) -> &mut Turn {
-        let turn_id = self.current_turn_id
+        let turn_id = self
+            .current_turn_id
             .expect("No active turn - call begin_turn() first");
-        self.get_mut(turn_id)
-            .expect("Current turn ID is invalid")
+        self.get_mut(turn_id).expect("Current turn ID is invalid")
     }
 
     /// Stream a delta to the current turn.
@@ -654,7 +876,7 @@ impl Transcript {
         let path = self.path.as_ref().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::Other, "No path set for transcript")
         })?;
-        
+
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -668,7 +890,7 @@ impl Transcript {
     /// If no transcripts exist, creates a new one with number 0
     pub fn load() -> std::io::Result<Self> {
         let dir = get_transcripts_dir()?;
-        
+
         if let Some(latest_number) = find_latest_transcript_number(&dir) {
             let path = transcript_path(&dir, latest_number);
             let file = std::fs::File::open(&path)?;
@@ -686,11 +908,11 @@ impl Transcript {
     /// Create a new empty transcript with the next available number
     pub fn new_numbered() -> std::io::Result<Self> {
         let dir = get_transcripts_dir()?;
-        
+
         let next_number = find_latest_transcript_number(&dir)
             .map(|n| n + 1)
             .unwrap_or(0);
-        
+
         let path = transcript_path(&dir, next_number);
         Ok(Self::with_path(path))
     }
@@ -704,16 +926,16 @@ impl Transcript {
 
         // Get transcripts directory
         let dir = get_transcripts_dir()?;
-        
+
         // Find next number
         let next_number = find_latest_transcript_number(&dir)
             .map(|n| n + 1)
             .unwrap_or(0);
-        
+
         // Create new transcript with next path
         let new_path = transcript_path(&dir, next_number);
         let mut new_transcript = Self::with_path(new_path);
-        
+
         // Check if last turn has a CompactionBlock and carry it over
         #[cfg(feature = "cli")]
         if let Some(last_turn) = self.turns.last() {
@@ -729,7 +951,7 @@ impl Transcript {
                 }
             }
         }
-        
+
         Ok(new_transcript)
     }
 }
@@ -769,18 +991,18 @@ mod tests {
         assert_eq!(transcript.get_mut(id1).unwrap().role, Role::User);
         assert_eq!(transcript.get_mut(id2).unwrap().role, Role::Assistant);
     }
-    
+
     #[test]
     fn test_turn_streaming() {
         let mut turn = Turn::new(0, Role::Assistant, vec![]);
-        
+
         // Start streaming - add a text block and get its index
         let idx = turn.add_block(Box::new(TextBlock::new("Hello")));
         assert_eq!(idx, 0);
-        
+
         // Append to that block
         turn.append_to_block(idx, " world");
-        
+
         assert_eq!(turn.content.len(), 1);
     }
 
@@ -799,7 +1021,7 @@ mod tests {
         // Load by reading the file directly
         let file = std::fs::File::open(&path).expect("Failed to open file");
         let loaded: Transcript = serde_json::from_reader(file).expect("Failed to deserialize");
-        
+
         assert_eq!(loaded.turns().len(), 3);
         assert_eq!(loaded.turns()[0].role, Role::User);
         assert_eq!(loaded.turns()[1].role, Role::Assistant);
@@ -820,9 +1042,14 @@ mod tests {
 
         let mut transcript = Transcript::with_path(path.clone());
         transcript.add_turn(Role::User, TextBlock::new("Run ls"));
-        
+
         // Add an assistant turn with a tool block
-        let mut tool_block = ToolBlock::new("call_123", "shell", serde_json::json!({"command": "ls"}), false);
+        let mut tool_block = ToolBlock::new(
+            "call_123",
+            "shell",
+            serde_json::json!({"command": "ls"}),
+            false,
+        );
         tool_block.set_status(Status::Complete);
         tool_block.append_text("file1.txt\nfile2.txt");
         transcript.add_turn(Role::Assistant, tool_block);
@@ -832,9 +1059,9 @@ mod tests {
         // Load by reading the file directly
         let file = std::fs::File::open(&path).expect("Failed to open file");
         let loaded: Transcript = serde_json::from_reader(file).expect("Failed to deserialize");
-        
+
         assert_eq!(loaded.turns().len(), 2);
-        
+
         // Verify tool block is preserved
         let tool_turn = &loaded.turns()[1];
         assert_eq!(tool_turn.role, Role::Assistant);

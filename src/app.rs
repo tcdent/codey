@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::io::{self, Stdout};
 use std::time::{Duration, Instant};
 
@@ -22,13 +21,14 @@ use crate::ide::{Ide, IdeEvent, Nvim};
 use crate::llm::{Agent, AgentId, AgentRegistry, AgentStatus, AgentStep, RequestMode};
 #[cfg(feature = "profiling")]
 use crate::{profile_frame, profile_span};
+use crate::notifications::{Notification, NotificationQueue};
 use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, WELCOME_MESSAGE};
 use crate::tool_filter::ToolFilters;
 use crate::tools::{
-    init_agent_context, init_browser_context, update_agent_oauth, EffectResult,
-    ToolDecision, ToolEvent, ToolExecutor, ToolRegistry,
+    init_agent_context, init_browser_context, update_agent_oauth, EffectResult, ToolDecision,
+    ToolEvent, ToolExecutor, ToolRegistry,
 };
-use crate::transcript::{BlockType, Role, Status, TextBlock, Transcript};
+use crate::transcript::{Block, BlockType, NotificationBlock, Role, Status, TextBlock, Transcript};
 use crate::ui::{Attachment, ChatView, InputBox};
 
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
@@ -49,17 +49,6 @@ enum InputMode {
     Normal,
     Streaming,
     ToolApproval,
-}
-
-/// Types of messages that can be processed through the event loop
-#[derive(Debug, Clone)]
-enum MessageRequest {
-    /// Regular user message (content, turn_id)
-    User(String, usize),
-    /// Compaction request (triggered when context exceeds threshold)
-    Compaction,
-    /// Command execution (command_name, turn_id)
-    Command(String, usize),
 }
 
 /// Actions that can be triggered by terminal events
@@ -173,8 +162,6 @@ pub struct App {
     /// Flag to indicate a quit request
     should_quit: bool,
     continue_session: bool,
-    /// Queue of messages waiting to be processed
-    message_queue: VecDeque<MessageRequest>,
     /// Last render time for frame rate limiting
     last_render: Instant,
     /// Alert message to display (cleared on next user input)
@@ -195,6 +182,8 @@ pub struct App {
     oauth: Option<crate::auth::OAuthCredentials>,
     /// Queue for pending effects (approvals, IDE previews, etc.)
     effects: EffectQueue,
+    /// Notifications to inject into next tool result
+    notifications: NotificationQueue,
 }
 
 impl App {
@@ -293,7 +282,6 @@ impl App {
             input: InputBox::new(),
             should_quit: false,
             continue_session,
-            message_queue: VecDeque::new(),
             last_render: Instant::now(),
             alert: None,
             tool_filters,
@@ -304,7 +292,35 @@ impl App {
             tool_executor: ToolExecutor::new(ToolRegistry::new()),
             oauth: None,
             effects: EffectQueue::new(),
+            notifications: NotificationQueue::new(),
         })
+    }
+
+    /// Refresh OAuth credentials if expired, updating both App and primary agent
+    async fn refresh_oauth(&mut self) {
+        if let Some(ref oauth) = self.oauth {
+            if oauth.is_expired() {
+                tracing::info!("Refreshing expired OAuth token");
+                match crate::auth::refresh_token(oauth).await {
+                    Ok(new_creds) => {
+                        if let Err(e) = new_creds.save() {
+                            tracing::warn!("Failed to save refreshed OAuth credentials: {}", e);
+                        }
+                        // Update App's copy
+                        self.oauth = Some(new_creds.clone());
+                        // Update agent context for sub-agents
+                        update_agent_oauth(self.oauth.clone()).await;
+                        // Update primary agent's copy
+                        if let Some(agent_mutex) = self.agents.primary() {
+                            agent_mutex.lock().await.set_oauth(Some(new_creds));
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to refresh OAuth token: {}", e);
+                    },
+                }
+            }
+        }
     }
 
     /// Run the main event loop - purely event-driven rendering
@@ -365,9 +381,10 @@ impl App {
                 Some(tool_event) = self.tool_executor.next() => {
                     self.handle_tool_event(tool_event).await?;
                 }
-                // Handle queued messages when in normal input mode
-                Some(request) = async { self.message_queue.pop_front() }, if self.input_mode == InputMode::Normal => {
-                    self.handle_message(request).await?;
+                // Handle notifications when in normal input mode
+                _ = std::future::ready(()), if self.input_mode == InputMode::Normal && !self.notifications.is_empty() => {
+                    let notifications = self.notifications.drain_all();
+                    self.handle_notifications(notifications).await?;
                 }
                 // Handle pending effects (IDE previews waiting for slot, etc.)
                 _ = std::future::ready(()), if self.effects.has_pollable() => {
@@ -385,6 +402,19 @@ impl App {
         }
 
         self.restore_terminal()
+    }
+
+    /// Cancel the current agent request and reset input mode
+    async fn cancel(&mut self) -> Result<()> {
+        if let Some(agent_mutex) = self.agents.primary() {
+            agent_mutex.lock().await.cancel();
+        }
+        self.chat.finish_turn(&mut self.terminal);
+        if let Err(e) = self.chat.transcript.save() {
+            tracing::error!("Failed to save transcript on cancel: {}", e);
+        }
+        self.input_mode = InputMode::Normal;
+        Ok(())
     }
 
     /// Draw the UI
@@ -418,14 +448,12 @@ impl App {
             .primary()
             .and_then(|m| m.try_lock().ok())
             .map_or(0, |a| a.total_usage().context_tokens);
-        let input_widget = self
-            .input
-            .widget(
-                &self.config.agents.foreground.model,
-                context_tokens,
-                self.tool_executor.running_background_count() + self.agents.running_background_count(),
-                self.input_mode != InputMode::Normal,
-            );
+        let input_widget = self.input.widget(
+            &self.config.agents.foreground.model,
+            context_tokens,
+            self.tool_executor.running_background_count() + self.agents.running_background_count(),
+            self.input_mode != InputMode::Normal,
+        );
         let alert = self.alert.clone();
 
         if let Err(e) = self.terminal.draw(|frame| {
@@ -473,6 +501,78 @@ impl App {
         self.draw();
     }
 
+    /// Queue a user message or command for processing.
+    /// Stages a block for rendering and queues a notification for processing.
+    fn queue_message(&mut self, content: String) {
+        if let Some(command) = Command::parse(&content) {
+            let name = command.name().to_string();
+            // Stage block for visual feedback
+            let block = TextBlock::pending(format!("/{}", name));
+            let block_id = self.chat.transcript.stage.push(Box::new(block));
+            self.notifications
+                .push(Notification::Command { name, block_id });
+        } else {
+            // Stage block for visual feedback
+            let block = TextBlock::pending(&content);
+            let block_id = self.chat.transcript.stage.push(Box::new(block));
+            self.notifications
+                .push(Notification::Message { content, block_id });
+        }
+
+        self.chat.render(&mut self.terminal);
+        self.draw();
+    }
+
+    /// Queue a compaction request
+    pub fn queue_compaction(&mut self) {
+        let block = TextBlock::pending("[Compaction requested]");
+        let block_id = self.chat.transcript.stage.push(Box::new(block));
+        self.notifications.push(Notification::Compaction { block_id });
+    }
+
+    /// Execute a tool decision (approve/deny) for the currently active tool
+    async fn decide_pending_tool(&mut self, decision: ToolDecision) {
+        tracing::debug!("decide_pending_tool: decision={:?}", decision);
+
+        // Take the currently active approval
+        let pending = match self.effects.take_active_approval() {
+            Some(p) => p,
+            None => {
+                tracing::warn!("No tool awaiting approval");
+                return;
+            },
+        };
+
+        // Update block status based on decision
+        if let Some(block) = self.chat.transcript.find_tool_block_mut(&pending.call_id) {
+            block.set_status(match decision {
+                ToolDecision::Approve => Status::Running,
+                ToolDecision::Deny => Status::Denied,
+                _ => Status::Pending,
+            });
+        }
+
+        // Convert decision to EffectResult and send to executor
+        let result: EffectResult = match decision {
+            ToolDecision::Approve => Ok(None),
+            ToolDecision::Deny => Err("Denied by user".to_string()),
+            _ => Err("Unexpected decision".to_string()),
+        };
+        tracing::debug!(
+            "decide_pending_tool: sending decision for {}",
+            pending.call_id
+        );
+        pending.complete(result);
+
+        // If no more acknowledged approvals, switch mode
+        // (next unacknowledged approval will be handled by polling)
+        if !self.effects.has_active_approval() {
+            self.input_mode = InputMode::Streaming;
+        }
+
+        self.chat.render(&mut self.terminal);
+        self.draw();
+    }
     /// Handle an action. Returns the result indicating what the main loop should do.
     async fn handle_action(&mut self, action: Action) -> ActionResult {
         // Clear alert on any input action
@@ -534,48 +634,6 @@ impl App {
         ActionResult::Continue
     }
 
-    /// Queue a user message or command for processing
-    fn queue_message(&mut self, content: String) {
-        let message = match Command::parse(&content) {
-            Some(command) => {
-                // Slash command
-                let name = command.name().to_string();
-                let turn_id = self
-                    .chat
-                    .add_turn(Role::User, TextBlock::pending(format!("/{}", name)));
-                MessageRequest::Command(name, turn_id)
-            },
-            None => {
-                // Regular user message
-                let turn_id = self.chat.add_turn(Role::User, TextBlock::pending(&content));
-                MessageRequest::User(content, turn_id)
-            },
-        };
-        self.message_queue.push_back(message);
-
-        self.chat.render(&mut self.terminal);
-        self.draw();
-    }
-
-    /// Queue a compaction request
-    pub fn queue_compaction(&mut self) {
-        // TODO push_front?
-        self.message_queue.push_back(MessageRequest::Compaction);
-    }
-
-    /// Cancel the current agent request and reset input mode
-    async fn cancel(&mut self) -> Result<()> {
-        if let Some(agent_mutex) = self.agents.primary() {
-            agent_mutex.lock().await.cancel();
-        }
-        self.chat.finish_turn(&mut self.terminal);
-        if let Err(e) = self.chat.transcript.save() {
-            tracing::error!("Failed to save transcript on cancel: {}", e);
-        }
-        self.input_mode = InputMode::Normal;
-        Ok(())
-    }
-
     /// Handle a terminal event
     async fn handle_term_event(&mut self, event: std::io::Result<Event>) -> Result<()> {
         let event = match event {
@@ -622,422 +680,161 @@ impl App {
         }
     }
 
-    /// Refresh OAuth credentials if expired, updating both App and primary agent
-    async fn refresh_oauth(&mut self) {
-        if let Some(ref oauth) = self.oauth {
-            if oauth.is_expired() {
-                tracing::info!("Refreshing expired OAuth token");
-                match crate::auth::refresh_token(oauth).await {
-                    Ok(new_creds) => {
-                        if let Err(e) = new_creds.save() {
-                            tracing::warn!("Failed to save refreshed OAuth credentials: {}", e);
-                        }
-                        // Update App's copy
-                        self.oauth = Some(new_creds.clone());
-                        // Update agent context for sub-agents
-                        update_agent_oauth(self.oauth.clone()).await;
-                        // Update primary agent's copy
-                        if let Some(agent_mutex) = self.agents.primary() {
-                            agent_mutex.lock().await.set_oauth(Some(new_creds));
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to refresh OAuth token: {}", e);
-                    }
-                }
-            }
-        }
-    }
-
-    /// Start processing a message request
-    async fn handle_message(&mut self, request: MessageRequest) -> Result<()> {
+    /// Handle notifications from the queue.
+    /// Batches messages together into a single request, executes commands individually.
+    async fn handle_notifications(&mut self, notifications: Vec<Notification>) -> Result<()> {
         // Refresh OAuth token if needed
         self.refresh_oauth().await;
 
-        match request {
-            MessageRequest::Command(name, turn_id) => {
-                self.chat.mark_last_block_complete(turn_id);
+        // Separate by type: messages get batched, commands execute individually
+        let mut messages: Vec<(String, usize)> = Vec::new();  // (content, block_id)
+        let mut commands: Vec<(String, usize)> = Vec::new();  // (name, block_id)
+        let mut background_tools: Vec<(String, String, usize)> = Vec::new();  // (label, result, block_id)
+        let mut background_agents: Vec<(String, String, usize)> = Vec::new();  // (label, result, block_id)
+        let mut has_compaction = false;
 
-                if let Some(command) = Command::get(&name) {
-                    match command.execute(self) {
-                        Ok(None) => {
-                            // Command executed, no output - still need to render
-                            self.chat.render(&mut self.terminal);
-                            self.draw();
-                        },
-                        Ok(Some(output)) => {
-                            let idx = self.chat.transcript.add_empty(Role::Assistant);
-                            if let Some(turn) = self.chat.transcript.get_mut(idx) {
-                                turn.start_block(Box::new(TextBlock::complete(&output)));
-                            }
-                            self.chat.render(&mut self.terminal);
-                            self.draw();
-                        },
-                        Err(e) => {
-                            tracing::error!("Command execution error: {}", e);
-                            self.alert = Some(format!("Command error: {}", e));
-                        },
-                    }
+        for notification in notifications {
+            match notification {
+                Notification::Message { content, block_id } => {
+                    messages.push((content, block_id));
                 }
-            },
-            MessageRequest::User(content, turn_id) => {
-                self.chat.mark_last_block_complete(turn_id);
-                self.chat.render(&mut self.terminal);
-                self.draw();
-
-                if let Some(agent_mutex) = self.agents.primary() {
-                    agent_mutex
-                        .lock()
-                        .await
-                        .send_request(&content, RequestMode::Normal);
+                Notification::Command { name, block_id } => {
+                    commands.push((name, block_id));
                 }
-                self.chat.begin_turn(Role::Assistant, &mut self.terminal);
-                self.input_mode = InputMode::Streaming;
-            },
-            MessageRequest::Compaction => {
-                if let Some(agent_mutex) = self.agents.primary() {
-                    agent_mutex
-                        .lock()
-                        .await
-                        .send_request(COMPACTION_PROMPT, RequestMode::Compaction);
+                Notification::BackgroundTool { label, result, block_id } => {
+                    background_tools.push((label, result, block_id));
                 }
-                self.chat.begin_turn(Role::Assistant, &mut self.terminal);
-                self.input_mode = InputMode::Streaming;
-            },
-        }
-
-        self.chat.render(&mut self.terminal);
-        self.draw();
-
-        Ok(())
-    }
-
-    /// Handle a single agent step during streaming
-    async fn handle_agent_step(&mut self, agent_id: AgentId, step: AgentStep) -> Result<()> {
-        let is_primary = self.agents.primary_id() == Some(agent_id);
-
-        match step {
-            AgentStep::TextDelta(text) => {
-                if !is_primary { return Ok(()); }
-                self.chat.transcript.stream_delta(BlockType::Text, &text);
-            },
-            AgentStep::CompactionDelta(text) => {
-                if !is_primary { return Ok(()); }
-                self.chat
-                    .transcript
-                    .stream_delta(BlockType::Compaction, &text);
-            },
-            AgentStep::ThinkingDelta(text) => {
-                if !is_primary { return Ok(()); }
-                self.chat
-                    .transcript
-                    .stream_delta(BlockType::Thinking, &text);
-            },
-            AgentStep::ToolRequest(tool_calls) => {
-                // Set agent_id on each tool call before enqueuing
-                let tool_calls: Vec<_> = tool_calls
-                    .into_iter()
-                    .map(|tc| tc.with_agent_id(agent_id))
-                    .collect();
-                self.tool_executor.enqueue(tool_calls);
-            },
-            AgentStep::Retrying { attempt, error } => {
-                self.alert = Some(format!(
-                    "Request failed (attempt {}): {}. Retrying...",
-                    attempt, error
-                ));
-                tracing::warn!("Retrying request: attempt {}, error: {}", attempt, error);
-            },
-            AgentStep::Finished { usage } => {
-                if is_primary {
-                    self.input_mode = InputMode::Normal;
-
-                    // Handle compaction completion
-                    // TODO something more robust than checking active block type
-                    if self
-                        .chat
-                        .transcript
-                        .is_streaming_block_type(BlockType::Compaction)
-                    {
-                        self.chat.transcript.finish_turn();
-                        if let Err(e) = self.chat.transcript.save() {
-                            tracing::error!("Failed to save transcript before compaction: {}", e);
-                        }
-                        match self.chat.transcript.rotate() {
-                            Ok(new_transcript) => {
-                                tracing::info!(
-                                    "Compaction complete, rotating to {:?}",
-                                    new_transcript.path()
-                                );
-                                self.chat
-                                    .reset_transcript(new_transcript, &mut self.terminal);
-                                self.draw();
-                            },
-                            Err(e) => {
-                                tracing::error!("Failed to rotate transcript: {}", e);
-                            },
-                        }
-                    } else {
-                        // Normal completion
-                        self.chat.transcript.finish_turn();
-                        if let Err(e) = self.chat.transcript.save() {
-                            tracing::error!("Failed to save transcript: {}", e);
-                        }
-
-                        // Check if compaction is needed
-                        if usage.context_tokens >= self.config.general.compaction_threshold {
-                            self.queue_compaction();
+                Notification::BackgroundAgent { label, result, block_id } => {
+                    background_agents.push((label, result, block_id));
+                }
+                Notification::Compaction { block_id } => {
+                    has_compaction = true;
+                    // Promote compaction block from stage
+                    if let Some(mut block) = self.chat.transcript.stage.remove(block_id) {
+                        block.set_status(Status::Complete);
+                        let turn_id = self.chat.transcript.add_empty(Role::User);
+                        if let Some(turn) = self.chat.transcript.get_mut(turn_id) {
+                            turn.add_block(block);
                         }
                     }
-                } else {
-                    // Sub-agent finished - just mark as finished and log
-                    // Result will be retrieved via get_agent tool when primary agent requests it
-                    let label = self.agents.metadata(agent_id)
-                        .map(|m| m.label.clone())
-                        .unwrap_or_default();
-                    self.agents.finish(agent_id);
-                    tracing::info!("Sub-agent {} ({}) finished", agent_id, label);
-                }
-            },
-            AgentStep::Error(msg) => {
-                self.chat.transcript.mark_active_block(Status::Error);
-                if let Err(e) = self.chat.transcript.save() {
-                    tracing::error!("Failed to save transcript on error: {}", e);
-                }
-                self.input_mode = InputMode::Normal;
-
-                let alert_msg = if let Some(start) = msg.find('{') {
-                    serde_json::from_str::<serde_json::Value>(&msg[start..])
-                        .ok()
-                        .and_then(|json| json["error"]["message"].as_str().map(String::from))
-                        .unwrap_or_else(|| msg.clone())
-                } else {
-                    msg.clone()
-                };
-                self.alert = Some(alert_msg);
-            },
-        }
-
-        // Update display (throttled during streaming)
-        self.render_and_draw_throttled();
-
-        Ok(())
-    }
-
-    /// Handle a pending effect - execute it and either complete or re-queue.
-    async fn handle_pending_effect(&mut self, mut pending: PendingEffect) {
-        // Special handling for approval effects
-        if let Effect::AwaitApproval { ref name, ref params, background } = pending.effect {
-            if !pending.acknowledged {
-                // Clone values before mutating pending
-                let call_id = pending.call_id.clone();
-                let agent_id = pending.agent_id;
-                let name = name.clone();
-                let params = params.clone();
-                
-                // Mark as acknowledged and requeue BEFORE showing UI
-                // This is needed because acknowledge_approval may auto-decide,
-                // which calls decide_pending_tool, which looks for the effect in the queue
-                pending.acknowledge();
-                self.effects.requeue(pending);
-                
-                // Now show approval UI (may auto-decide)
-                self.acknowledge_approval(&call_id, agent_id, &name, params, background).await;
-                return;
-            }
-            // Already acknowledged - stays in queue waiting for user input
-            self.effects.requeue(pending);
-            return;
-        }
-        
-        // IDE preview effects need polling (resource contention)
-        if matches!(pending.effect, Effect::IdeShowPreview { .. } | Effect::IdeShowDiffPreview { .. }) {
-            let poll_result = self.try_execute_effect(&pending.effect).await;
-            match poll_result {
-                EffectPoll::Ready(result) => {
-                    pending.complete(result.map_err(|e: anyhow::Error| e.to_string()));
-                }
-                EffectPoll::Pending => {
-                    self.effects.requeue(pending);
                 }
             }
-            return;
         }
-        
-        // All other effects execute immediately
-        let PendingEffect { agent_id, effect, responder, .. } = pending;
-        let result = self.apply_effect(agent_id, effect).await;
-        let _ = responder.send(result.map_err(|e| e.to_string()));
-    }
-    
-    /// Show approval UI for an effect (create block, check filters, set mode)
-    async fn acknowledge_approval(
-        &mut self,
-        call_id: &str,
-        agent_id: AgentId,
-        name: &str,
-        params: serde_json::Value,
-        background: bool,
-    ) {
-        let is_primary = self.agents.primary_id() == Some(agent_id);
-        
-        // Get agent label for sub-agents
-        let agent_label = if !is_primary {
-            self.agents.metadata(agent_id).map(|m| m.label.clone())
-        } else {
-            None
-        };
-        
-        self.draw(); // flush any pending text
-        let tool = self.tool_executor.tools().get(name);
-        let mut block = tool.create_block(call_id, params.clone(), background);
-        
-        // Set agent label for sub-agent tools
-        if let Some(ref label) = agent_label {
-            tracing::info!("Sub-agent '{}' requesting approval for {}", label, name);
-            block.set_agent_label(label.clone());
-        }
-        
-        self.chat.start_block(block, &mut self.terminal);
-        self.draw();
-        
-        // Check filters for auto-approve/deny
-        match self.tool_filters.evaluate(name, &params) {
-            Some(decision) => {
-                self.decide_pending_tool(decision).await;
+
+        // Process commands first (they don't send to agent, execute locally)
+        for (name, block_id) in commands {
+            // Promote block from stage to transcript
+            if let Some(mut block) = self.chat.transcript.stage.remove(block_id) {
+                block.set_status(Status::Complete);
+                let turn_id = self.chat.transcript.add_empty(Role::User);
+                if let Some(turn) = self.chat.transcript.get_mut(turn_id) {
+                    turn.add_block(block);
+                }
             }
-            None => {
-                // Wait for user approval
-                if is_primary {
-                    if let Err(e) = self.chat.transcript.save() {
-                        tracing::error!("Failed to save transcript before tool approval: {}", e);
+
+            if let Some(command) = Command::get(&name) {
+                match command.execute(self) {
+                    Ok(None) => {
+                        self.chat.render(&mut self.terminal);
+                        self.draw();
                     }
-                }
-                self.input_mode = InputMode::ToolApproval;
-                self.draw();
-            }
-        }
-    }
-    
-    /// Try to execute an IDE preview effect. Returns Ready if completed, Pending if slot not available.
-    /// Only handles IdeShowPreview and IdeShowDiffPreview - all other effects go through apply_effect.
-    async fn try_execute_effect(&mut self, effect: &Effect) -> EffectPoll {
-        match effect {
-            Effect::IdeShowPreview { preview } => {
-                if let Some(ide) = &self.ide {
-                    match ide.try_claim_preview().await {
-                        Ok(true) => {
-                            match ide.show_preview(preview).await {
-                                Ok(_) => EffectPoll::Ready(Ok(None)),
-                                Err(e) => EffectPoll::Ready(Err(e)),
-                            }
+                    Ok(Some(output)) => {
+                        let idx = self.chat.transcript.add_empty(Role::Assistant);
+                        if let Some(turn) = self.chat.transcript.get_mut(idx) {
+                            turn.start_block(Box::new(TextBlock::complete(&output)));
                         }
-                        Ok(false) => EffectPoll::Pending,
-                        Err(e) => EffectPoll::Ready(Err(e)),
+                        self.chat.render(&mut self.terminal);
+                        self.draw();
                     }
-                } else {
-                    EffectPoll::Ready(Ok(None))
-                }
-            }
-            
-            Effect::IdeShowDiffPreview { path, edits } => {
-                if let Some(ide) = &self.ide {
-                    match ide.try_claim_preview().await {
-                        Ok(true) => {
-                            match ide.show_diff_preview(&path.to_string_lossy(), edits).await {
-                                Ok(_) => EffectPoll::Ready(Ok(None)),
-                                Err(e) => EffectPoll::Ready(Err(e)),
-                            }
-                        }
-                        Ok(false) => EffectPoll::Pending,
-                        Err(e) => EffectPoll::Ready(Err(e)),
+                    Err(e) => {
+                        tracing::error!("Command execution error: {}", e);
+                        self.alert = Some(format!("Command error: {}", e));
                     }
-                } else {
-                    EffectPoll::Ready(Ok(None))
                 }
             }
-            
-            // All other effects should go through apply_effect, not here
-            _ => EffectPoll::Ready(Err(anyhow::anyhow!(
-                "Effect {:?} should not be polled - use apply_effect", effect
-            ))),
         }
-    }
-    
-    /// Get output from an agent by label (for GetAgent effect)
-    #[cfg(feature = "cli")]
-    async fn get_agent_output(&mut self, label: &str) -> String {
-        // Find agent by label
-        let agent_id = match self.agents.find_by_label(label) {
-            Some(id) => id,
-            None => return format!("Agent '{}' not found", label),
-        };
 
-        // Check status
-        let status = self.agents.metadata(agent_id)
-            .map(|m| m.status.clone());
+        // Combine messages and background tasks into a single turn and request
+        let mut combined_content = String::new();
+        let mut blocks_to_promote: Vec<Box<dyn Block>> = Vec::new();
 
-        match status {
-            Some(status) => {
-                let status_str = format!("{:?}", status);
-                if status == AgentStatus::Finished {
-                    // Get result and remove agent (consume on retrieval)
-                    let result = if let Some(agent_mutex) = self.agents.get(agent_id) {
-                        let agent = agent_mutex.lock().await;
-                        agent.last_message().unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    self.agents.remove(agent_id);
-                    format!("[{}] [{}]:\n{}", label, status_str, result)
-                } else {
-                    // Still running - just return status
-                    format!("[{}] [{}]", label, status_str)
+        for (content, block_id) in &messages {
+            // Collect block for promotion
+            if let Some(mut block) = self.chat.transcript.stage.remove(*block_id) {
+                block.set_status(Status::Complete);
+                blocks_to_promote.push(block);
+            }
+            if !combined_content.is_empty() {
+                combined_content.push_str("\n\n");
+            }
+            combined_content.push_str(content);
+        }
+
+        for (label, result, block_id) in &background_tools {
+            // Collect block for promotion
+            if let Some(mut block) = self.chat.transcript.stage.remove(*block_id) {
+                block.set_status(Status::Complete);
+                blocks_to_promote.push(block);
+            }
+            let content = format!("Background tool '{}' completed:\n{}", label, result);
+            if !combined_content.is_empty() {
+                combined_content.push_str("\n\n");
+            }
+            combined_content.push_str(&content);
+        }
+
+        for (label, result, block_id) in &background_agents {
+            // Collect block for promotion
+            if let Some(mut block) = self.chat.transcript.stage.remove(*block_id) {
+                block.set_status(Status::Complete);
+                blocks_to_promote.push(block);
+            }
+            let content = format!("Background agent '{}' completed:\n{}", label, result);
+            if !combined_content.is_empty() {
+                combined_content.push_str("\n\n");
+            }
+            combined_content.push_str(&content);
+        }
+
+        // Create single user turn with all blocks
+        if !blocks_to_promote.is_empty() {
+            let turn_id = self.chat.transcript.add_empty(Role::User);
+            if let Some(turn) = self.chat.transcript.get_mut(turn_id) {
+                for block in blocks_to_promote {
+                    turn.add_block(block);
                 }
             }
-            None => format!("Agent '{}' status unknown", label),
-        }
-    }
-
-    /// Execute a tool decision (approve/deny) for the currently active tool
-    async fn decide_pending_tool(&mut self, decision: ToolDecision) {
-        tracing::debug!("decide_pending_tool: decision={:?}", decision);
-
-        // Take the currently active approval
-        let pending = match self.effects.take_active_approval() {
-            Some(p) => p,
-            None => {
-                tracing::warn!("No tool awaiting approval");
-                return;
-            },
-        };
-
-        // Update block status based on decision
-        if let Some(block) = self.chat.transcript.find_tool_block_mut(&pending.call_id) {
-            block.set_status(match decision {
-                ToolDecision::Approve => Status::Running,
-                ToolDecision::Deny => Status::Denied,
-                _ => Status::Pending,
-            });
         }
 
-        // Convert decision to EffectResult and send to executor
-        let result: EffectResult = match decision {
-            ToolDecision::Approve => Ok(None),
-            ToolDecision::Deny => Err("Denied by user".to_string()),
-            _ => Err("Unexpected decision".to_string()),
-        };
-        tracing::debug!("decide_pending_tool: sending decision for {}", pending.call_id);
-        pending.complete(result);
+        // Send combined message to agent (if any)
+        if !combined_content.is_empty() {
+            self.chat.render(&mut self.terminal);
+            self.draw();
 
-        // If no more acknowledged approvals, switch mode
-        // (next unacknowledged approval will be handled by polling)
-        if !self.effects.has_active_approval() {
+            if let Some(agent_mutex) = self.agents.primary() {
+                agent_mutex
+                    .lock()
+                    .await
+                    .send_request(&combined_content, RequestMode::Normal);
+            }
+            self.chat.begin_turn(Role::Assistant, &mut self.terminal);
+            self.input_mode = InputMode::Streaming;
+        } else if has_compaction {
+            // Handle compaction only if no messages (compaction gets its own request)
+            if let Some(agent_mutex) = self.agents.primary() {
+                agent_mutex
+                    .lock()
+                    .await
+                    .send_request(COMPACTION_PROMPT, RequestMode::Compaction);
+            }
+            self.chat.begin_turn(Role::Assistant, &mut self.terminal);
             self.input_mode = InputMode::Streaming;
         }
 
         self.chat.render(&mut self.terminal);
         self.draw();
+
+        Ok(())
     }
 
     /// Handle events from the tool executor
@@ -1066,13 +863,12 @@ impl App {
                 ..
             } => {
                 // Queue effect for polling
-                self.effects.push(PendingEffect::new(call_id, agent_id, effect, responder));
+                self.effects
+                    .push(PendingEffect::new(call_id, agent_id, effect, responder));
             },
 
             ToolEvent::Delta {
-                call_id,
-                content,
-                ..
+                call_id, content, ..
             } => {
                 // Stream output to block (works for both primary and sub-agent tools)
                 if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
@@ -1096,6 +892,38 @@ impl App {
                     block.append_text(&content);
                     block.set_status(Status::Complete);
                 }
+
+                // Drain injectable notifications and append to content
+                let injectable = self.notifications.drain_injectable();
+                let content = if !injectable.is_empty() {
+                    // Finish current assistant turn, add user turn, start new assistant turn
+                    self.chat.transcript.finish_turn();
+                    
+                    // Add user turn with notification blocks
+                    let turn_id = self.chat.transcript.add_empty(Role::User);
+                    for notification in &injectable {
+                        let block_id = notification.block_id();
+                        if let Some(mut block) = self.chat.transcript.stage.remove(block_id) {
+                            block.set_status(Status::Complete);
+                            if let Some(turn) = self.chat.transcript.get_mut(turn_id) {
+                                turn.add_block(block);
+                            }
+                        }
+                    }
+                    
+                    // Start new assistant turn for continuation
+                    self.chat.begin_turn(Role::Assistant, &mut self.terminal);
+                    
+                    // Generate XML for injection
+                    let xml = injectable
+                        .iter()
+                        .filter_map(|n| n.to_xml())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    format!("{}\n\n{}", content, xml)
+                } else {
+                    content
+                };
 
                 // Tell agent about the result - route to the correct agent by ID
                 if let Some(agent_mutex) = self.agents.get(agent_id) {
@@ -1165,18 +993,333 @@ impl App {
                 call_id,
                 name,
             } => {
-                // Background task completed - status available via list_background_tasks
                 tracing::info!(
                     "Background task completed: {} ({}) for agent {}",
                     name,
                     call_id,
                     agent_id
                 );
+                
+                // Take the result and queue a notification
+                if let Some((task_name, output, status)) = self.tool_executor.take_result(&call_id) {
+                    let result = if status == Status::Error {
+                        format!("Error: {}", output)
+                    } else {
+                        output
+                    };
+                    
+                    // Stage a block for the notification
+                    let block = NotificationBlock::new("background_tool", format!("[{}] completed", task_name));
+                    let block_id = self.chat.transcript.stage.push(Box::new(block));
+                    
+                    // Queue the notification
+                    self.notifications.push(Notification::BackgroundTool {
+                        label: call_id.clone(),
+                        result,
+                        block_id,
+                    });
+                }
+                
                 // Redraw to update background task indicator
+                self.chat.render(&mut self.terminal);
                 self.draw();
             },
         }
         Ok(())
+    }
+
+    /// Handle a single agent step during streaming
+    async fn handle_agent_step(&mut self, agent_id: AgentId, step: AgentStep) -> Result<()> {
+        let is_primary = self.agents.primary_id() == Some(agent_id);
+
+        match step {
+            AgentStep::TextDelta(text) => {
+                if !is_primary {
+                    return Ok(());
+                }
+                self.chat.transcript.stream_delta(BlockType::Text, &text);
+            },
+            AgentStep::CompactionDelta(text) => {
+                if !is_primary {
+                    return Ok(());
+                }
+                self.chat
+                    .transcript
+                    .stream_delta(BlockType::Compaction, &text);
+            },
+            AgentStep::ThinkingDelta(text) => {
+                if !is_primary {
+                    return Ok(());
+                }
+                self.chat
+                    .transcript
+                    .stream_delta(BlockType::Thinking, &text);
+            },
+            AgentStep::ToolRequest(tool_calls) => {
+                // Set agent_id on each tool call before enqueuing
+                let tool_calls: Vec<_> = tool_calls
+                    .into_iter()
+                    .map(|tc| tc.with_agent_id(agent_id))
+                    .collect();
+                self.tool_executor.enqueue(tool_calls);
+            },
+            AgentStep::Retrying { attempt, error } => {
+                self.alert = Some(format!(
+                    "Request failed (attempt {}): {}. Retrying...",
+                    attempt, error
+                ));
+                tracing::warn!("Retrying request: attempt {}, error: {}", attempt, error);
+            },
+            AgentStep::Finished { usage } => {
+                if is_primary {
+                    self.input_mode = InputMode::Normal;
+
+                    // Handle compaction completion
+                    // TODO something more robust than checking active block type
+                    if self
+                        .chat
+                        .transcript
+                        .is_streaming_block_type(BlockType::Compaction)
+                    {
+                        self.chat.transcript.finish_turn();
+                        if let Err(e) = self.chat.transcript.save() {
+                            tracing::error!("Failed to save transcript before compaction: {}", e);
+                        }
+                        match self.chat.transcript.rotate() {
+                            Ok(new_transcript) => {
+                                tracing::info!(
+                                    "Compaction complete, rotating to {:?}",
+                                    new_transcript.path()
+                                );
+                                self.chat
+                                    .reset_transcript(new_transcript, &mut self.terminal);
+                                self.draw();
+                            },
+                            Err(e) => {
+                                tracing::error!("Failed to rotate transcript: {}", e);
+                            },
+                        }
+                    } else {
+                        // Normal completion
+                        self.chat.transcript.finish_turn();
+                        if let Err(e) = self.chat.transcript.save() {
+                            tracing::error!("Failed to save transcript: {}", e);
+                        }
+
+                        // Check if compaction is needed
+                        if usage.context_tokens >= self.config.general.compaction_threshold {
+                            self.queue_compaction();
+                        }
+                    }
+                } else {
+                    // Sub-agent finished - queue notification with result
+                    let label = self
+                        .agents
+                        .metadata(agent_id)
+                        .map(|m| m.label.clone())
+                        .unwrap_or_default();
+                    
+                    // Get the result before marking as finished
+                    let result = if let Some(agent_mutex) = self.agents.get(agent_id) {
+                        let agent = agent_mutex.lock().await;
+                        agent.last_message().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    
+                    self.agents.finish(agent_id);
+                    tracing::info!("Sub-agent {} ({}) finished", agent_id, label);
+                    
+                    // Stage a block and queue notification
+                    let block = NotificationBlock::new("background_agent", format!("[{}] completed", label));
+                    let block_id = self.chat.transcript.stage.push(Box::new(block));
+                    self.notifications.push(Notification::BackgroundAgent {
+                        label: label.clone(),
+                        result,
+                        block_id,
+                    });
+                    
+                    // Render to show pending notification
+                    self.chat.render(&mut self.terminal);
+                    self.draw();
+                }
+            },
+            AgentStep::Error(msg) => {
+                self.chat.transcript.mark_active_block(Status::Error);
+                if let Err(e) = self.chat.transcript.save() {
+                    tracing::error!("Failed to save transcript on error: {}", e);
+                }
+                self.input_mode = InputMode::Normal;
+
+                let alert_msg = if let Some(start) = msg.find('{') {
+                    serde_json::from_str::<serde_json::Value>(&msg[start..])
+                        .ok()
+                        .and_then(|json| json["error"]["message"].as_str().map(String::from))
+                        .unwrap_or_else(|| msg.clone())
+                } else {
+                    msg.clone()
+                };
+                self.alert = Some(alert_msg);
+            },
+        }
+
+        // Update display (throttled during streaming)
+        self.render_and_draw_throttled();
+
+        Ok(())
+    }
+
+    /// Handle a pending effect - execute it and either complete or re-queue.
+    async fn handle_pending_effect(&mut self, mut pending: PendingEffect) {
+        // Special handling for approval effects
+        if let Effect::AwaitApproval {
+            ref name,
+            ref params,
+            background,
+        } = pending.effect
+        {
+            if !pending.acknowledged {
+                // Clone values before mutating pending
+                let call_id = pending.call_id.clone();
+                let agent_id = pending.agent_id;
+                let name = name.clone();
+                let params = params.clone();
+
+                // Mark as acknowledged and requeue BEFORE showing UI
+                // This is needed because acknowledge_approval may auto-decide,
+                // which calls decide_pending_tool, which looks for the effect in the queue
+                pending.acknowledge();
+                self.effects.requeue(pending);
+
+                // Now show approval UI (may auto-decide)
+                self.acknowledge_approval(&call_id, agent_id, &name, params, background)
+                    .await;
+                return;
+            }
+            // Already acknowledged - stays in queue waiting for user input
+            self.effects.requeue(pending);
+            return;
+        }
+
+        // IDE preview effects need polling (resource contention)
+        if matches!(
+            pending.effect,
+            Effect::IdeShowPreview { .. } | Effect::IdeShowDiffPreview { .. }
+        ) {
+            let poll_result = self.try_execute_effect(&pending.effect).await;
+            match poll_result {
+                EffectPoll::Ready(result) => {
+                    pending.complete(result.map_err(|e: anyhow::Error| e.to_string()));
+                },
+                EffectPoll::Pending => {
+                    self.effects.requeue(pending);
+                },
+            }
+            return;
+        }
+
+        // All other effects execute immediately
+        let PendingEffect {
+            agent_id,
+            effect,
+            responder,
+            ..
+        } = pending;
+        let result = self.apply_effect(agent_id, effect).await;
+        let _ = responder.send(result.map_err(|e| e.to_string()));
+    }
+
+    /// Show approval UI for an effect (create block, check filters, set mode)
+    async fn acknowledge_approval(
+        &mut self,
+        call_id: &str,
+        agent_id: AgentId,
+        name: &str,
+        params: serde_json::Value,
+        background: bool,
+    ) {
+        let is_primary = self.agents.primary_id() == Some(agent_id);
+
+        // Get agent label for sub-agents
+        let agent_label = if !is_primary {
+            self.agents.metadata(agent_id).map(|m| m.label.clone())
+        } else {
+            None
+        };
+
+        self.draw(); // flush any pending text
+        let tool = self.tool_executor.tools().get(name);
+        let mut block = tool.create_block(call_id, params.clone(), background);
+
+        // Set agent label for sub-agent tools
+        if let Some(ref label) = agent_label {
+            tracing::info!("Sub-agent '{}' requesting approval for {}", label, name);
+            block.set_agent_label(label.clone());
+        }
+
+        self.chat.start_block(block, &mut self.terminal);
+        self.draw();
+
+        // Check filters for auto-approve/deny
+        match self.tool_filters.evaluate(name, &params) {
+            Some(decision) => {
+                self.decide_pending_tool(decision).await;
+            },
+            None => {
+                // Wait for user approval
+                if is_primary {
+                    if let Err(e) = self.chat.transcript.save() {
+                        tracing::error!("Failed to save transcript before tool approval: {}", e);
+                    }
+                }
+                self.input_mode = InputMode::ToolApproval;
+                self.draw();
+            },
+        }
+    }
+
+    /// Try to execute an IDE preview effect. Returns Ready if completed, Pending if slot not available.
+    /// Only handles IdeShowPreview and IdeShowDiffPreview - all other effects go through apply_effect.
+    async fn try_execute_effect(&mut self, effect: &Effect) -> EffectPoll {
+        match effect {
+            Effect::IdeShowPreview { preview } => {
+                if let Some(ide) = &self.ide {
+                    match ide.try_claim_preview().await {
+                        Ok(true) => match ide.show_preview(preview).await {
+                            Ok(_) => EffectPoll::Ready(Ok(None)),
+                            Err(e) => EffectPoll::Ready(Err(e)),
+                        },
+                        Ok(false) => EffectPoll::Pending,
+                        Err(e) => EffectPoll::Ready(Err(e)),
+                    }
+                } else {
+                    EffectPoll::Ready(Ok(None))
+                }
+            },
+
+            Effect::IdeShowDiffPreview { path, edits } => {
+                if let Some(ide) = &self.ide {
+                    match ide.try_claim_preview().await {
+                        Ok(true) => {
+                            match ide.show_diff_preview(&path.to_string_lossy(), edits).await {
+                                Ok(_) => EffectPoll::Ready(Ok(None)),
+                                Err(e) => EffectPoll::Ready(Err(e)),
+                            }
+                        },
+                        Ok(false) => EffectPoll::Pending,
+                        Err(e) => EffectPoll::Ready(Err(e)),
+                    }
+                } else {
+                    EffectPoll::Ready(Ok(None))
+                }
+            },
+
+            // All other effects should go through apply_effect, not here
+            _ => EffectPoll::Ready(Err(anyhow::anyhow!(
+                "Effect {:?} should not be polled - use apply_effect",
+                effect
+            ))),
+        }
     }
 
     /// Apply a tool effect. Returns Ok(Some(output)) to set pipeline output.
@@ -1189,7 +1332,9 @@ impl App {
             },
             // Preview effects are polled via try_execute_effect, not here
             Effect::IdeShowPreview { .. } | Effect::IdeShowDiffPreview { .. } => {
-                unreachable!("IDE preview effects should be polled via try_execute_effect, not apply_effect")
+                unreachable!(
+                    "IDE preview effects should be polled via try_execute_effect, not apply_effect"
+                )
             },
             Effect::IdeReloadBuffer { path } => {
                 if let Some(ide) = &self.ide {
@@ -1245,13 +1390,12 @@ impl App {
                     None => Ok(Some(format!("Task {} not found or still running", task_id))),
                 }
             },
-            Effect::SpawnAgent {
-                agent,
-                label,
-            } => {
+            Effect::SpawnAgent { agent, label } => {
                 // Register the agent - it will be polled through agents.next()
                 let parent_id = _agent_id;
-                let agent_id = self.agents.register_spawned(agent, label.clone(), parent_id);
+                let agent_id = self
+                    .agents
+                    .register_spawned(agent, label.clone(), parent_id);
                 tracing::info!("Spawned sub-agent {} with label '{}'", agent_id, label);
                 // Return the agent ID so the handler knows what was spawned
                 Ok(Some(format!("agent:{}", agent_id)))
@@ -1266,10 +1410,7 @@ impl App {
                         .enumerate()
                         .map(|(i, (_, meta))| {
                             let elapsed = meta.created_at.elapsed().as_secs();
-                            format!(
-                                "{}. {} [{:?}] {}s",
-                                i + 1, meta.label, meta.status, elapsed
-                            )
+                            format!("{}. {} [{:?}] {}s", i + 1, meta.label, meta.status, elapsed)
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
@@ -1284,8 +1425,7 @@ impl App {
                 };
 
                 // Check status
-                let status = self.agents.metadata(agent_id)
-                    .map(|m| m.status.clone());
+                let status = self.agents.metadata(agent_id).map(|m| m.status.clone());
 
                 match status {
                     Some(status) => {
@@ -1299,21 +1439,49 @@ impl App {
                                 String::new()
                             };
                             self.agents.remove(agent_id);
-                            Ok(Some(format!(
-                                "[{}] [{}]:\n{}",
-                                label, status_str, result
-                            )))
+                            Ok(Some(format!("[{}] [{}]:\n{}", label, status_str, result)))
                         } else {
                             // Still running - just return status
-                            Ok(Some(format!(
-                                "[{}] [{}]",
-                                label, status_str
-                            )))
+                            Ok(Some(format!("[{}] [{}]", label, status_str)))
                         }
-                    }
+                    },
                     None => Ok(Some(format!("Agent '{}' not found", label))),
                 }
             },
+        }
+    }
+
+    /// Get output from an agent by label (for GetAgent effect)
+    #[cfg(feature = "cli")]
+    async fn get_agent_output(&mut self, label: &str) -> String {
+        // Find agent by label
+        let agent_id = match self.agents.find_by_label(label) {
+            Some(id) => id,
+            None => return format!("Agent '{}' not found", label),
+        };
+
+        // Check status
+        let status = self.agents.metadata(agent_id).map(|m| m.status.clone());
+
+        match status {
+            Some(status) => {
+                let status_str = format!("{:?}", status);
+                if status == AgentStatus::Finished {
+                    // Get result and remove agent (consume on retrieval)
+                    let result = if let Some(agent_mutex) = self.agents.get(agent_id) {
+                        let agent = agent_mutex.lock().await;
+                        agent.last_message().unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    self.agents.remove(agent_id);
+                    format!("[{}] [{}]:\n{}", label, status_str, result)
+                } else {
+                    // Still running - just return status
+                    format!("[{}] [{}]", label, status_str)
+                }
+            },
+            None => format!("Agent '{}' status unknown", label),
         }
     }
 }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{handlers, Tool, ToolPipeline};
-use crate::impl_base_block;
+use crate::impl_tool_block;
 use crate::transcript::{render_approval_prompt, render_prefix, render_result, Block, BlockType, Status};
 
 // =============================================================================
@@ -44,7 +44,7 @@ impl ListAgentsBlock {
 
 #[typetag::serde]
 impl Block for ListAgentsBlock {
-    impl_base_block!(BlockType::Tool);
+    impl_tool_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
@@ -119,7 +119,7 @@ impl GetAgentBlock {
 
 #[typetag::serde]
 impl Block for GetAgentBlock {
-    impl_base_block!(BlockType::Tool);
+    impl_tool_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();

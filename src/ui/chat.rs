@@ -30,7 +30,7 @@ use ratatui::{
 
 #[cfg(feature = "profiling")]
 use crate::profile_span;
-use crate::transcript::{Block, Role, Status, Transcript, Turn};
+use crate::transcript::{Block, Role, Stage, Status, Transcript, Turn};
 
 /// Chat view with native scrollback support.
 ///
@@ -142,6 +142,11 @@ impl ChatView {
             let render = Self::render_turn_to_lines(turn, self.width);
             self.turn_line_counts.insert(turn.id, render.len());
             active_lines.extend(render);
+        }
+
+        // Render staged blocks (pending notifications/messages)
+        if !self.transcript.stage.is_empty() {
+            active_lines.extend(Self::render_stage(&self.transcript.stage, self.width));
         }
 
         // Skip lines already committed to scrollback
@@ -266,6 +271,45 @@ impl ChatView {
     /// Create a widget for rendering the hot zone content
     pub fn widget(&self) -> ChatViewWidget<'_> {
         ChatViewWidget { view: self }
+    }
+
+    /// Render staged blocks (pending notifications awaiting consumption)
+    fn render_stage(stage: &Stage, width: u16) -> Vec<Line<'static>> {
+        if stage.is_empty() {
+            return Vec::new();
+        }
+
+        let mut lines = Vec::new();
+
+        // Role header (same style as user turn, but with "pending" instead of timestamp)
+        let header = Line::from(vec![
+            Span::styled(
+                "You",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " (pending)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+        lines.push(header);
+
+        // Render staged blocks the same way Turn renders its blocks
+        for line in stage.render(width) {
+            let owned_spans: Vec<Span<'static>> = line
+                .spans
+                .iter()
+                .map(|span| Span::styled(span.content.to_string(), span.style))
+                .collect();
+            lines.push(Line::from(owned_spans));
+        }
+
+        // Separator (empty line)
+        lines.push(Line::default());
+
+        lines
     }
 }
 

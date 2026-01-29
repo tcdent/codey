@@ -52,6 +52,8 @@ mod transcript;
 #[cfg(feature = "cli")]
 mod compaction;
 #[cfg(feature = "cli")]
+mod notifications;
+#[cfg(feature = "cli")]
 mod prompts;
 #[cfg(feature = "cli")]
 mod tool_filter;

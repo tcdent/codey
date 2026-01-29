@@ -1,7 +1,7 @@
 //! Brave Web Search tool
 
 use super::{handlers, Tool, ToolPipeline};
-use crate::impl_base_block;
+use crate::impl_tool_block;
 use crate::transcript::{render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock};
 use ratatui::{
     style::{Color, Style},
@@ -45,7 +45,7 @@ impl WebSearchBlock {
 
 #[typetag::serde]
 impl Block for WebSearchBlock {
-    impl_base_block!(BlockType::Tool);
+    impl_tool_block!(BlockType::Tool);
 
     fn render(&self, _width: u16) -> Vec<Line<'_>> {
         let mut lines = Vec::new();
