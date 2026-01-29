@@ -192,14 +192,20 @@ impl SystemPrompt {
 
     /// Process content through esh, executing embedded shell commands.
     /// Uses `<%= $(command) %>` syntax for command substitution.
+    ///
+    /// ESH is executed from the current working directory (where codey was launched)
+    /// so that commands like `pwd` and relative paths work correctly.
     fn process_esh(&self, path: &Path) -> Option<String> {
         let esh_path = Self::ensure_esh()?;
-        let workdir = path.parent().unwrap_or(Path::new("."));
-        let filename = path.file_name()?;
+        // Use absolute path to the file so ESH can find it when run from cwd
+        let abs_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().ok()?.join(path)
+        };
 
         let output = Command::new(&esh_path)
-            .arg(filename)
-            .current_dir(workdir)
+            .arg(&abs_path)
             .output()
             .ok()?;
 
