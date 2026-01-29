@@ -379,6 +379,7 @@ impl Agent {
     }
 
     /// Refresh OAuth token if expired. Returns true if refresh was needed and succeeded.
+    #[allow(dead_code)]
     pub async fn refresh_oauth_if_needed(&mut self) -> Result<bool> {
         if let Some(ref oauth) = self.oauth {
             if oauth.is_expired() {

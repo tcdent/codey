@@ -2,6 +2,7 @@
 //!
 //! Provides auto-approve and auto-deny functionality for tool calls based on
 //! regex patterns matched against the tool's primary parameter.
+#![allow(dead_code)]
 //!
 //! # Configuration Format
 //!

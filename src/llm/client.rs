@@ -65,6 +65,7 @@ pub fn is_openrouter_model(model: &str) -> bool {
 }
 
 /// Strip the openrouter:: prefix from a model name, if present
+#[allow(dead_code)]
 pub fn strip_openrouter_prefix(model: &str) -> &str {
     model.strip_prefix(OPENROUTER_PREFIX).unwrap_or(model)
 }

@@ -1,4 +1,5 @@
 //! Agent registry for managing multiple agents
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::time::Instant;

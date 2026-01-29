@@ -4,6 +4,8 @@
 //!
 //! For library users, see [`SimpleTool`] for a way to define tools without
 //! implementing the full pipeline.
+#![allow(dead_code)]
+#![allow(unused_imports)]
 
 mod exec;
 #[cfg(feature = "cli")]

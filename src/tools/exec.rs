@@ -1,6 +1,7 @@
 //! Tool execution engine
 //!
 //! Executes tool pipelines with approval flow and streaming output.
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;

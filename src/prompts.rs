@@ -2,6 +2,7 @@
 //!
 //! This module contains all system prompts used throughout the application,
 //! as well as the `SystemPrompt` struct for building dynamic prompts.
+#![allow(dead_code)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
