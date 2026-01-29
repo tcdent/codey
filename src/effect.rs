@@ -8,6 +8,7 @@
 //! The `EffectQueue` (CLI-only) manages pending effects with resource exclusivity:
 //! - Only one approval can be shown at a time
 //! - Only one IDE preview can be active at a time
+#![allow(dead_code)]
 //! - Effects are polled until ready
 
 #[cfg(feature = "cli")]
@@ -24,6 +25,7 @@ use crate::llm::Agent;
 use crate::llm::AgentId;
 
 /// Result type for effect execution
+#[allow(dead_code)] // Used by binary crate (app.rs), not library
 pub type EffectResult = Result<Option<String>, String>;
 
 /// Effects that tools delegate to the app layer
@@ -136,6 +138,7 @@ impl std::fmt::Debug for Effect {
 /// Exclusive resources that only one effect can hold at a time
 #[cfg(feature = "cli")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(dead_code)] // Used by binary crate (app.rs), not library
 pub enum Resource {
     /// Approval UI slot - only one approval shown at a time
     ApprovalSlot,
@@ -145,6 +148,7 @@ pub enum Resource {
 
 /// Result of polling an effect
 #[cfg(feature = "cli")]
+#[allow(dead_code)] // Used by binary crate (app.rs), not library
 pub enum EffectPoll {
     /// Effect completed with this result
     Ready(anyhow::Result<Option<String>>),
@@ -154,6 +158,7 @@ pub enum EffectPoll {
 
 /// An effect waiting to be executed or polled
 #[cfg(feature = "cli")]
+#[allow(dead_code)] // Used by binary crate (app.rs), not library
 pub struct PendingEffect {
     pub call_id: String,
     pub agent_id: AgentId,
@@ -164,6 +169,7 @@ pub struct PendingEffect {
 }
 
 #[cfg(feature = "cli")]
+#[allow(dead_code)] // Used by binary crate (app.rs), not library
 impl PendingEffect {
     /// Create a new pending effect
     pub fn new(
@@ -210,11 +216,13 @@ impl PendingEffect {
 
 /// Manages the queue of pending effects, handling resource exclusivity and polling.
 #[cfg(feature = "cli")]
+#[allow(dead_code)] // Used by binary crate (app.rs), not library
 pub struct EffectQueue {
     pending: VecDeque<PendingEffect>,
 }
 
 #[cfg(feature = "cli")]
+#[allow(dead_code)] // Used by binary crate (app.rs), not library
 impl EffectQueue {
     pub fn new() -> Self {
         Self {

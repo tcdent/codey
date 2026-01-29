@@ -2,6 +2,7 @@
 //!
 //! This module contains the types that represent the conversation transcript.
 //! A Transcript contains Turns, and each Turn contains Blocks.
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
