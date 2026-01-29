@@ -30,6 +30,12 @@ You have access to the following tools:
 - `edit_file`: Make precise edits using search/replace
 - `shell`: Execute bash commands
 - `fetch_url`: Fetch web content
+- `fetch_html`: Fetch a web page and extract readable content as markdown
+- `open_file`: Open a file in the user's IDE/editor at a specific line
+- `web_search`: Search the web and return results with titles, URLs, and descriptions
+- `spawn_agent`: Spawn a sub-agent to handle a subtask
+- `list_agents` / `get_agent`: Check status and retrieve results from sub-agents
+- `list_background_tasks` / `get_background_task`: Check on background tool executions
 
 ## Guidelines
 
