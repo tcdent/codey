@@ -282,22 +282,7 @@ impl ChatView {
 
         let mut lines = Vec::new();
 
-        // Role header (same style as user turn, but with "pending" instead of timestamp)
-        let header = Line::from(vec![
-            Span::styled(
-                "You",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " (pending)",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-        lines.push(header);
-
-        // Render staged blocks the same way Turn renders its blocks
+        // Render staged blocks
         for line in stage.render(width) {
             let owned_spans: Vec<Span<'static>> = line
                 .spans
