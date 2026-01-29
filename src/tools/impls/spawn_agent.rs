@@ -191,10 +191,6 @@ impl Tool for SpawnAgentTool {
                 "context": {
                     "type": "string",
                     "description": "Optional context or background information for the sub-agent"
-                },
-                "background": {
-                    "type": "boolean",
-                    "description": "Run in background. Returns immediately with a task_id; use list_background_tasks/get_background_task to check status and retrieve results."
                 }
             },
             "required": ["task"]
