@@ -174,7 +174,7 @@ mod tests {
     fn test_message_can_interrupt() {
         let msg = Notification::Message {
             content: "hello".to_string(),
-            turn_id: 0,
+            block_id: 0,
         };
         assert!(msg.can_interrupt());
     }
@@ -183,7 +183,7 @@ mod tests {
     fn test_command_cannot_interrupt() {
         let cmd = Notification::Command {
             name: "help".to_string(),
-            turn_id: 1,
+            block_id: 1,
         };
         assert!(!cmd.can_interrupt());
     }
@@ -191,6 +191,7 @@ mod tests {
     #[test]
     fn test_background_task_can_interrupt() {
         let task = Notification::BackgroundTool {
+            block_id: 0,
             label: "build".to_string(),
             result: "success".to_string(),
         };
@@ -202,15 +203,15 @@ mod tests {
         let mut queue = NotificationQueue::new();
         queue.push(Notification::Message {
             content: "msg1".to_string(),
-            turn_id: 0,
+            block_id: 0,
         });
         queue.push(Notification::Command {
             name: "help".to_string(),
-            turn_id: 1,
+            block_id: 1,
         });
         queue.push(Notification::Message {
             content: "msg2".to_string(),
-            turn_id: 2,
+            block_id: 2,
         });
 
         let injectable = queue.drain_injectable();
@@ -226,7 +227,7 @@ mod tests {
     fn test_to_xml_message() {
         let msg = Notification::Message {
             content: "test content".to_string(),
-            turn_id: 0,
+            block_id: 0,
         };
         let xml = msg.to_xml().unwrap();
         assert!(xml.contains("source=\"user\""));
@@ -237,7 +238,7 @@ mod tests {
     fn test_to_xml_command_returns_none() {
         let cmd = Notification::Command {
             name: "help".to_string(),
-            turn_id: 1,
+            block_id: 1,
         };
         assert!(cmd.to_xml().is_none());
     }
@@ -247,9 +248,10 @@ mod tests {
         let mut queue = NotificationQueue::new();
         queue.push(Notification::Message {
             content: "hello".to_string(),
-            turn_id: 0,
+            block_id: 0,
         });
         queue.push(Notification::BackgroundTool {
+            block_id: 1,
             label: "build".to_string(),
             result: "done".to_string(),
         });
