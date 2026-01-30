@@ -227,6 +227,250 @@ macro_rules! impl_tool_block {
     };
 }
 
+/// Macro to define a complete tool block with minimal boilerplate.
+///
+/// This macro generates the struct definition, constructors, and Block trait
+/// implementation. You only need to provide the custom header rendering logic.
+///
+/// # Usage
+///
+/// ```ignore
+/// define_tool_block! {
+///     /// Doc comment for the block
+///     pub struct MyToolBlock {
+///         // Maximum lines to show in result output (default: 10)
+///         max_lines: 5,
+///         // Type to validate params against
+///         params_type: MyToolParams,
+///         // Custom header rendering - returns Vec<Span>
+///         render_header(self, params) {
+///             vec![
+///                 Span::styled("my_tool", Style::default().fg(Color::Magenta)),
+///                 Span::styled("(", Style::default().fg(Color::DarkGray)),
+///                 Span::styled(params["arg"].as_str().unwrap_or(""), Style::default().fg(Color::Cyan)),
+///                 Span::styled(")", Style::default().fg(Color::DarkGray)),
+///             ]
+///         }
+///     }
+/// }
+/// ```
+#[macro_export]
+macro_rules! define_tool_block {
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident {
+            max_lines: $max_lines:expr,
+            params_type: $params_type:ty,
+            render_header($self:ident, $params:ident) $render_body:block
+        }
+    ) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        $vis struct $name {
+            pub call_id: String,
+            pub tool_name: String,
+            pub params: serde_json::Value,
+            pub status: Status,
+            pub text: String,
+            #[serde(default)]
+            pub background: bool,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub agent_label: Option<String>,
+        }
+
+        impl $name {
+            pub fn new(
+                call_id: impl Into<String>,
+                tool_name: impl Into<String>,
+                params: serde_json::Value,
+                background: bool,
+            ) -> Self {
+                Self {
+                    call_id: call_id.into(),
+                    tool_name: tool_name.into(),
+                    params,
+                    status: Status::Pending,
+                    text: String::new(),
+                    background,
+                    agent_label: None,
+                }
+            }
+
+            pub fn from_params(
+                call_id: &str,
+                tool_name: &str,
+                params: serde_json::Value,
+                background: bool,
+            ) -> Option<Self> {
+                let _: $params_type = serde_json::from_value(params.clone()).ok()?;
+                Some(Self::new(call_id, tool_name, params, background))
+            }
+
+            #[allow(unused_variables)]
+            fn render_header_spans(&$self) -> Vec<Span<'static>> {
+                let $params = &$self.params;
+                $render_body
+            }
+        }
+
+        #[typetag::serde]
+        impl Block for $name {
+            $crate::impl_tool_block!(BlockType::Tool);
+
+            fn render(&self, _width: u16) -> Vec<Line<'_>> {
+                let mut lines = Vec::new();
+
+                // Build header line: status + agent_label + prefix + custom spans
+                let mut spans = vec![
+                    self.render_status(),
+                    render_agent_label(self.agent_label.as_deref()),
+                    render_prefix(self.background),
+                ];
+                spans.extend(self.render_header_spans());
+                lines.push(Line::from(spans));
+
+                // Approval prompt if pending
+                if self.status == Status::Pending {
+                    lines.push(render_approval_prompt());
+                }
+
+                // Result output
+                if !self.text.is_empty() {
+                    lines.extend(render_result(&self.text, $max_lines));
+                }
+
+                // Denied message
+                if self.status == Status::Denied {
+                    lines.push(Line::from(Span::styled(
+                        "  Denied by user",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+
+                lines
+            }
+
+            fn call_id(&self) -> Option<&str> {
+                Some(&self.call_id)
+            }
+
+            fn tool_name(&self) -> Option<&str> {
+                Some(&self.tool_name)
+            }
+
+            fn params(&self) -> Option<&serde_json::Value> {
+                Some(&self.params)
+            }
+
+            fn set_agent_label(&mut self, label: String) {
+                self.agent_label = Some(label);
+            }
+
+            fn agent_label(&self) -> Option<&str> {
+                self.agent_label.as_deref()
+            }
+        }
+    };
+}
+
+/// Macro for simple tool blocks without agent_label support.
+/// Used for internal tools like list_agents, get_agent, list_background_tasks, etc.
+#[macro_export]
+macro_rules! define_simple_tool_block {
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident {
+            max_lines: $max_lines:expr,
+            render_header($self:ident, $params:ident) $render_body:block
+        }
+    ) => {
+        $(#[$attr])*
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        $vis struct $name {
+            pub call_id: String,
+            pub tool_name: String,
+            pub params: serde_json::Value,
+            pub status: Status,
+            pub text: String,
+            #[serde(default)]
+            pub background: bool,
+        }
+
+        impl $name {
+            pub fn new(
+                call_id: impl Into<String>,
+                tool_name: impl Into<String>,
+                params: serde_json::Value,
+                background: bool,
+            ) -> Self {
+                Self {
+                    call_id: call_id.into(),
+                    tool_name: tool_name.into(),
+                    params,
+                    status: Status::Pending,
+                    text: String::new(),
+                    background,
+                }
+            }
+
+            #[allow(unused_variables)]
+            fn render_header_spans(&$self) -> Vec<Span<'static>> {
+                let $params = &$self.params;
+                $render_body
+            }
+        }
+
+        #[typetag::serde]
+        impl Block for $name {
+            $crate::impl_tool_block!(BlockType::Tool);
+
+            fn render(&self, _width: u16) -> Vec<Line<'_>> {
+                let mut lines = Vec::new();
+
+                // Build header line: status + prefix + custom spans
+                let mut spans = vec![
+                    self.render_status(),
+                    render_prefix(self.background),
+                ];
+                spans.extend(self.render_header_spans());
+                lines.push(Line::from(spans));
+
+                // Approval prompt if pending
+                if self.status == Status::Pending {
+                    lines.push(render_approval_prompt());
+                }
+
+                // Result output
+                if !self.text.is_empty() {
+                    lines.extend(render_result(&self.text, $max_lines));
+                }
+
+                // Denied message
+                if self.status == Status::Denied {
+                    lines.push(Line::from(Span::styled(
+                        "  Denied by user",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+
+                lines
+            }
+
+            fn call_id(&self) -> Option<&str> {
+                Some(&self.call_id)
+            }
+
+            fn tool_name(&self) -> Option<&str> {
+                Some(&self.tool_name)
+            }
+
+            fn params(&self) -> Option<&serde_json::Value> {
+                Some(&self.params)
+            }
+        }
+    };
+}
+
 /// Simple text content
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextBlock {
