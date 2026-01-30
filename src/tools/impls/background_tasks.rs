@@ -10,85 +10,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{handlers, Tool, ToolPipeline};
-use crate::impl_tool_block;
+use crate::define_simple_tool_block;
 use crate::transcript::{render_approval_prompt, render_prefix, render_result, Block, BlockType, Status};
 
 // =============================================================================
 // ListBackgroundTasks block
 // =============================================================================
 
-/// Block for list_background_tasks - shows as `list_background_tasks()`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListBackgroundTasksBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-}
-
-impl ListBackgroundTasksBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
+define_simple_tool_block! {
+    /// Block for list_background_tasks - shows as `list_background_tasks()`
+    pub struct ListBackgroundTasksBlock {
+        max_lines: 10,
+        render_header(self, params) {
+            vec![
+                Span::styled("list_background_tasks", Style::default().fg(Color::Magenta)),
+                Span::styled("()", Style::default().fg(Color::DarkGray)),
+            ]
         }
-    }
-}
-
-#[typetag::serde]
-impl Block for ListBackgroundTasksBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
-        // Format: list_background_tasks()
-        let spans = vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("list_background_tasks", Style::default().fg(Color::Magenta)),
-            Span::styled("()", Style::default().fg(Color::DarkGray)),
-        ];
-        lines.push(Line::from(spans));
-
-        // Approval prompt if pending
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        // Output if completed
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
-        }
-
-        // Denied message
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.call_id)
-    }
-
-    fn tool_name(&self) -> Option<&str> {
-        Some(&self.tool_name)
-    }
-
-    fn params(&self) -> Option<&serde_json::Value> {
-        Some(&self.params)
     }
 }
 
@@ -96,82 +34,20 @@ impl Block for ListBackgroundTasksBlock {
 // GetBackgroundTask block
 // =============================================================================
 
-/// Block for get_background_task - shows as `get_background_task(task_id)`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetBackgroundTaskBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-}
+define_simple_tool_block! {
+    /// Block for get_background_task - shows as `get_background_task(task_id)`
+    pub struct GetBackgroundTaskBlock {
+        max_lines: 10,
+        render_header(self, params) {
+            let task_id = params["task_id"].as_str().unwrap_or("");
 
-impl GetBackgroundTaskBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
+            vec![
+                Span::styled("get_background_task", Style::default().fg(Color::Magenta)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(task_id.to_string(), Style::default().fg(Color::White)),
+                Span::styled(")", Style::default().fg(Color::DarkGray)),
+            ]
         }
-    }
-}
-
-#[typetag::serde]
-impl Block for GetBackgroundTaskBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
-        let task_id = self.params["task_id"].as_str().unwrap_or("");
-
-        // Format: get_background_task(task_id)
-        let spans = vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("get_background_task", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(task_id, Style::default().fg(Color::White)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ];
-        lines.push(Line::from(spans));
-
-        // Approval prompt if pending
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        // Output if completed
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
-        }
-
-        // Denied message
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.call_id)
-    }
-
-    fn tool_name(&self) -> Option<&str> {
-        Some(&self.tool_name)
-    }
-
-    fn params(&self) -> Option<&serde_json::Value> {
-        Some(&self.params)
     }
 }
 

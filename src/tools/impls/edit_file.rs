@@ -26,7 +26,7 @@ use serde_json::json;
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::ide::Edit;
-use crate::impl_tool_block;
+use crate::define_tool_block;
 use crate::tools::pipeline::{EffectHandler, Step};
 use crate::transcript::{
     render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
@@ -76,115 +76,34 @@ impl EffectHandler for ValidateEdits {
     }
 }
 
-/// Edit file display block
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EditFileBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-    /// Agent label for sub-agent tools
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_label: Option<String>,
-}
+define_tool_block! {
+    /// Edit file display block
+    pub struct EditFileBlock {
+        max_lines: 5,
+        params_type: EditFileParams,
+        render_header(self, params) {
+            let path = params["path"].as_str().unwrap_or("");
+            let edit_count = params
+                .get("edits")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
 
-impl EditFileBlock {
-    pub fn new(
-        call_id: impl Into<String>,
-        tool_name: impl Into<String>,
-        params: serde_json::Value,
-        background: bool,
-    ) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
-            agent_label: None,
-        }
-    }
-
-    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value, background: bool) -> Option<Self> {
-        let _: EditFileParams = serde_json::from_value(params.clone()).ok()?;
-        Some(Self::new(call_id, tool_name, params, background))
-    }
-}
-
-#[typetag::serde]
-impl Block for EditFileBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
-        let path = self.params["path"].as_str().unwrap_or("");
-        let edit_count = self
-            .params
-            .get("edits")
-            .and_then(|v| v.as_array())
-            .map(|a| a.len())
-            .unwrap_or(0);
-
-        // Format: [agent_label] edit_file(path, N edits)
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_agent_label(self.agent_label.as_deref()),
-            render_prefix(self.background),
-            Span::styled("edit_file", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(path, Style::default().fg(Color::Yellow)),
-            Span::styled(
-                format!(
-                    ", {} edit{}",
-                    edit_count,
-                    if edit_count == 1 { "" } else { "s" }
+            vec![
+                Span::styled("edit_file", Style::default().fg(Color::Magenta)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(path.to_string(), Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!(
+                        ", {} edit{}",
+                        edit_count,
+                        if edit_count == 1 { "" } else { "s" }
+                    ),
+                    Style::default().fg(Color::DarkGray),
                 ),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
+                Span::styled(")", Style::default().fg(Color::DarkGray)),
+            ]
         }
-
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 5));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.call_id)
-    }
-
-    fn tool_name(&self) -> Option<&str> {
-        Some(&self.tool_name)
-    }
-
-    fn params(&self) -> Option<&serde_json::Value> {
-        Some(&self.params)
-    }
-
-    fn set_agent_label(&mut self, label: String) {
-        self.agent_label = Some(label);
-    }
-
-    fn agent_label(&self) -> Option<&str> {
-        self.agent_label.as_deref()
     }
 }
 
