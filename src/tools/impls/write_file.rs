@@ -13,7 +13,7 @@
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::ide::ToolPreview;
-use crate::impl_tool_block;
+use crate::define_tool_block;
 use crate::transcript::{render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
@@ -23,98 +23,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
 
-/// Write file display block
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WriteFileBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-    /// Agent label for sub-agent tools
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_label: Option<String>,
-}
+define_tool_block! {
+    /// Write file display block
+    pub struct WriteFileBlock {
+        max_lines: 5,
+        params_type: WriteFileParams,
+        render_header(self, params) {
+            let path = params["path"].as_str().unwrap_or("");
+            let content_len = params.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
 
-impl WriteFileBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
-            agent_label: None,
+            vec![
+                Span::styled("write_file", Style::default().fg(Color::Magenta)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(path.to_string(), Style::default().fg(Color::Green)),
+                Span::styled(format!(", {} bytes", content_len), Style::default().fg(Color::DarkGray)),
+                Span::styled(")", Style::default().fg(Color::DarkGray)),
+            ]
         }
-    }
-
-    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value, background: bool) -> Option<Self> {
-        let _: WriteFileParams = serde_json::from_value(params.clone()).ok()?;
-        Some(Self::new(call_id, tool_name, params, background))
-    }
-}
-
-#[typetag::serde]
-impl Block for WriteFileBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
-        let path = self.params["path"].as_str().unwrap_or("");
-        let content_len = self.params.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
-
-        // Format: [agent_label] write_file(path, N bytes)
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_agent_label(self.agent_label.as_deref()),
-            render_prefix(self.background),
-            Span::styled("write_file", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(path, Style::default().fg(Color::Green)),
-            Span::styled(format!(", {} bytes", content_len), Style::default().fg(Color::DarkGray)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 5));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.call_id)
-    }
-
-    fn tool_name(&self) -> Option<&str> {
-        Some(&self.tool_name)
-    }
-
-    fn params(&self) -> Option<&serde_json::Value> {
-        Some(&self.params)
-    }
-
-    fn set_agent_label(&mut self, label: String) {
-        self.agent_label = Some(label);
-    }
-
-    fn agent_label(&self) -> Option<&str> {
-        self.agent_label.as_deref()
     }
 }
 

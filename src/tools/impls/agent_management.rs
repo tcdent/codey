@@ -10,81 +10,23 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{handlers, Tool, ToolPipeline};
-use crate::impl_tool_block;
+use crate::define_simple_tool_block;
 use crate::transcript::{render_approval_prompt, render_prefix, render_result, Block, BlockType, Status};
 
 // =============================================================================
 // ListAgents block
 // =============================================================================
 
-/// Block for list_agents - shows as `list_agents()`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListAgentsBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-}
-
-impl ListAgentsBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
+define_simple_tool_block! {
+    /// Block for list_agents - shows as `list_agents()`
+    pub struct ListAgentsBlock {
+        max_lines: 10,
+        render_header(self, params) {
+            vec![
+                Span::styled("list_agents", Style::default().fg(Color::Magenta)),
+                Span::styled("()", Style::default().fg(Color::DarkGray)),
+            ]
         }
-    }
-}
-
-#[typetag::serde]
-impl Block for ListAgentsBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
-        let spans = vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("list_agents", Style::default().fg(Color::Magenta)),
-            Span::styled("()", Style::default().fg(Color::DarkGray)),
-        ];
-        lines.push(Line::from(spans));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.call_id)
-    }
-
-    fn tool_name(&self) -> Option<&str> {
-        Some(&self.tool_name)
-    }
-
-    fn params(&self) -> Option<&serde_json::Value> {
-        Some(&self.params)
     }
 }
 
@@ -92,79 +34,20 @@ impl Block for ListAgentsBlock {
 // GetAgent block
 // =============================================================================
 
-/// Block for get_agent - shows as `get_agent(agent_id)`
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GetAgentBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-}
+define_simple_tool_block! {
+    /// Block for get_agent - shows as `get_agent(agent_id)`
+    pub struct GetAgentBlock {
+        max_lines: 10,
+        render_header(self, params) {
+            let label = params["label"].as_str().unwrap_or("?");
 
-impl GetAgentBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
+            vec![
+                Span::styled("get_agent", Style::default().fg(Color::Magenta)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(label.to_string(), Style::default().fg(Color::Yellow)),
+                Span::styled(")", Style::default().fg(Color::DarkGray)),
+            ]
         }
-    }
-}
-
-#[typetag::serde]
-impl Block for GetAgentBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
-        let label = self.params["label"].as_str()
-            .unwrap_or("?");
-
-        let spans = vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("get_agent", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(label.to_string(), Style::default().fg(Color::Yellow)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ];
-        lines.push(Line::from(spans));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.call_id)
-    }
-
-    fn tool_name(&self) -> Option<&str> {
-        Some(&self.tool_name)
-    }
-
-    fn params(&self) -> Option<&serde_json::Value> {
-        Some(&self.params)
     }
 }
 

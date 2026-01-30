@@ -1,7 +1,7 @@
 //! Read file tool
 
 use super::{handlers, Tool, ToolPipeline};
-use crate::impl_tool_block;
+use crate::define_tool_block;
 use crate::transcript::{render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
@@ -11,105 +11,32 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::PathBuf;
 
-/// Read file display block
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReadFileBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-    #[serde(default)]
-    pub agent_label: Option<String>,
-}
+define_tool_block! {
+    /// Read file display block
+    pub struct ReadFileBlock {
+        max_lines: 10,
+        params_type: ReadFileParams,
+        render_header(self, params) {
+            let path = params["path"].as_str().unwrap_or("");
+            let start_line = params.get("start_line").and_then(|v| v.as_i64());
+            let end_line = params.get("end_line").and_then(|v| v.as_i64());
 
-impl ReadFileBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
-            agent_label: None,
+            // Format: read_file(path:start-end) or read_file(path)
+            let range_str = match (start_line, end_line) {
+                (Some(s), Some(e)) => format!(":{}:{}", s, e),
+                (Some(s), None) => format!(":{}:", s),
+                (None, Some(e)) => format!(":{}", e),
+                (None, None) => String::new(),
+            };
+
+            vec![
+                Span::styled("read_file", Style::default().fg(Color::Magenta)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(path.to_string(), Style::default().fg(Color::Cyan)),
+                Span::styled(range_str, Style::default().fg(Color::DarkGray)),
+                Span::styled(")", Style::default().fg(Color::DarkGray)),
+            ]
         }
-    }
-
-    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value, background: bool) -> Option<Self> {
-        let _: ReadFileParams = serde_json::from_value(params.clone()).ok()?;
-        Some(Self::new(call_id, tool_name, params, background))
-    }
-}
-
-#[typetag::serde]
-impl Block for ReadFileBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
-        let path = self.params["path"].as_str().unwrap_or("");
-        let start_line = self.params.get("start_line").and_then(|v| v.as_i64());
-        let end_line = self.params.get("end_line").and_then(|v| v.as_i64());
-
-        // Format: read_file(path:start-end) or read_file(path)
-        let range_str = match (start_line, end_line) {
-            (Some(s), Some(e)) => format!(":{}:{}", s, e),
-            (Some(s), None) => format!(":{}:", s),
-            (None, Some(e)) => format!(":{}", e),
-            (None, None) => String::new(),
-        };
-
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            render_agent_label(self.agent_label.as_deref()),
-            Span::styled("read_file", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(path, Style::default().fg(Color::Cyan)),
-            Span::styled(range_str, Style::default().fg(Color::DarkGray)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.call_id)
-    }
-
-    fn tool_name(&self) -> Option<&str> {
-        Some(&self.tool_name)
-    }
-
-    fn params(&self) -> Option<&serde_json::Value> {
-        Some(&self.params)
-    }
-
-    fn set_agent_label(&mut self, label: String) {
-        self.agent_label = Some(label);
-    }
-
-    fn agent_label(&self) -> Option<&str> {
-        self.agent_label.as_deref()
     }
 }
 

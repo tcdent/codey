@@ -1,7 +1,7 @@
 //! URL fetching tool
 
 use super::{handlers, Tool, ToolPipeline};
-use crate::impl_tool_block;
+use crate::define_tool_block;
 use crate::transcript::{render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
@@ -10,95 +10,21 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// Fetch URL display block
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FetchUrlBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-    #[serde(default)]
-    pub agent_label: Option<String>,
-}
+define_tool_block! {
+    /// Fetch URL display block
+    pub struct FetchUrlBlock {
+        max_lines: 5,
+        params_type: FetchUrlParams,
+        render_header(self, params) {
+            let url = params["url"].as_str().unwrap_or("");
 
-impl FetchUrlBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
-            agent_label: None,
+            vec![
+                Span::styled("fetch_url", Style::default().fg(Color::Magenta)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(url.to_string(), Style::default().fg(Color::Blue)),
+                Span::styled(")", Style::default().fg(Color::DarkGray)),
+            ]
         }
-    }
-
-    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value, background: bool) -> Option<Self> {
-        let _: FetchUrlParams = serde_json::from_value(params.clone()).ok()?;
-        Some(Self::new(call_id, tool_name, params, background))
-    }
-}
-
-#[typetag::serde]
-impl Block for FetchUrlBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
-        let url = self.params["url"].as_str().unwrap_or("");
-
-        // Format: fetch_url(url)
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            render_agent_label(self.agent_label.as_deref()),
-            Span::styled("fetch_url", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(url, Style::default().fg(Color::Blue)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 5));
-        }
-
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.call_id)
-    }
-
-    fn tool_name(&self) -> Option<&str> {
-        Some(&self.tool_name)
-    }
-
-    fn params(&self) -> Option<&serde_json::Value> {
-        Some(&self.params)
-    }
-
-    fn set_agent_label(&mut self, label: String) {
-        self.agent_label = Some(label);
-    }
-
-    fn agent_label(&self) -> Option<&str> {
-        self.agent_label.as_deref()
     }
 }
 
