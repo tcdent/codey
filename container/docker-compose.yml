@@ -18,8 +18,11 @@ services:
       # Optional: Alternative providers
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
 
+      # Optional: Brave Search API key for web search
+      - BRAVE_API_KEY=${BRAVE_API_KEY:-}
+
       # Chromium configuration for headless browser
-      - CHROME_BIN=/usr/bin/chromium-browser
+      - CHROME_BIN=/usr/bin/chromium
 
       # Timezone (optional)
       - TZ=${TZ:-UTC}

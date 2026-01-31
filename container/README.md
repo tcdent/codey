@@ -60,6 +60,7 @@ docker run -it --rm \
 |----------|-------------|----------|
 | `ANTHROPIC_API_KEY` | Anthropic API key | Yes |
 | `OPENROUTER_API_KEY` | OpenRouter API key (alternative) | No |
+| `BRAVE_API_KEY` | Brave Search API key for web search | No |
 | `TZ` | Timezone (e.g., `America/New_York`) | No |
 | `CODEY_WORK_DIR` | Host path to mount as working directory | No |
 | `CODEY_CONFIG_DIR` | Host path for codey configuration | No |
@@ -93,18 +94,13 @@ model = "claude-sonnet-4-20250514"
 
 ### Build for ARM64 (Apple Silicon, etc.)
 
-Modify the Dockerfile target architecture:
-
-```dockerfile
-# In the builder stage, change:
-CARGO_BUILD_TARGET=aarch64-unknown-linux-musl
-```
-
-Or use Docker buildx for multi-arch builds:
+Use Docker buildx for multi-arch builds:
 
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64 -t codey:latest .
+docker buildx build --platform linux/amd64,linux/arm64 -t codey:latest -f container/Dockerfile .
 ```
+
+The Debian-based image supports both amd64 and arm64 natively.
 
 ## Included Tools
 
