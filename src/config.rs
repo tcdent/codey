@@ -104,6 +104,7 @@ impl AgentRuntimeConfig {
 #[serde(default)]
 pub struct Config {
     pub general: GeneralConfig,
+    pub agent: AgentPersonaConfig,
     pub agents: AgentsConfig,
     pub auth: AuthConfig,
     pub ui: UiConfig,
@@ -117,6 +118,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             general: GeneralConfig::default(),
+            agent: AgentPersonaConfig::default(),
             agents: AgentsConfig::default(),
             auth: AuthConfig::default(),
             ui: UiConfig::default(),
@@ -255,6 +257,25 @@ impl Default for GeneralConfig {
             compaction_threshold: 192_000,
             compaction_thinking_budget: 8_000,
         }
+    }
+}
+
+/// Agent persona configuration (name and personality)
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AgentPersonaConfig {
+    /// Custom name for the agent (defaults to "Codey")
+    pub name: Option<String>,
+    /// Custom system prompt intro/personality (replaces the default "You are Codey..." paragraph)
+    pub system_prompt: Option<String>,
+}
+
+#[cfg(feature = "cli")]
+impl AgentPersonaConfig {
+    /// Get the agent name, falling back to default
+    pub fn name(&self) -> &str {
+        self.name.as_deref().unwrap_or(crate::prompts::DEFAULT_AGENT_NAME)
     }
 }
 
@@ -536,5 +557,41 @@ deny = ["\\.env$"]
         assert_eq!(config.tools.shell.deny, vec!["rm -rf"]);
         assert_eq!(config.tools.read_file.allow, vec!["\\.rs$"]);
         assert_eq!(config.tools.read_file.deny, vec!["\\.env$"]);
+    }
+
+    #[test]
+    fn test_agent_persona_defaults() {
+        let config = Config::default();
+        assert!(config.agent.name.is_none());
+        assert!(config.agent.system_prompt.is_none());
+        assert_eq!(config.agent.name(), "Codey");
+    }
+
+    #[test]
+    fn test_parse_agent_persona() {
+        let toml = r#"
+[agent]
+name = "Jarvis"
+system_prompt = "You are Jarvis, Tony Stark's AI assistant."
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.agent.name, Some("Jarvis".to_string()));
+        assert_eq!(
+            config.agent.system_prompt,
+            Some("You are Jarvis, Tony Stark's AI assistant.".to_string())
+        );
+        assert_eq!(config.agent.name(), "Jarvis");
+    }
+
+    #[test]
+    fn test_agent_persona_name_only() {
+        let toml = r#"
+[agent]
+name = "Assistant"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.agent.name, Some("Assistant".to_string()));
+        assert!(config.agent.system_prompt.is_none());
+        assert_eq!(config.agent.name(), "Assistant");
     }
 }

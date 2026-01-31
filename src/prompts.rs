@@ -16,13 +16,35 @@ const ESH_SCRIPT: &str = include_str!("../lib/esh/esh");
 /// Filename for custom system prompt additions
 pub const SYSTEM_MD_FILENAME: &str = "SYSTEM.md";
 
-/// Welcome message shown when the application starts
+/// Default agent name
+pub const DEFAULT_AGENT_NAME: &str = "Codey";
+
+/// Generate welcome message with the given agent name
+pub fn welcome_message(name: &str) -> String {
+    format!(
+        "Welcome to {}! I'm your AI coding assistant. How can I help you today?",
+        name
+    )
+}
+
+/// Default welcome message (for backward compatibility)
 pub const WELCOME_MESSAGE: &str =
     "Welcome to Codey! I'm your AI coding assistant. How can I help you today?";
 
-/// Main system prompt for the primary agent
-pub const SYSTEM_PROMPT: &str = r#"You are Codey, an AI coding assistant running in a terminal interface.
+/// Default intro paragraph for the system prompt
+pub const DEFAULT_SYSTEM_INTRO: &str =
+    "You are Codey, an AI coding assistant running in a terminal interface.";
 
+/// Generate the default intro with a custom agent name
+pub fn default_system_intro(name: &str) -> String {
+    format!(
+        "You are {}, an AI coding assistant running in a terminal interface.",
+        name
+    )
+}
+
+/// System prompt capabilities and guidelines (appended after the intro)
+pub const SYSTEM_PROMPT_BODY: &str = r#"
 ## Capabilities
 You have access to the following tools:
 - `read_file`: Read file contents, optionally with line ranges
@@ -79,6 +101,23 @@ You will be notified with a message when background tasks finish.
 - Always get confirmation before making destructive changes (this includes building a release)
 "#;
 
+/// Build the base system prompt with optional config overrides
+pub fn build_base_system_prompt(config: Option<&Config>) -> String {
+    let intro = match config {
+        Some(cfg) => {
+            // If custom system_prompt is provided, use it directly
+            if let Some(ref custom) = cfg.agent.system_prompt {
+                custom.clone()
+            } else {
+                // Otherwise use default intro with possibly custom name
+                default_system_intro(cfg.agent.name())
+            }
+        }
+        None => DEFAULT_SYSTEM_INTRO.to_string(),
+    };
+    format!("{}{}", intro, SYSTEM_PROMPT_BODY)
+}
+
 /// Prompt used when compacting conversation context
 pub const COMPACTION_PROMPT: &str = r#"The conversation context is getting large and needs to be compacted.
 
@@ -115,7 +154,7 @@ You have read-only access to:
 /// A system prompt builder that supports dynamic content via esh templates.
 ///
 /// The prompt is composed of:
-/// 1. The base system prompt (static)
+/// 1. The base system prompt (configurable intro + capabilities/guidelines)
 /// 2. User SYSTEM.md from ~/.config/codey/ (optional, dynamic)
 /// 3. Project SYSTEM.md from .codey/ (optional, dynamic)
 ///
@@ -125,10 +164,14 @@ You have read-only access to:
 pub struct SystemPrompt {
     user_path: Option<PathBuf>,
     project_path: PathBuf,
+    /// Custom agent name (None = use default "Codey")
+    agent_name: Option<String>,
+    /// Custom system prompt intro (None = use default)
+    custom_intro: Option<String>,
 }
 
 impl SystemPrompt {
-    /// Create a new SystemPrompt with default paths.
+    /// Create a new SystemPrompt with default paths and no config overrides.
     pub fn new() -> Self {
         let user_path = Config::config_dir().map(|d| d.join(SYSTEM_MD_FILENAME));
         let project_path = Path::new(CODEY_DIR).join(SYSTEM_MD_FILENAME);
@@ -136,18 +179,45 @@ impl SystemPrompt {
         Self {
             user_path,
             project_path,
+            agent_name: None,
+            custom_intro: None,
         }
+    }
+
+    /// Create a new SystemPrompt with config-based overrides.
+    pub fn with_config(config: &Config) -> Self {
+        let user_path = Config::config_dir().map(|d| d.join(SYSTEM_MD_FILENAME));
+        let project_path = Path::new(CODEY_DIR).join(SYSTEM_MD_FILENAME);
+
+        Self {
+            user_path,
+            project_path,
+            agent_name: config.agent.name.clone(),
+            custom_intro: config.agent.system_prompt.clone(),
+        }
+    }
+
+    /// Get the agent name (custom or default)
+    pub fn agent_name(&self) -> &str {
+        self.agent_name.as_deref().unwrap_or(DEFAULT_AGENT_NAME)
     }
 
     /// Build the complete system prompt.
     ///
     /// This reads and processes all SYSTEM.md files, executing any embedded
     /// shell commands via esh (`<%= command %>`). The result is the concatenation of:
-    /// - Base system prompt
+    /// - Base system prompt (with optional custom intro)
     /// - User SYSTEM.md content (if exists)
     /// - Project SYSTEM.md content (if exists)
     pub fn build(&self) -> String {
-        let mut prompt = SYSTEM_PROMPT.to_string();
+        // Build the intro portion
+        let intro = if let Some(ref custom) = self.custom_intro {
+            custom.clone()
+        } else {
+            default_system_intro(self.agent_name())
+        };
+
+        let mut prompt = format!("{}{}", intro, SYSTEM_PROMPT_BODY);
 
         // Append user SYSTEM.md if it exists
         if let Some(ref user_path) = self.user_path {

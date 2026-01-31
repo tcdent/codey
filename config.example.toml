@@ -11,6 +11,22 @@ model = "claude-sonnet-4-20250514"
 # Maximum tokens for responses
 max_tokens = 8192
 
+# =============================================================================
+# Agent Persona
+# =============================================================================
+# Customize the agent's name and personality. These settings affect how the
+# agent introduces itself and displays its name in the chat interface.
+
+[agent]
+# Custom name for the agent (default: "Codey")
+# This appears in the chat header and welcome message.
+# name = "Jarvis"
+
+# Custom system prompt intro/personality (replaces the default "You are Codey..." paragraph)
+# Use this to give the agent a different persona or specialized behavior.
+# The capabilities and guidelines section is automatically appended.
+# system_prompt = "You are Jarvis, a sophisticated AI assistant with a dry wit and encyclopedic knowledge."
+
 [auth]
 # Authentication method: "oauth" or "api_key"
 method = "oauth"
