@@ -111,6 +111,83 @@ The container includes:
 - **Bash** - Shell command execution
 - **Neovim** - Optional IDE integration
 
+## Extending the Image
+
+You can create custom images based on codey for project-specific needs.
+
+### Adding Custom Tools
+
+```dockerfile
+FROM codey:latest
+
+USER root
+
+# Install additional tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install a specific CLI tool
+RUN npm install -g typescript
+
+USER codey
+```
+
+### Adding a Project System Prompt
+
+```dockerfile
+FROM codey:latest
+
+# Add a project-specific system prompt
+COPY SYSTEM.md /home/codey/.config/codey/SYSTEM.md
+```
+
+Your `SYSTEM.md` might contain:
+
+```markdown
+You are working on the Acme project, a REST API built with Rust and Actix-web.
+
+Key conventions:
+- All handlers go in src/handlers/
+- Use the existing error types in src/errors.rs
+- Run `cargo test` before committing
+```
+
+### Full Example: Custom Project Image
+
+```dockerfile
+FROM codey:latest
+
+USER root
+
+# Install project-specific dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    postgresql-client \
+    redis-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add custom scripts
+COPY --chmod=755 scripts/deploy.sh /usr/local/bin/deploy
+
+USER codey
+
+# Add project system prompt
+COPY --chown=codey:codey SYSTEM.md /home/codey/.config/codey/SYSTEM.md
+
+# Add project config
+COPY --chown=codey:codey config.toml /home/codey/.config/codey/config.toml
+```
+
+Build and use:
+
+```bash
+docker build -t my-project-codey .
+docker run -it --rm -e ANTHROPIC_API_KEY -v $(pwd):/work my-project-codey
+```
+
 ## Troubleshooting
 
 ### Chromium fails to start
@@ -161,6 +238,6 @@ To run with local source mounted (for development):
 docker run -it --rm \
   -v $(pwd):/build \
   -w /build \
-  rust:1.83-alpine \
-  sh -c "apk add musl-dev openssl-dev git make patch perl && make build"
+  rust:1.83-slim-bookworm \
+  sh -c "apt-get update && apt-get install -y libssl-dev pkg-config git make patch && make build"
 ```
