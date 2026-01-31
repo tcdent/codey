@@ -1,0 +1,63 @@
+services:
+  codey:
+    build:
+      context: ..
+      dockerfile: container/Dockerfile
+    image: codey:latest
+    container_name: codey
+
+    # Interactive terminal support for TUI
+    stdin_open: true
+    tty: true
+
+    # Environment variables
+    environment:
+      # Required: Anthropic API key for AI functionality
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # Optional: Alternative providers
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+
+      # Optional: Brave Search API key for web search
+      - BRAVE_API_KEY=${BRAVE_API_KEY:-}
+
+      # Chromium configuration for headless browser
+      - CHROME_BIN=/usr/bin/chromium
+
+      # Timezone (optional)
+      - TZ=${TZ:-UTC}
+
+    # Volume mounts
+    volumes:
+      # Mount your working directory (code to work on)
+      - ${CODEY_WORK_DIR:-./workspace}:/work
+
+      # Persist codey configuration
+      - ${CODEY_CONFIG_DIR:-./config}:/home/codey/.config/codey
+
+      # Persist session transcripts (for --continue feature)
+      - ${CODEY_DATA_DIR:-./data}:/work/.codey
+
+      # Git configuration (for commits)
+      - ${HOME}/.gitconfig:/home/codey/.gitconfig:ro
+
+      # SSH keys for git operations (optional)
+      # - ${HOME}/.ssh:/home/codey/.ssh:ro
+
+    # Security: drop unnecessary capabilities
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+
+    # Shared memory size for Chromium
+    shm_size: '2gb'
+
+    # Resource limits (optional, adjust as needed)
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 4G
+    #       cpus: '2'
