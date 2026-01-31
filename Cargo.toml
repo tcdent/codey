@@ -16,6 +16,9 @@ name = "codey"
 path = "src/main.rs"
 
 [dependencies]
+
+# OpenSSL vendored for static musl builds
+openssl = { version = "0.10", features = ["vendored"], optional = true }
 # TUI (CLI only)
 ratatui = { version = "0.30.0-beta.0", features = ["scrolling-regions"], optional = true }
 crossterm = { version = "0.28", features = ["event-stream"], optional = true }
@@ -102,6 +105,9 @@ cli = [
     "chromiumoxide", "readability", "htmd",
     "ratskin", "textwrap"
 ]
+
+# Vendored OpenSSL for static musl builds
+vendored-openssl = ["openssl"]
 
 # Enable performance profiling with JSON export
 # Build with: cargo build --release --features profiling

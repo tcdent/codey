@@ -17,9 +17,13 @@ run: $(PATCH_DEPS)
 
 release: $(PATCH_DEPS)
 ifdef CARGO_BUILD_TARGET
-	cargo build --release --target $(CARGO_BUILD_TARGET)
+ifdef EXTRA_FEATURES
+	cargo build --release --target $(CARGO_BUILD_TARGET) --features "cli,$(EXTRA_FEATURES)"
 else
-	cargo build --release
+	cargo build --release --target $(CARGO_BUILD_TARGET) --features cli
+endif
+else
+	cargo build --release --features cli
 endif
 
 profile: release

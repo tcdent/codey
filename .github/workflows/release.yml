@@ -41,6 +41,7 @@ jobs:
         run: make release
         env:
           CARGO_BUILD_TARGET: ${{ matrix.target }}
+          EXTRA_FEATURES: ${{ contains(matrix.target, 'linux-musl') && 'vendored-openssl' || '' }}
       
       - name: Ad-hoc sign (macOS)
         if: contains(matrix.os, 'macos')
