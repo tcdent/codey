@@ -443,3 +443,81 @@ impl EffectHandler for FetchHtml {
         }
     }
 }
+
+// =============================================================================
+// Correction memory handlers
+// =============================================================================
+
+use crate::config::{CODEY_DIR, CORRECTIONS_FILENAME};
+use serde::Serialize;
+
+/// A single correction entry
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct Correction {
+    pub goal: String,
+    pub failed_attempt: String,
+    pub successful_approach: String,
+}
+
+/// Append a correction to the corrections file
+pub struct AppendCorrection {
+    pub goal: String,
+    pub failed_attempt: String,
+    pub successful_approach: String,
+}
+
+#[async_trait::async_trait]
+impl EffectHandler for AppendCorrection {
+    async fn call(self: Box<Self>) -> Step {
+        let codey_dir = PathBuf::from(CODEY_DIR);
+
+        // Create .codey directory if it doesn't exist
+        if !codey_dir.exists() {
+            if let Err(e) = fs::create_dir_all(&codey_dir) {
+                return Step::Error(format!(
+                    "Failed to create {} directory: {}",
+                    CODEY_DIR, e
+                ));
+            }
+        }
+
+        let corrections_path = codey_dir.join(CORRECTIONS_FILENAME);
+
+        // Load existing corrections
+        let mut corrections: Vec<Correction> = if corrections_path.exists() {
+            match fs::read_to_string(&corrections_path) {
+                Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+                Err(_) => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Append new correction
+        corrections.push(Correction {
+            goal: self.goal,
+            failed_attempt: self.failed_attempt,
+            successful_approach: self.successful_approach,
+        });
+
+        // Write back
+        let json = match serde_json::to_string_pretty(&corrections) {
+            Ok(j) => j,
+            Err(e) => return Step::Error(format!("Failed to serialize corrections: {}", e)),
+        };
+
+        if let Err(e) = fs::write(&corrections_path, json) {
+            return Step::Error(format!(
+                "Failed to write {}: {}",
+                corrections_path.display(),
+                e
+            ));
+        }
+
+        Step::Output(format!(
+            "Correction recorded in {} ({} total)",
+            corrections_path.display(),
+            corrections.len()
+        ))
+    }
+}
