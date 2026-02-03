@@ -45,6 +45,7 @@ mod config;
 mod effect;
 mod ide;
 mod llm;
+pub mod security;
 mod tools;
 mod transcript;
 

@@ -113,11 +113,39 @@ pub fn read_file(
 }
 
 /// Execute a shell command
+///
+/// Before execution, the command is analyzed for security threats using tirith-core.
+/// Commands flagged as dangerous (e.g., pipe-to-shell, homograph attacks) will be blocked.
 pub async fn execute_shell(
     command: &str,
     working_dir: Option<&str>,
     timeout_secs: u64,
 ) -> Result<ShellResult, String> {
+    // Security analysis using tirith-core (runs in separate thread to avoid blocking)
+    let security_result = crate::security::analyze_command_async(command, working_dir).await;
+
+    if security_result.blocked {
+        let findings = crate::security::format_findings(&security_result);
+        return Err(format!(
+            "Command blocked by security analysis:\n{}",
+            if findings.is_empty() {
+                security_result
+                    .summary
+                    .unwrap_or_else(|| "Suspicious command pattern detected".to_string())
+            } else {
+                findings
+            }
+        ));
+    }
+
+    // Log warnings but allow execution
+    let security_warning = if security_result.warned {
+        let findings = crate::security::format_findings(&security_result);
+        Some(format!("[Security Warning]\n{}", findings))
+    } else {
+        None
+    };
+
     let mut cmd = Command::new("bash");
     cmd.arg("-c").arg(command);
     cmd.stdout(Stdio::piped());
@@ -192,6 +220,11 @@ pub async fn execute_shell(
 
     if exit_code != 0 {
         output.push_str(&format!("\n[exit code: {}]", exit_code));
+    }
+
+    // Prepend security warning if present
+    if let Some(warning) = security_warning {
+        output = format!("{}\n\n{}", warning, output);
     }
 
     // Truncate if too long (UTF-8 safe)
