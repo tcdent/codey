@@ -443,3 +443,92 @@ impl EffectHandler for FetchHtml {
         }
     }
 }
+
+// =============================================================================
+// Correction memory handlers
+// =============================================================================
+
+use crate::config::CODEY_DIR;
+use chrono::Local;
+
+/// Filename for storing corrections
+pub const CORRECTIONS_FILENAME: &str = "corrections.md";
+
+/// Append a correction to the corrections file
+pub struct AppendCorrection {
+    pub goal: String,
+    pub failed_attempt: String,
+    pub successful_approach: String,
+}
+
+#[async_trait::async_trait]
+impl EffectHandler for AppendCorrection {
+    async fn call(self: Box<Self>) -> Step {
+        let codey_dir = PathBuf::from(CODEY_DIR);
+
+        // Create .codey directory if it doesn't exist
+        if !codey_dir.exists() {
+            if let Err(e) = fs::create_dir_all(&codey_dir) {
+                return Step::Error(format!(
+                    "Failed to create {} directory: {}",
+                    CODEY_DIR, e
+                ));
+            }
+        }
+
+        let corrections_path = codey_dir.join(CORRECTIONS_FILENAME);
+        let timestamp = Local::now().format("%Y-%m-%d %H:%M");
+
+        // Format the correction entry
+        let entry = format!(
+            "\n## Correction ({timestamp})\n\n\
+             **Goal:** {}\n\n\
+             **Failed approach:** `{}`\n\n\
+             **Successful approach:** `{}`\n\n\
+             ---\n",
+            self.goal, self.failed_attempt, self.successful_approach
+        );
+
+        // Check if file exists to add header for new files
+        let content = if corrections_path.exists() {
+            entry
+        } else {
+            format!(
+                "# Corrections\n\n\
+                 This file contains corrections learned during previous sessions.\n\n\
+                 ---\n{}",
+                entry
+            )
+        };
+
+        // Append to the file
+        use std::io::Write;
+        let mut file = match fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&corrections_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                return Step::Error(format!(
+                    "Failed to open {}: {}",
+                    corrections_path.display(),
+                    e
+                ))
+            }
+        };
+
+        if let Err(e) = file.write_all(content.as_bytes()) {
+            return Step::Error(format!(
+                "Failed to write correction to {}: {}",
+                corrections_path.display(),
+                e
+            ));
+        }
+
+        Step::Output(format!(
+            "Correction recorded in {}",
+            corrections_path.display()
+        ))
+    }
+}

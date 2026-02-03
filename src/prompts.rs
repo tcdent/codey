@@ -16,6 +16,9 @@ const ESH_SCRIPT: &str = include_str!("../lib/esh/esh");
 /// Filename for custom system prompt additions
 pub const SYSTEM_MD_FILENAME: &str = "SYSTEM.md";
 
+/// Filename for correction memory
+pub const CORRECTIONS_FILENAME: &str = "corrections.md";
+
 /// Welcome message shown when the application starts
 pub const WELCOME_MESSAGE: &str =
     "Welcome to Codey! I'm your AI coding assistant. How can I help you today?";
@@ -36,6 +39,7 @@ You have access to the following tools:
 - `spawn_agent`: Spawn a sub-agent to handle a subtask
 - `list_agents` / `get_agent`: Check status and retrieve results from sub-agents
 - `list_background_tasks` / `get_background_task`: Check on background tool executions
+- `record_correction`: Record a correction when a command fails and you find a better approach
 
 ## Guidelines
 
@@ -69,6 +73,12 @@ When fetching web pages with `fetch_html`, consider using `spawn_agent` to deleg
 For long-running operations, you can execute tools in the background by adding `"background": true` to the tool call. This returns immediately with a task ID while the tool runs asynchronously.
 Use `list_background_tasks` to check status and `get_background_task` to retrieve results when complete.
 You will be notified with a message when background tasks finish.
+
+### Recording Corrections
+When a shell command or approach fails and you find a better way to accomplish the goal, use `record_correction` to save this knowledge. This helps avoid repeating the same mistakes in future sessions. For example:
+- A command that doesn't exist on this system but has an alternative
+- A path that was wrong but you found the correct one
+- A syntax that didn't work but another did
 
 ### General
 - Be concise but thorough
@@ -118,6 +128,7 @@ You have read-only access to:
 /// 1. The base system prompt (static)
 /// 2. User SYSTEM.md from ~/.config/codey/ (optional, dynamic)
 /// 3. Project SYSTEM.md from .codey/ (optional, dynamic)
+/// 4. Project corrections.md from .codey/ (optional, contains learned corrections)
 ///
 /// SYSTEM.md files are processed through [esh](https://github.com/jirutka/esh),
 /// allowing embedded shell commands using `<%= command %>` syntax.
@@ -125,6 +136,7 @@ You have read-only access to:
 pub struct SystemPrompt {
     user_path: Option<PathBuf>,
     project_path: PathBuf,
+    corrections_path: PathBuf,
 }
 
 impl SystemPrompt {
@@ -132,10 +144,12 @@ impl SystemPrompt {
     pub fn new() -> Self {
         let user_path = Config::config_dir().map(|d| d.join(SYSTEM_MD_FILENAME));
         let project_path = Path::new(CODEY_DIR).join(SYSTEM_MD_FILENAME);
+        let corrections_path = Path::new(CODEY_DIR).join(CORRECTIONS_FILENAME);
 
         Self {
             user_path,
             project_path,
+            corrections_path,
         }
     }
 
@@ -146,6 +160,7 @@ impl SystemPrompt {
     /// - Base system prompt
     /// - User SYSTEM.md content (if exists)
     /// - Project SYSTEM.md content (if exists)
+    /// - Project corrections.md content (if exists)
     pub fn build(&self) -> String {
         let mut prompt = SYSTEM_PROMPT.to_string();
 
@@ -163,7 +178,25 @@ impl SystemPrompt {
             prompt.push_str(&content);
         }
 
+        // Append corrections.md if it exists (learned corrections from previous sessions)
+        if let Some(content) = self.load_corrections() {
+            prompt.push_str("\n\n## Learned Corrections\n\n");
+            prompt.push_str("The following corrections were learned from previous sessions. ");
+            prompt.push_str("Use this knowledge to avoid repeating the same mistakes:\n\n");
+            prompt.push_str(&content);
+        }
+
         prompt
+    }
+
+    /// Load corrections from the corrections.md file.
+    fn load_corrections(&self) -> Option<String> {
+        if !self.corrections_path.exists() {
+            return None;
+        }
+        fs::read_to_string(&self.corrections_path)
+            .ok()
+            .filter(|s| !s.is_empty())
     }
 
     /// Load and process a SYSTEM.md file through esh, falling back to raw content.
