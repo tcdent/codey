@@ -41,7 +41,7 @@ pub const TRANSCRIPTS_DIR: &str = "transcripts";
 /// use codey::AgentRuntimeConfig;
 ///
 /// let config = AgentRuntimeConfig {
-///     model: "claude-sonnet-4-20250514".to_string(),
+///     model: "claude-sonnet-4-5-20250929".to_string(),
 ///     max_tokens: 8192,
 ///     thinking_budget: 2_000,
 ///     max_retries: 5,
@@ -60,7 +60,7 @@ pub struct AgentRuntimeConfig {
 impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
             max_tokens: 8192,
             thinking_budget: 2_000,
             max_retries: 5,
@@ -169,8 +169,8 @@ pub struct AgentsConfig {
 impl Default for AgentsConfig {
     fn default() -> Self {
         Self {
-            foreground: AgentConfig::foreground_default(),
-            background: AgentConfig::background_default(),
+            foreground: AgentConfig::default(),
+            background: AgentConfig::default(),
         }
     }
 }
@@ -180,58 +180,23 @@ impl Default for AgentsConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
-    /// Model to use (defaults to claude-opus-4-5-20251101)
+    /// Model to use (defaults to claude-opus-4-6)
     pub model: String,
     /// Max tokens for responses
     pub max_tokens: u32,
     /// Thinking budget in tokens
     pub thinking_budget: u32,
-    /// Tool access level
-    pub tool_access: ToolAccess,
 }
 
 #[cfg(feature = "cli")]
 impl Default for AgentConfig {
     fn default() -> Self {
-        Self::foreground_default()
-    }
-}
-
-#[cfg(feature = "cli")]
-impl AgentConfig {
-    /// Default configuration for foreground/primary agent
-    pub fn foreground_default() -> Self {
         Self {
-            model: "claude-opus-4-5-20251101".to_string(),
+            model: "claude-opus-4-6".to_string(),
             max_tokens: 8192,
             thinking_budget: 2_000,
-            tool_access: ToolAccess::Full,
         }
     }
-
-    /// Default configuration for background agents
-    pub fn background_default() -> Self {
-        Self {
-            model: "claude-opus-4-5-20251101".to_string(),
-            max_tokens: 4096,
-            thinking_budget: 1_024,
-            tool_access: ToolAccess::ReadOnly,
-        }
-    }
-}
-
-/// Tool access level for agents
-#[cfg(feature = "cli")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolAccess {
-    /// Full access to all tools
-    #[default]
-    Full,
-    /// Read-only tools: read_file, shell, fetch_url, web_search, open_file
-    ReadOnly,
-    /// No tools
-    None,
 }
 
 #[cfg(feature = "cli")]
@@ -473,7 +438,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.agents.foreground.model, "claude-opus-4-5-20251101");
+        assert_eq!(config.agents.foreground.model, "claude-opus-4-6");
         assert!(config.tools.enabled.contains(&names::READ_FILE.to_string()));
     }
 
@@ -505,19 +470,15 @@ auto_scroll = false
 model = "claude-opus-4-5-20251101"
 max_tokens = 8192
 thinking_budget = 2000
-tool_access = "full"
 
 [agents.background]
 model = "claude-sonnet-4-20250514"
 max_tokens = 4096
 thinking_budget = 1024
-tool_access = "read_only"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.agents.foreground.model, "claude-opus-4-5-20251101");
-        assert_eq!(config.agents.foreground.tool_access, ToolAccess::Full);
         assert_eq!(config.agents.background.model, "claude-sonnet-4-20250514");
-        assert_eq!(config.agents.background.tool_access, ToolAccess::ReadOnly);
     }
 
     #[test]

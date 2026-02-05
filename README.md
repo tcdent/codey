@@ -79,13 +79,18 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 Copy `config.example.toml` to `~/.config/codey/config.toml` and customize:
 
 ```toml
-[general]
-model = "claude-sonnet-4-20250514"
+[agents.foreground]
+model = "claude-opus-4-6"
 max_tokens = 8192
+
+[agents.background]
+model = "claude-sonnet-4-5-20250929"
 
 [ui]
 theme = "base16-ocean.dark"
 ```
+
+Foreground and background agents are configured independently. Both default to `claude-opus-4-6` when not specified. See `config.example.toml` for all available options.
 
 ## Custom System Prompts
 

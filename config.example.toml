@@ -2,12 +2,12 @@
 # Copy this file to: ~/.config/codey/config.toml
 
 [general]
-# Default model to use
-model = "claude-sonnet-4-20250514"
-
 # Working directory (default: current directory)
 # working_dir = "/path/to/project"
 
+[agents.foreground]
+# Model to use (default: claude-opus-4-6)
+model = "claude-opus-4-6"
 # Maximum tokens for responses
 max_tokens = 8192
 
