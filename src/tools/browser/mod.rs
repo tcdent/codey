@@ -1,6 +1,7 @@
 //! Browser automation module
 //!
-//! Provides headless browser functionality for fetching JavaScript-rendered pages.
+//! Provides headless browser functionality for fetching JavaScript-rendered pages
+//! and persistent interactive browser sessions.
 //! Uses Chrome/Chromium via the chromiumoxide crate.
 //!
 //! # Features
@@ -9,6 +10,7 @@
 //! - Chrome profile support for authenticated sessions
 //! - Readability-based content extraction
 //! - HTML to Markdown conversion for token-efficient output
+//! - Persistent browser sessions with named access (see [`session`] module)
 //!
 //! # Chrome Profile Authentication
 //!
@@ -27,6 +29,8 @@
 //! 3. **Keychain Access**: chromiumoxide's default args include `--password-store=basic` and
 //!    `--use-mock-keychain`, which tell Chrome to use a mock keychain instead of the real one.
 //!    This breaks cookie decryption! We must disable these defaults when using a profile.
+
+pub mod session;
 
 use std::fs;
 use std::path::Path;
@@ -399,7 +403,7 @@ async fn fetch_with_browser(
 }
 
 /// Recursively copy a directory and its contents
-fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -417,13 +421,13 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-struct ReadableContent {
-    content: String,
-    title: Option<String>,
+pub(crate) struct ReadableContent {
+    pub(crate) content: String,
+    pub(crate) title: Option<String>,
 }
 
 /// Extract readable content using the readability algorithm
-fn extract_readable_content(html: &str, url: &str) -> Result<ReadableContent, String> {
+pub(crate) fn extract_readable_content(html: &str, url: &str) -> Result<ReadableContent, String> {
     use readability::extractor;
 
     // Parse URL for the extractor
@@ -448,6 +452,6 @@ fn extract_readable_content(html: &str, url: &str) -> Result<ReadableContent, St
 }
 
 /// Convert HTML to markdown
-fn html_to_markdown(html: &str) -> String {
+pub(crate) fn html_to_markdown(html: &str) -> String {
     htmd::convert(html).unwrap_or_else(|_| html.to_string())
 }

@@ -33,6 +33,11 @@ pub mod names {
     pub const LIST_AGENTS: &str = "mcp_list_agents";
     pub const GET_AGENT: &str = "mcp_get_agent";
     pub const RECORD_CORRECTION: &str = "mcp_record_correction";
+    pub const BROWSER_OPEN: &str = "mcp_browser_open";
+    pub const BROWSER_ACTION: &str = "mcp_browser_action";
+    pub const BROWSER_SNAPSHOT: &str = "mcp_browser_snapshot";
+    pub const BROWSER_LIST_SESSIONS: &str = "mcp_browser_list_sessions";
+    pub const BROWSER_CLOSE: &str = "mcp_browser_close";
 }
 
 use std::collections::HashMap;
@@ -42,9 +47,11 @@ pub use crate::effect::EffectResult;
 pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
 #[cfg(feature = "cli")]
 pub use impls::{
-    init_agent_context, update_agent_oauth, EditFileTool, FetchHtmlTool, FetchUrlTool,
-    GetAgentTool, GetBackgroundTaskTool, ListAgentsTool, ListBackgroundTasksTool, OpenFileTool,
-    ReadFileTool, RecordCorrectionTool, ShellTool, SpawnAgentTool, WebSearchTool, WriteFileTool,
+    init_agent_context, update_agent_oauth, BrowserActionTool, BrowserCloseTool,
+    BrowserListSessionsTool, BrowserOpenTool, BrowserSnapshotTool, EditFileTool, FetchHtmlTool,
+    FetchUrlTool, GetAgentTool, GetBackgroundTaskTool, ListAgentsTool, ListBackgroundTasksTool,
+    OpenFileTool, ReadFileTool, RecordCorrectionTool, ShellTool, SpawnAgentTool, WebSearchTool,
+    WriteFileTool,
 };
 #[cfg(feature = "cli")]
 pub use browser::init_browser_context;
@@ -155,6 +162,11 @@ impl ToolRegistry {
         registry.register(Arc::new(ListAgentsTool));
         registry.register(Arc::new(GetAgentTool));
         registry.register(Arc::new(RecordCorrectionTool));
+        registry.register(Arc::new(BrowserOpenTool));
+        registry.register(Arc::new(BrowserActionTool));
+        registry.register(Arc::new(BrowserSnapshotTool));
+        registry.register(Arc::new(BrowserListSessionsTool));
+        registry.register(Arc::new(BrowserCloseTool));
 
         registry
     }

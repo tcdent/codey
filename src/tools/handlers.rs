@@ -417,6 +417,82 @@ impl EffectHandler for GetAgent {
 }
 
 // =============================================================================
+// Browser session handlers (delegate to app)
+// =============================================================================
+
+/// Open a browser session
+pub struct BrowserOpen {
+    pub url: String,
+    pub session_name: Option<String>,
+}
+
+#[async_trait::async_trait]
+impl EffectHandler for BrowserOpen {
+    async fn call(self: Box<Self>) -> Step {
+        Step::Delegate(Effect::BrowserOpen {
+            url: self.url,
+            session_name: self.session_name,
+        })
+    }
+}
+
+/// Perform an action on a browser session
+pub struct BrowserAction {
+    pub session_name: String,
+    pub action: String,
+    pub params: serde_json::Value,
+}
+
+#[async_trait::async_trait]
+impl EffectHandler for BrowserAction {
+    async fn call(self: Box<Self>) -> Step {
+        Step::Delegate(Effect::BrowserAction {
+            session_name: self.session_name,
+            action: self.action,
+            params: self.params,
+        })
+    }
+}
+
+/// Get a snapshot of browser session content
+pub struct BrowserSnapshot {
+    pub session_name: String,
+}
+
+#[async_trait::async_trait]
+impl EffectHandler for BrowserSnapshot {
+    async fn call(self: Box<Self>) -> Step {
+        Step::Delegate(Effect::BrowserSnapshot {
+            session_name: self.session_name,
+        })
+    }
+}
+
+/// List all browser sessions
+pub struct BrowserListSessions;
+
+#[async_trait::async_trait]
+impl EffectHandler for BrowserListSessions {
+    async fn call(self: Box<Self>) -> Step {
+        Step::Delegate(Effect::BrowserListSessions)
+    }
+}
+
+/// Close a browser session
+pub struct BrowserClose {
+    pub session_name: String,
+}
+
+#[async_trait::async_trait]
+impl EffectHandler for BrowserClose {
+    async fn call(self: Box<Self>) -> Step {
+        Step::Delegate(Effect::BrowserClose {
+            session_name: self.session_name,
+        })
+    }
+}
+
+// =============================================================================
 // HTML content handlers
 // =============================================================================
 

@@ -83,6 +83,34 @@ pub enum Effect {
     GetAgent {
         label: String,
     },
+
+    // === Browser Sessions ===
+    /// Open a browser session (or reuse existing) and navigate to URL
+    #[cfg(feature = "cli")]
+    BrowserOpen {
+        url: String,
+        session_name: Option<String>,
+    },
+    /// Perform an action on an existing browser session
+    #[cfg(feature = "cli")]
+    BrowserAction {
+        session_name: String,
+        action: String,
+        params: serde_json::Value,
+    },
+    /// Get a snapshot of the current page content
+    #[cfg(feature = "cli")]
+    BrowserSnapshot {
+        session_name: String,
+    },
+    /// List all active browser sessions
+    #[cfg(feature = "cli")]
+    BrowserListSessions,
+    /// Close a browser session
+    #[cfg(feature = "cli")]
+    BrowserClose {
+        session_name: String,
+    },
 }
 
 impl std::fmt::Debug for Effect {
@@ -127,6 +155,30 @@ impl std::fmt::Debug for Effect {
             Effect::GetAgent { label } => {
                 f.debug_struct("GetAgent").field("label", &label).finish()
             }
+            #[cfg(feature = "cli")]
+            Effect::BrowserOpen { url, session_name } => f
+                .debug_struct("BrowserOpen")
+                .field("url", url)
+                .field("session_name", session_name)
+                .finish(),
+            #[cfg(feature = "cli")]
+            Effect::BrowserAction { session_name, action, .. } => f
+                .debug_struct("BrowserAction")
+                .field("session_name", session_name)
+                .field("action", action)
+                .finish_non_exhaustive(),
+            #[cfg(feature = "cli")]
+            Effect::BrowserSnapshot { session_name } => f
+                .debug_struct("BrowserSnapshot")
+                .field("session_name", session_name)
+                .finish(),
+            #[cfg(feature = "cli")]
+            Effect::BrowserListSessions => f.write_str("BrowserListSessions"),
+            #[cfg(feature = "cli")]
+            Effect::BrowserClose { session_name } => f
+                .debug_struct("BrowserClose")
+                .field("session_name", session_name)
+                .finish(),
         }
     }
 }
