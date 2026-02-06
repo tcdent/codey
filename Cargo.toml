@@ -76,6 +76,9 @@ async-stream = "0.3"
 dotenvy = "0.15.7"
 typetag = "0.2.21"
 
+# Terminal security analysis
+tirith-core = { git = "https://github.com/sheeki03/tirith.git" }
+
 # TUI rendering (CLI only)
 ratskin = { version = "0.3", optional = true }
 textwrap = { version = "0.16.2", optional = true }
