@@ -4,25 +4,42 @@
 //! These are decoupled from the effect/tool system and use standard types.
 
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
-/// Wrapper that sends SIGKILL to a child process on drop.
+/// Wrapper that kills the entire process group on drop.
 /// 
 /// `tokio::process::Child` does NOT kill on drop — it orphans the process.
-/// This ensures spawned processes are cleaned up when their task is aborted,
-/// panics, or is otherwise dropped.
+/// We spawn bash with `setpgid(0, 0)` so it becomes a process group leader.
+/// On drop, we send SIGKILL to the negative PID (the entire group), killing
+/// bash and all its children (sleep, find, etc.).
 struct KillOnDrop(tokio::process::Child);
 
 impl Drop for KillOnDrop {
     fn drop(&mut self) {
-        // start_kill() is sync (sends SIGKILL immediately), safe to call in Drop.
-        let _ = self.0.start_kill();
+        if let Some(pid) = self.0.id() {
+            // Kill the entire process group (negative PID = group kill).
+            // This is sync and safe to call in Drop.
+            unsafe {
+                let pgid = -(pid as i32);
+                libc_kill(pgid, 9); // SIGKILL = 9
+            }
+        } else {
+            // Process already exited or no PID available, try direct kill.
+            let _ = self.0.start_kill();
+        }
     }
 }
+
+extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+    fn setpgid(pid: i32, pgid: i32) -> i32;
+}
+use kill as libc_kill;
 
 /// Result of a shell command
 #[derive(Debug)]
@@ -136,6 +153,8 @@ pub async fn execute_shell(
     cmd.arg("-c").arg(command);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // Spawn in its own process group so KillOnDrop can kill all children.
+    unsafe { cmd.pre_exec(|| { setpgid(0, 0); Ok(()) }); }
 
     if let Some(dir) = working_dir {
         let path = Path::new(dir);
