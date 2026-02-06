@@ -7,7 +7,7 @@
 //! - User messages → `Notification::Message`
 //! - Background tool completions → `Notification::BackgroundTool`
 //! - Background agent completions → `Notification::BackgroundAgent`
-//! - Shared task list changes → `Notification::SharedTaskListChanged`
+//! - Task list changes → `Notification::TaskListChanged`
 //! - Slash commands → `Notification::Command`
 //!
 //! The queue supports two drain modes:
@@ -53,8 +53,8 @@ pub enum Notification {
         block_id: usize,
     },
 
-    /// Shared task list was modified by another agent
-    SharedTaskListChanged {
+    /// Task list was modified by another agent
+    TaskListChanged {
         summary: String,
         block_id: usize,
     },
@@ -73,7 +73,7 @@ impl Notification {
             Notification::Command { block_id, .. } => *block_id,
             Notification::BackgroundTool { block_id, .. } => *block_id,
             Notification::BackgroundAgent { block_id, .. } => *block_id,
-            Notification::SharedTaskListChanged { block_id, .. } => *block_id,
+            Notification::TaskListChanged { block_id, .. } => *block_id,
             Notification::Compaction { block_id } => *block_id,
         }
     }
@@ -85,7 +85,7 @@ impl Notification {
             Notification::Message { .. }
             | Notification::BackgroundTool { .. }
             | Notification::BackgroundAgent { .. }
-            | Notification::SharedTaskListChanged { .. } => true,
+            | Notification::TaskListChanged { .. } => true,
             Notification::Command { .. } | Notification::Compaction { .. } => false,
         }
     }
@@ -106,8 +106,8 @@ impl Notification {
                 "<notification source=\"background_agent\" label=\"{}\">\n{}\n</notification>",
                 label, result
             )),
-            Notification::SharedTaskListChanged { summary, .. } => Some(format!(
-                "<notification source=\"shared_task_list\">\n{}\n</notification>",
+            Notification::TaskListChanged { summary, .. } => Some(format!(
+                "<notification source=\"task_list\">\n{}\n</notification>",
                 summary
             )),
             Notification::Command { .. } | Notification::Compaction { .. } => None,
@@ -245,8 +245,8 @@ mod tests {
     }
 
     #[test]
-    fn test_shared_task_list_changed_can_interrupt() {
-        let notif = Notification::SharedTaskListChanged {
+    fn test_task_list_changed_can_interrupt() {
+        let notif = Notification::TaskListChanged {
             summary: "task added".to_string(),
             block_id: 0,
         };
@@ -290,7 +290,7 @@ mod tests {
 
         // Targeted at agent 1
         queue.push_for_agent(
-            Notification::SharedTaskListChanged {
+            Notification::TaskListChanged {
                 summary: "for agent 1".to_string(),
                 block_id: 1,
             },
@@ -299,7 +299,7 @@ mod tests {
 
         // Targeted at agent 2
         queue.push_for_agent(
-            Notification::SharedTaskListChanged {
+            Notification::TaskListChanged {
                 summary: "for agent 2".to_string(),
                 block_id: 2,
             },
@@ -328,13 +328,13 @@ mod tests {
     }
 
     #[test]
-    fn test_to_xml_shared_task_list() {
-        let notif = Notification::SharedTaskListChanged {
+    fn test_to_xml_task_list() {
+        let notif = Notification::TaskListChanged {
             summary: "task_1 completed".to_string(),
             block_id: 0,
         };
         let xml = notif.to_xml().unwrap();
-        assert!(xml.contains("source=\"shared_task_list\""));
+        assert!(xml.contains("source=\"task_list\""));
         assert!(xml.contains("task_1 completed"));
     }
 

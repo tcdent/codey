@@ -56,7 +56,7 @@ mod notifications;
 #[cfg(feature = "cli")]
 mod prompts;
 #[cfg(feature = "cli")]
-pub mod shared_tasks;
+pub mod tasks;
 #[cfg(feature = "cli")]
 mod tool_filter;
 

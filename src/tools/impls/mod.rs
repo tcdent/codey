@@ -25,6 +25,6 @@ pub use read_file::ReadFileTool;
 pub use record_correction::RecordCorrectionTool;
 pub use shell::ShellTool;
 pub use spawn_agent::{init_agent_context, update_agent_oauth, SpawnAgentTool};
-pub use tasks::SharedTaskListTool;
+pub use tasks::TaskListTool;
 pub use web_search::WebSearchTool;
 pub use write_file::WriteFileTool;

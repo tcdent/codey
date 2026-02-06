@@ -1,18 +1,27 @@
-//! Shared task list for multi-agent coordination.
+//! Task list for multi-agent coordination.
 //!
-//! Provides a persistent JSON task list that multiple agents can read and update.
+//! Provides an in-memory task list that multiple agents can read and update.
 //! Each task has a name, description, status, and optional agent claim.
-//! Stored at `~/.codey/shared_tasks.json`.
+//! The list lives for the duration of the session (not persisted to disk).
+
+use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::PathBuf;
 
-use crate::config::CODEY_DIR;
+/// Global task list, shared across all agents in the session.
+static TASK_LIST: Mutex<Option<TaskList>> = Mutex::new(None);
 
-const SHARED_TASKS_FILENAME: &str = "shared_tasks.json";
+/// Access the global task list. Initializes on first access.
+pub fn with_task_list<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut TaskList) -> R,
+{
+    let mut guard = TASK_LIST.lock().unwrap();
+    let list = guard.get_or_insert_with(TaskList::default);
+    f(list)
+}
 
-/// Status of a shared task.
+/// Status of a task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
@@ -31,9 +40,9 @@ impl std::fmt::Display for TaskStatus {
     }
 }
 
-/// A single task in the shared task list.
+/// A single task in the task list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SharedTask {
+pub struct Task {
     pub id: String,
     pub name: String,
     pub description: String,
@@ -42,47 +51,14 @@ pub struct SharedTask {
     pub agent: Option<String>,
 }
 
-/// The full shared task list.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SharedTaskList {
-    pub tasks: Vec<SharedTask>,
-    #[serde(default)]
+/// The task list.
+#[derive(Debug, Clone, Default)]
+pub struct TaskList {
+    pub tasks: Vec<Task>,
     next_id: u32,
 }
 
-impl SharedTaskList {
-    /// Path to the shared tasks JSON file.
-    fn path() -> PathBuf {
-        PathBuf::from(CODEY_DIR).join(SHARED_TASKS_FILENAME)
-    }
-
-    /// Load the task list from disk. Returns an empty list if the file doesn't exist.
-    pub fn load() -> Self {
-        let path = Self::path();
-        if !path.exists() {
-            return Self::default();
-        }
-        match fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
-    }
-
-    /// Save the task list to disk.
-    pub fn save(&self) -> Result<(), String> {
-        let codey_dir = PathBuf::from(CODEY_DIR);
-        if !codey_dir.exists() {
-            fs::create_dir_all(&codey_dir)
-                .map_err(|e| format!("Failed to create {} directory: {}", CODEY_DIR, e))?;
-        }
-
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| format!("Failed to serialize task list: {}", e))?;
-
-        fs::write(Self::path(), json)
-            .map_err(|e| format!("Failed to write {}: {}", Self::path().display(), e))
-    }
-
+impl TaskList {
     /// Generate a new unique task ID.
     fn next_id(&mut self) -> String {
         self.next_id += 1;
@@ -92,7 +68,7 @@ impl SharedTaskList {
     /// Add a new task. Returns the assigned task ID.
     pub fn add(&mut self, name: String, description: String) -> String {
         let id = self.next_id();
-        self.tasks.push(SharedTask {
+        self.tasks.push(Task {
             id: id.clone(),
             name,
             description,
@@ -173,7 +149,7 @@ impl SharedTaskList {
     /// Format the task list as a human-readable string.
     pub fn format(&self) -> String {
         if self.tasks.is_empty() {
-            return "No shared tasks.".to_string();
+            return "No tasks.".to_string();
         }
 
         self.tasks
@@ -200,7 +176,7 @@ mod tests {
 
     #[test]
     fn test_add_and_format() {
-        let mut list = SharedTaskList::default();
+        let mut list = TaskList::default();
         let id = list.add("Fix bug".into(), "Fix the login bug".into());
         assert_eq!(id, "task_1");
         assert_eq!(list.tasks.len(), 1);
@@ -209,7 +185,7 @@ mod tests {
 
     #[test]
     fn test_claim() {
-        let mut list = SharedTaskList::default();
+        let mut list = TaskList::default();
         let id = list.add("Task 1".into(), "Description".into());
         list.claim(&id, "agent-1").unwrap();
         assert_eq!(list.tasks[0].agent.as_deref(), Some("agent-1"));
@@ -218,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_claim_already_claimed() {
-        let mut list = SharedTaskList::default();
+        let mut list = TaskList::default();
         let id = list.add("Task 1".into(), "Description".into());
         list.claim(&id, "agent-1").unwrap();
         assert!(list.claim(&id, "agent-2").is_err());
@@ -226,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_complete() {
-        let mut list = SharedTaskList::default();
+        let mut list = TaskList::default();
         let id = list.add("Task 1".into(), "Description".into());
         list.complete(&id).unwrap();
         assert_eq!(list.tasks[0].status, TaskStatus::Completed);
@@ -234,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_remove() {
-        let mut list = SharedTaskList::default();
+        let mut list = TaskList::default();
         let id = list.add("Task 1".into(), "Description".into());
         list.remove(&id).unwrap();
         assert!(list.tasks.is_empty());
@@ -242,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_update() {
-        let mut list = SharedTaskList::default();
+        let mut list = TaskList::default();
         let id = list.add("Task 1".into(), "Original".into());
         list.update(&id, Some(TaskStatus::InProgress), Some("Updated".into()))
             .unwrap();
@@ -252,20 +228,7 @@ mod tests {
 
     #[test]
     fn test_empty_format() {
-        let list = SharedTaskList::default();
-        assert_eq!(list.format(), "No shared tasks.");
-    }
-
-    #[test]
-    fn test_serialization_roundtrip() {
-        let mut list = SharedTaskList::default();
-        list.add("Task 1".into(), "Desc 1".into());
-        list.add("Task 2".into(), "Desc 2".into());
-        list.claim("task_1", "agent-1").unwrap();
-
-        let json = serde_json::to_string(&list).unwrap();
-        let deserialized: SharedTaskList = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.tasks.len(), 2);
-        assert_eq!(deserialized.tasks[0].agent.as_deref(), Some("agent-1"));
+        let list = TaskList::default();
+        assert_eq!(list.format(), "No tasks.");
     }
 }

@@ -727,9 +727,9 @@ impl App {
                 Notification::BackgroundAgent { label, result, block_id } => {
                     background_agents.push((label, result, block_id));
                 }
-                Notification::SharedTaskListChanged { summary, block_id } => {
+                Notification::TaskListChanged { summary, block_id } => {
                     // Treat like a background tool notification - combine into messages
-                    background_tools.push(("shared_task_list".to_string(), summary, block_id));
+                    background_tools.push(("task_list".to_string(), summary, block_id));
                 }
                 Notification::Compaction { block_id } => {
                     has_compaction = true;
@@ -1474,7 +1474,7 @@ impl App {
                     None => Ok(Some(format!("Agent '{}' not found", label))),
                 }
             },
-            Effect::SharedTaskListChanged { summary } => {
+            Effect::TaskListChanged { summary } => {
                 // Broadcast notification to all other active agents
                 let source_agent_id = _agent_id;
 
@@ -1494,12 +1494,12 @@ impl App {
                 // Queue a targeted notification for each agent
                 for target_id in target_agents {
                     let block = NotificationBlock::new(
-                        "shared_task_list",
-                        "Shared task list updated".to_string(),
+                        "task_list",
+                        "Task list updated".to_string(),
                     );
                     let block_id = self.chat.transcript.stage.push(Box::new(block));
                     self.notifications.push_for_agent(
-                        Notification::SharedTaskListChanged {
+                        Notification::TaskListChanged {
                             summary: summary.clone(),
                             block_id,
                         },
@@ -1508,7 +1508,7 @@ impl App {
                 }
 
                 tracing::info!(
-                    "Shared task list changed by agent {}, notifying other agents",
+                    "Task list changed by agent {}, notifying other agents",
                     source_agent_id
                 );
 

@@ -84,10 +84,10 @@ pub enum Effect {
         label: String,
     },
 
-    // === Shared Task List ===
-    /// Shared task list was modified - app should broadcast notification to other agents
+    // === Task List ===
+    /// Task list was modified - app should broadcast notification to other agents
     #[cfg(feature = "cli")]
-    SharedTaskListChanged {
+    TaskListChanged {
         summary: String,
     },
 }
@@ -135,7 +135,7 @@ impl std::fmt::Debug for Effect {
                 f.debug_struct("GetAgent").field("label", &label).finish()
             }
             #[cfg(feature = "cli")]
-            Effect::SharedTaskListChanged { .. } => f.write_str("SharedTaskListChanged"),
+            Effect::TaskListChanged { .. } => f.write_str("TaskListChanged"),
         }
     }
 }
