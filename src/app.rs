@@ -427,6 +427,7 @@ impl App {
             agent_mutex.lock().await.cancel();
         }
         self.tool_executor.cancel();
+        self.effects.clear();
         self.chat.finish_turn(&mut self.terminal);
         if let Err(e) = self.chat.transcript.save() {
             tracing::error!("Failed to save transcript on cancel: {}", e);

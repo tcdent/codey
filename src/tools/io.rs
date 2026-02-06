@@ -154,7 +154,14 @@ pub async fn execute_shell(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     // Spawn in its own process group so KillOnDrop can kill all children.
-    unsafe { cmd.pre_exec(|| { setpgid(0, 0); Ok(()) }); }
+    unsafe {
+        cmd.pre_exec(|| {
+            if setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
 
     if let Some(dir) = working_dir {
         let path = Path::new(dir);

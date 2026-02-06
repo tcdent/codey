@@ -240,6 +240,11 @@ impl EffectQueue {
         self.pending.push_back(effect);
     }
 
+    /// Clear all pending effects (used on hard cancel to prevent ghost entries)
+    pub fn clear(&mut self) {
+        self.pending.clear();
+    }
+
     /// Check if there are any effects that can be polled.
     ///
     /// An effect is pollable if:
