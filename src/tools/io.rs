@@ -4,11 +4,42 @@
 //! These are decoupled from the effect/tool system and use standard types.
 
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Stdio;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+
+/// Wrapper that kills the entire process group on drop.
+/// 
+/// `tokio::process::Child` does NOT kill on drop — it orphans the process.
+/// We spawn bash with `setpgid(0, 0)` so it becomes a process group leader.
+/// On drop, we send SIGKILL to the negative PID (the entire group), killing
+/// bash and all its children (sleep, find, etc.).
+struct KillOnDrop(tokio::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.id() {
+            // Kill the entire process group (negative PID = group kill).
+            // This is sync and safe to call in Drop.
+            unsafe {
+                let pgid = -(pid as i32);
+                libc_kill(pgid, 9); // SIGKILL = 9
+            }
+        } else {
+            // Process already exited or no PID available, try direct kill.
+            let _ = self.0.start_kill();
+        }
+    }
+}
+
+extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+    fn setpgid(pid: i32, pgid: i32) -> i32;
+}
+use kill as libc_kill;
 
 /// Result of a shell command
 #[derive(Debug)]
@@ -122,6 +153,8 @@ pub async fn execute_shell(
     cmd.arg("-c").arg(command);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // Spawn in its own process group so KillOnDrop can kill all children.
+    unsafe { cmd.pre_exec(|| { setpgid(0, 0); Ok(()) }); }
 
     if let Some(dir) = working_dir {
         let path = Path::new(dir);
@@ -134,10 +167,10 @@ pub async fn execute_shell(
         cmd.current_dir(dir);
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
+    let mut child = KillOnDrop(cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?);
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let stdout = child.0.stdout.take();
+    let stderr = child.0.stderr.take();
 
     let mut collected = String::new();
 
@@ -160,14 +193,15 @@ pub async fn execute_shell(
 
     let status = match tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
-        child.wait(),
+        child.0.wait(),
     )
     .await
     {
         Ok(Ok(status)) => status,
         Ok(Err(e)) => return Err(format!("Wait failed: {}", e)),
         Err(_) => {
-            let _ = child.kill().await;
+            // KillOnDrop will handle cleanup, but we can be explicit here too.
+            let _ = child.0.start_kill();
             return Err(format!(
                 "Command timed out after {} seconds",
                 timeout_secs

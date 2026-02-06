@@ -408,11 +408,25 @@ impl App {
         self.restore_terminal()
     }
 
-    /// Cancel the current agent request and reset input mode
+    /// Cancel the current activity, with layered behavior:
+    /// 1. If a foreground tool is running → cancel just that tool (error sent to LLM)
+    /// 2. Otherwise → cancel the entire turn (agent stream + all tools)
     async fn cancel(&mut self) -> Result<()> {
+        // Layer 1: If a foreground tool is running, just cancel it.
+        // The error result flows back to the LLM, which continues its turn.
+        if self.tool_executor.has_running_foreground() {
+            let events = self.tool_executor.cancel_foreground();
+            for event in events {
+                self.handle_tool_event(event).await?;
+            }
+            return Ok(());
+        }
+
+        // Layer 2: No foreground tool running — cancel the entire turn.
         if let Some(agent_mutex) = self.agents.primary() {
             agent_mutex.lock().await.cancel();
         }
+        self.tool_executor.cancel();
         self.chat.finish_turn(&mut self.terminal);
         if let Err(e) = self.chat.transcript.save() {
             tracing::error!("Failed to save transcript on cancel: {}", e);
