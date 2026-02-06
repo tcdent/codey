@@ -11,81 +11,39 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{handlers, Tool, ToolPipeline};
-use crate::impl_tool_block;
+use crate::define_tool_block;
+use crate::define_simple_tool_block;
 use crate::transcript::{
-    render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock,
+    render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType,
+    Status, ToolBlock,
 };
 
 // =============================================================================
 // browser_open
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserOpenBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-}
+define_tool_block! {
+    /// Block for browser_open - shows as `browser_open(url, session?)`
+    pub struct BrowserOpenBlock {
+        max_lines: 5,
+        params_type: BrowserOpenParams,
+        render_header(self, params) {
+            let url = params["url"].as_str().unwrap_or("").to_string();
+            let session = params["session_name"].as_str().unwrap_or("").to_string();
 
-impl BrowserOpenBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
+            let mut spans = vec![
+                Span::styled("browser_open", Style::default().fg(Color::Magenta)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(url, Style::default().fg(Color::Blue)),
+            ];
+            if !session.is_empty() {
+                spans.push(Span::styled(", ", Style::default().fg(Color::DarkGray)));
+                spans.push(Span::styled(session, Style::default().fg(Color::White)));
+            }
+            spans.push(Span::styled(")", Style::default().fg(Color::DarkGray)));
+            spans
         }
     }
-}
-
-#[typetag::serde]
-impl Block for BrowserOpenBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-        let url = self.params["url"].as_str().unwrap_or("");
-        let session = self.params["session_name"].as_str().unwrap_or("");
-
-        let mut spans = vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("browser_open", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(url, Style::default().fg(Color::Blue)),
-        ];
-        if !session.is_empty() {
-            spans.push(Span::styled(", ", Style::default().fg(Color::DarkGray)));
-            spans.push(Span::styled(session, Style::default().fg(Color::White)));
-        }
-        spans.push(Span::styled(")", Style::default().fg(Color::DarkGray)));
-        lines.push(Line::from(spans));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 5));
-        }
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> { Some(&self.call_id) }
-    fn tool_name(&self) -> Option<&str> { Some(&self.tool_name) }
-    fn params(&self) -> Option<&serde_json::Value> { Some(&self.params) }
 }
 
 pub struct BrowserOpenTool;
@@ -146,7 +104,11 @@ impl Tool for BrowserOpenTool {
     }
 
     fn create_block(&self, call_id: &str, params: serde_json::Value, background: bool) -> Box<dyn Block> {
-        Box::new(BrowserOpenBlock::new(call_id, self.name(), params, background))
+        if let Some(block) = BrowserOpenBlock::from_params(call_id, self.name(), params.clone(), background) {
+            Box::new(block)
+        } else {
+            Box::new(ToolBlock::new(call_id, self.name(), params, background))
+        }
     }
 }
 
@@ -154,69 +116,24 @@ impl Tool for BrowserOpenTool {
 // browser_action
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserActionBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-}
+define_simple_tool_block! {
+    /// Block for browser_action - shows as `browser_action(session, action)`
+    pub struct BrowserActionBlock {
+        max_lines: 5,
+        render_header(self, params) {
+            let session = params["session_name"].as_str().unwrap_or("").to_string();
+            let action = params["action"].as_str().unwrap_or("").to_string();
 
-impl BrowserActionBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
+            vec![
+                Span::styled("browser_action", Style::default().fg(Color::Magenta)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(session, Style::default().fg(Color::White)),
+                Span::styled(", ", Style::default().fg(Color::DarkGray)),
+                Span::styled(action, Style::default().fg(Color::Yellow)),
+                Span::styled(")", Style::default().fg(Color::DarkGray)),
+            ]
         }
     }
-}
-
-#[typetag::serde]
-impl Block for BrowserActionBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-        let session = self.params["session_name"].as_str().unwrap_or("");
-        let action = self.params["action"].as_str().unwrap_or("");
-
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("browser_action", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(session, Style::default().fg(Color::White)),
-            Span::styled(", ", Style::default().fg(Color::DarkGray)),
-            Span::styled(action, Style::default().fg(Color::Yellow)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 5));
-        }
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> { Some(&self.call_id) }
-    fn tool_name(&self) -> Option<&str> { Some(&self.tool_name) }
-    fn params(&self) -> Option<&serde_json::Value> { Some(&self.params) }
 }
 
 pub struct BrowserActionTool;
@@ -311,7 +228,6 @@ impl Tool for BrowserActionTool {
             Err(e) => return ToolPipeline::error(format!("Invalid params: {}", e)),
         };
 
-        // Build the action-specific params as a JSON value
         let action_params = json!({
             "selector": parsed.selector,
             "value": parsed.value,
@@ -340,66 +256,21 @@ impl Tool for BrowserActionTool {
 // browser_snapshot
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserSnapshotBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-}
+define_simple_tool_block! {
+    /// Block for browser_snapshot - shows as `browser_snapshot(session)`
+    pub struct BrowserSnapshotBlock {
+        max_lines: 5,
+        render_header(self, params) {
+            let session = params["session_name"].as_str().unwrap_or("").to_string();
 
-impl BrowserSnapshotBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
+            vec![
+                Span::styled("browser_snapshot", Style::default().fg(Color::Magenta)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(session, Style::default().fg(Color::White)),
+                Span::styled(")", Style::default().fg(Color::DarkGray)),
+            ]
         }
     }
-}
-
-#[typetag::serde]
-impl Block for BrowserSnapshotBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-        let session = self.params["session_name"].as_str().unwrap_or("");
-
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("browser_snapshot", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(session, Style::default().fg(Color::White)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 5));
-        }
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> { Some(&self.call_id) }
-    fn tool_name(&self) -> Option<&str> { Some(&self.tool_name) }
-    fn params(&self) -> Option<&serde_json::Value> { Some(&self.params) }
 }
 
 pub struct BrowserSnapshotTool;
@@ -461,63 +332,17 @@ impl Tool for BrowserSnapshotTool {
 // browser_list_sessions
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserListSessionsBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-}
-
-impl BrowserListSessionsBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
+define_simple_tool_block! {
+    /// Block for browser_list_sessions - shows as `browser_list_sessions()`
+    pub struct BrowserListSessionsBlock {
+        max_lines: 10,
+        render_header(self, params) {
+            vec![
+                Span::styled("browser_list_sessions", Style::default().fg(Color::Magenta)),
+                Span::styled("()", Style::default().fg(Color::DarkGray)),
+            ]
         }
     }
-}
-
-#[typetag::serde]
-impl Block for BrowserListSessionsBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("browser_list_sessions", Style::default().fg(Color::Magenta)),
-            Span::styled("()", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
-        }
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> { Some(&self.call_id) }
-    fn tool_name(&self) -> Option<&str> { Some(&self.tool_name) }
-    fn params(&self) -> Option<&serde_json::Value> { Some(&self.params) }
 }
 
 pub struct BrowserListSessionsTool;
@@ -557,66 +382,21 @@ impl Tool for BrowserListSessionsTool {
 // browser_close
 // =============================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BrowserCloseBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-}
+define_simple_tool_block! {
+    /// Block for browser_close - shows as `browser_close(session)`
+    pub struct BrowserCloseBlock {
+        max_lines: 5,
+        render_header(self, params) {
+            let session = params["session_name"].as_str().unwrap_or("").to_string();
 
-impl BrowserCloseBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
+            vec![
+                Span::styled("browser_close", Style::default().fg(Color::Magenta)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(session, Style::default().fg(Color::White)),
+                Span::styled(")", Style::default().fg(Color::DarkGray)),
+            ]
         }
     }
-}
-
-#[typetag::serde]
-impl Block for BrowserCloseBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-        let session = self.params["session_name"].as_str().unwrap_or("");
-
-        lines.push(Line::from(vec![
-            self.render_status(),
-            render_prefix(self.background),
-            Span::styled("browser_close", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(session, Style::default().fg(Color::White)),
-            Span::styled(")", Style::default().fg(Color::DarkGray)),
-        ]));
-
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 5));
-        }
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> { Some(&self.call_id) }
-    fn tool_name(&self) -> Option<&str> { Some(&self.tool_name) }
-    fn params(&self) -> Option<&serde_json::Value> { Some(&self.params) }
 }
 
 pub struct BrowserCloseTool;
