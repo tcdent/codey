@@ -96,16 +96,6 @@ impl ChatView {
         self.render(terminal)
     }
 
-    /// Start a new block in the current turn and render
-    pub fn start_block(
-        &mut self,
-        block: Box<dyn Block>,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) {
-        self.transcript.start_block(block);
-        self.render(terminal)
-    }
-
     /// Add a complete turn (for initial setup, doesn't auto-render)
     pub fn add_turn(&mut self, role: Role, block: impl Block + 'static) -> usize {
         self.transcript.add_turn(role, block)
