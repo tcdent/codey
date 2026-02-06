@@ -398,13 +398,13 @@ impl BrowserSessionManager {
 // =============================================================================
 
 /// Extracted page content
-struct PageContent {
-    title: Option<String>,
-    markdown: String,
+pub(crate) struct PageContent {
+    pub(crate) title: Option<String>,
+    pub(crate) markdown: String,
 }
 
 /// Launch a new browser instance and navigate to the given URL.
-async fn launch_browser(
+pub(crate) async fn launch_browser(
     url: &str,
 ) -> Result<(Browser, Page, JoinHandle<()>, Option<std::path::PathBuf>), String> {
     let ctx = browser_context().cloned().unwrap_or_default();
@@ -596,7 +596,7 @@ async fn get_current_url(page: &Page) -> Option<String> {
 }
 
 /// Extract readable content from the current page.
-async fn extract_page_content(page: &Page, url: &str) -> Result<PageContent, String> {
+pub(crate) async fn extract_page_content(page: &Page, url: &str) -> Result<PageContent, String> {
     let html = page
         .content()
         .await
