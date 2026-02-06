@@ -29,6 +29,9 @@ pub const CODEY_DIR: &str = ".codey";
 /// Directory name for storing conversation transcripts
 pub const TRANSCRIPTS_DIR: &str = "transcripts";
 
+/// Filename for correction memory
+pub const CORRECTIONS_FILENAME: &str = "corrections.json";
+
 /// Runtime configuration for an Agent instance.
 ///
 /// This is the public API for library users to configure agents.
@@ -317,6 +320,8 @@ pub struct ToolsConfig {
     pub list_agents: ToolFilterConfig,
     /// Filter patterns for get_agent tool (matches against agent_id)
     pub get_agent: ToolFilterConfig,
+    /// Filter patterns for record_correction tool (matches against goal)
+    pub record_correction: ToolFilterConfig,
 }
 
 #[cfg(feature = "cli")]
@@ -330,6 +335,7 @@ impl Default for ToolsConfig {
                 names::SHELL.to_string(),
                 names::FETCH_URL.to_string(),
                 names::WEB_SEARCH.to_string(),
+                names::RECORD_CORRECTION.to_string(),
             ],
             shell: ToolFilterConfig::default(),
             read_file: ToolFilterConfig::default(),
@@ -342,6 +348,7 @@ impl Default for ToolsConfig {
             spawn_agent: ToolFilterConfig::default(),
             list_agents: ToolFilterConfig::default(),
             get_agent: ToolFilterConfig::default(),
+            record_correction: ToolFilterConfig::default(),
         }
     }
 }
@@ -362,6 +369,7 @@ impl ToolsConfig {
         map.insert(names::SPAWN_AGENT.to_string(), self.spawn_agent.clone());
         map.insert(names::LIST_AGENTS.to_string(), self.list_agents.clone());
         map.insert(names::GET_AGENT.to_string(), self.get_agent.clone());
+        map.insert(names::RECORD_CORRECTION.to_string(), self.record_correction.clone());
         map
     }
 }
