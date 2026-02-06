@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 
 use crate::effect::EffectResult;
 use crate::llm::AgentId;
@@ -42,8 +43,9 @@ fn poll_receiver<T>(rx: &mut oneshot::Receiver<T>) -> Poll<Result<T, oneshot::er
 enum WaitingFor {
     /// Not waiting - ready to execute next step
     Nothing,
-    /// Waiting for a handler to complete (spawned in separate task)
-    Handler(oneshot::Receiver<Step>),
+    /// Waiting for a handler to complete (spawned in separate task).
+    /// The JoinHandle is kept so we can abort the task on cancellation.
+    Handler(oneshot::Receiver<Step>, JoinHandle<()>),
     /// Waiting for delegated effect to complete
     Effect(oneshot::Receiver<EffectResult>),
     /// Waiting for user approval (Ok = approved, Err = denied)
@@ -205,7 +207,7 @@ impl ActivePipeline {
     
     /// Check if pipeline is waiting for a handler (spawned task)
     fn is_waiting_for_handler(&self) -> bool {
-        matches!(self.waiting, WaitingFor::Handler(_))
+        matches!(self.waiting, WaitingFor::Handler(..))
     }
     
     /// Check if pipeline is complete (no more steps)
@@ -272,8 +274,19 @@ impl ToolExecutor {
     pub fn cancel(&mut self) {
         self.cancelled = true;
         self.pending.clear();
-        // Only clear non-background tasks
-        self.active.retain(|_, p| p.background && p.status != Status::Running);
+        // Abort running foreground tasks. Background tasks are independent
+        // and keep running across cancellations.
+        // Aborting the JoinHandle drops the spawned future, which triggers
+        // KillOnDrop for any shell processes, cleanly killing child processes.
+        self.active.retain(|_, p| {
+            if p.background {
+                return true;
+            }
+            if let WaitingFor::Handler(_, ref handle) = p.waiting {
+                handle.abort();
+            }
+            false
+        });
     }
 
     pub fn enqueue(&mut self, tool_calls: Vec<ToolCall>) {
@@ -454,14 +467,16 @@ impl ToolExecutor {
         match waiting {
             WaitingFor::Nothing => None,
             
-            WaitingFor::Handler(mut rx) => {
+            WaitingFor::Handler(mut rx, handle) => {
                 match poll_receiver(&mut rx) {
                     Poll::Ready(Ok(step)) => {
                         // Handler completed - process the step result
+                        drop(handle);
                         self.process_step(call_id, step)
                     },
                     Poll::Ready(Err(_)) => {
                         // Channel dropped - handler panicked or was cancelled
+                        drop(handle);
                         let active = self.active.get_mut(call_id)?;
                         if active.background {
                             active.set_error("Handler channel dropped");
@@ -477,7 +492,7 @@ impl ToolExecutor {
                     },
                     Poll::Pending => {
                         // Still running - put it back
-                        self.active.get_mut(call_id).unwrap().waiting = WaitingFor::Handler(rx);
+                        self.active.get_mut(call_id).unwrap().waiting = WaitingFor::Handler(rx, handle);
                         None
                     },
                 }
@@ -609,13 +624,13 @@ impl ToolExecutor {
         // Spawn handler in separate task so it won't be lost if our future is dropped.
         // The result will be polled via WaitingFor::Handler in poll_waiting().
         let (tx, rx) = oneshot::channel();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let step = handler.call().await;
             let _ = tx.send(step);
         });
         
         let active = self.active.get_mut(call_id)?;
-        active.waiting = WaitingFor::Handler(rx);
+        active.waiting = WaitingFor::Handler(rx, handle);
         None
     }
     
@@ -1292,5 +1307,196 @@ mod tests {
         if let Some(r) = responder {
             let _ = r.send(Ok(None));  // Approve
         }
+    }
+
+    #[tokio::test]
+    async fn test_cancel_clears_pending_queue() {
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        // Enqueue several tools but don't poll — they stay in pending
+        executor.enqueue(vec![
+            ToolCall {
+                agent_id: 0,
+                call_id: "p1".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo one" }),
+                decision: ToolDecision::Approve,
+                background: false,
+            },
+            ToolCall {
+                agent_id: 0,
+                call_id: "p2".to_string(),
+                name: "mcp_shell".to_string(),
+                params: serde_json::json!({ "command": "echo two" }),
+                decision: ToolDecision::Approve,
+                background: false,
+            },
+        ]);
+
+        executor.cancel();
+
+        // next() should return None — nothing left to do
+        let event = executor.next().await;
+        assert!(event.is_none(), "Expected no events after cancel, got {:?}", event);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_aborts_running_foreground() {
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        // Enqueue a slow foreground command that needs approval first
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "slow_fg".to_string(),
+            name: "mcp_shell".to_string(),
+            params: serde_json::json!({ "command": "sleep 30" }),
+            decision: ToolDecision::Approve,
+            background: false,
+        }]);
+
+        // Poll once to start it
+        let _ = executor.next().await;
+
+        // Cancel — foreground should be aborted
+        executor.cancel();
+
+        // No active tasks remain
+        let event = executor.next().await;
+        assert!(event.is_none(), "Expected no events after cancel, got {:?}", event);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_preserves_running_background_tasks() {
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        // Enqueue a slow background command
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "slow_bg".to_string(),
+            name: "mcp_shell".to_string(),
+            params: serde_json::json!({ "command": "sleep 0.2 && echo bg_done" }),
+            decision: ToolDecision::Approve,
+            background: true,
+        }]);
+
+        // Poll to get BackgroundStarted
+        let event = executor.next().await;
+        assert!(matches!(event, Some(ToolEvent::BackgroundStarted { .. })),
+            "Expected BackgroundStarted, got {:?}", event);
+        assert_eq!(executor.running_background_count(), 1);
+
+        // Cancel — background tasks should keep running
+        executor.cancel();
+
+        assert_eq!(executor.running_background_count(), 1,
+            "Running background task should survive cancel");
+
+        // First next() after cancel returns None (drains the cancelled flag)
+        assert!(executor.next().await.is_none());
+
+        // Now we can poll for the background task to finish
+        let events = collect_events(&mut executor).await;
+        let completed = events.iter().any(|e|
+            matches!(e, ToolEvent::BackgroundCompleted { call_id, .. } if call_id == "slow_bg")
+        );
+        assert!(completed, "Background task should still complete after cancel");
+        assert!(executor.get_background_output("slow_bg").unwrap().contains("bg_done"));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_preserves_completed_background_tasks() {
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        // Run a fast background task to completion
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "fast".to_string(),
+            name: "mcp_shell".to_string(),
+            params: serde_json::json!({ "command": "echo done" }),
+            decision: ToolDecision::Approve,
+            background: true,
+        }]);
+
+        // Drain all events — should get BackgroundStarted then BackgroundCompleted
+        let events = collect_events(&mut executor).await;
+        let completed = events.iter().any(|e|
+            matches!(e, ToolEvent::BackgroundCompleted { call_id, .. } if call_id == "fast")
+        );
+        assert!(completed, "Background task should complete");
+
+        // Task output should be retrievable
+        assert!(executor.get_background_output("fast").is_some());
+
+        // Now cancel — completed background tasks should survive
+        executor.cancel();
+
+        // Output should still be there
+        let output = executor.get_background_output("fast");
+        assert!(output.is_some(), "Completed background task should survive cancel");
+        assert!(output.unwrap().contains("done"));
+    }
+
+    #[tokio::test]
+    async fn test_cancel_with_mixed_running_and_completed_background() {
+        let mut registry = ToolRegistry::empty();
+        registry.register(std::sync::Arc::new(ShellTool::new()));
+        let mut executor = ToolExecutor::new(registry);
+
+        // Fast background task
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "fast".to_string(),
+            name: "mcp_shell".to_string(),
+            params: serde_json::json!({ "command": "echo done" }),
+            decision: ToolDecision::Approve,
+            background: true,
+        }]);
+
+        // Let it complete
+        let _ = collect_events(&mut executor).await;
+
+        // Now enqueue a slow one
+        executor.enqueue(vec![ToolCall {
+            agent_id: 0,
+            call_id: "slow".to_string(),
+            name: "mcp_shell".to_string(),
+            params: serde_json::json!({ "command": "sleep 0.2 && echo slow_done" }),
+            decision: ToolDecision::Approve,
+            background: true,
+        }]);
+
+        // Poll to get it started
+        let event = executor.next().await;
+        assert!(matches!(event, Some(ToolEvent::BackgroundStarted { .. })));
+
+        // Should have 1 running + 1 completed
+        assert_eq!(executor.running_background_count(), 1);
+        assert_eq!(executor.list_tasks().len(), 2);
+
+        // Cancel — both background tasks should survive
+        executor.cancel();
+
+        assert_eq!(executor.list_tasks().len(), 2,
+            "All background tasks should survive cancel");
+        assert!(executor.get_background_output("fast").unwrap().contains("done"));
+
+        // First next() after cancel drains the cancelled flag
+        assert!(executor.next().await.is_none());
+
+        // Slow one should still finish
+        let events = collect_events(&mut executor).await;
+        let completed = events.iter().any(|e|
+            matches!(e, ToolEvent::BackgroundCompleted { call_id, .. } if call_id == "slow")
+        );
+        assert!(completed, "Running background task should still complete");
+        assert!(executor.get_background_output("slow").unwrap().contains("slow_done"));
     }
 }

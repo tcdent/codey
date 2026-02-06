@@ -10,6 +10,20 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
+/// Wrapper that sends SIGKILL to a child process on drop.
+/// 
+/// `tokio::process::Child` does NOT kill on drop — it orphans the process.
+/// This ensures spawned processes are cleaned up when their task is aborted,
+/// panics, or is otherwise dropped.
+struct KillOnDrop(tokio::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        // start_kill() is sync (sends SIGKILL immediately), safe to call in Drop.
+        let _ = self.0.start_kill();
+    }
+}
+
 /// Result of a shell command
 #[derive(Debug)]
 pub struct ShellResult {
@@ -134,10 +148,10 @@ pub async fn execute_shell(
         cmd.current_dir(dir);
     }
 
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?;
+    let mut child = KillOnDrop(cmd.spawn().map_err(|e| format!("Failed to spawn: {}", e))?);
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let stdout = child.0.stdout.take();
+    let stderr = child.0.stderr.take();
 
     let mut collected = String::new();
 
@@ -160,14 +174,15 @@ pub async fn execute_shell(
 
     let status = match tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
-        child.wait(),
+        child.0.wait(),
     )
     .await
     {
         Ok(Ok(status)) => status,
         Ok(Err(e)) => return Err(format!("Wait failed: {}", e)),
         Err(_) => {
-            let _ = child.kill().await;
+            // KillOnDrop will handle cleanup, but we can be explicit here too.
+            let _ = child.0.start_kill();
             return Err(format!(
                 "Command timed out after {} seconds",
                 timeout_secs
