@@ -1,7 +1,7 @@
 //! Shell command execution tool
 
 use super::{handlers, Tool, ToolPipeline};
-use crate::impl_tool_block;
+use crate::define_tool_block;
 use crate::transcript::{render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
@@ -10,105 +10,26 @@ use ratatui::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// Shell command block - shows the command cleanly
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ShellBlock {
-    pub call_id: String,
-    pub tool_name: String,
-    pub params: serde_json::Value,
-    pub status: Status,
-    pub text: String,
-    #[serde(default)]
-    pub background: bool,
-    /// Agent label for sub-agent tools
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_label: Option<String>,
-}
+define_tool_block! {
+    /// Shell command block - shows the command cleanly
+    pub struct ShellBlock {
+        max_lines: 10,
+        params_type: ShellParams,
+        render_header(self, params) {
+            let command = params["command"].as_str().unwrap_or("");
+            let working_dir = params.get("working_dir").and_then(|v| v.as_str());
 
-impl ShellBlock {
-    pub fn new(call_id: impl Into<String>, tool_name: impl Into<String>, params: serde_json::Value, background: bool) -> Self {
-        Self {
-            call_id: call_id.into(),
-            tool_name: tool_name.into(),
-            params,
-            status: Status::Pending,
-            text: String::new(),
-            background,
-            agent_label: None,
+            let mut spans = vec![
+                Span::styled("shell", Style::default().fg(Color::Magenta)),
+                Span::styled("(", Style::default().fg(Color::DarkGray)),
+                Span::styled(command.to_string(), Style::default().fg(Color::White)),
+            ];
+            if let Some(dir) = working_dir {
+                spans.push(Span::styled(format!(", in {}", dir), Style::default().fg(Color::DarkGray)));
+            }
+            spans.push(Span::styled(")", Style::default().fg(Color::DarkGray)));
+            spans
         }
-    }
-
-    /// Create from tool params JSON
-    pub fn from_params(call_id: &str, tool_name: &str, params: serde_json::Value, background: bool) -> Option<Self> {
-        let _: ShellParams = serde_json::from_value(params.clone()).ok()?;
-        Some(Self::new(call_id, tool_name, params, background))
-    }
-}
-
-#[typetag::serde]
-impl Block for ShellBlock {
-    impl_tool_block!(BlockType::Tool);
-
-    fn render(&self, _width: u16) -> Vec<Line<'_>> {
-        let mut lines = Vec::new();
-
-        let command = self.params["command"].as_str().unwrap_or("");
-        let working_dir = self.params.get("working_dir").and_then(|v| v.as_str());
-
-        // Format: [agent_label] shell(command) or shell(command, in dir)
-        let mut spans = vec![
-            self.render_status(),
-            render_agent_label(self.agent_label.as_deref()),
-            render_prefix(self.background),
-            Span::styled("shell", Style::default().fg(Color::Magenta)),
-            Span::styled("(", Style::default().fg(Color::DarkGray)),
-            Span::styled(command, Style::default().fg(Color::White)),
-        ];
-        if let Some(dir) = working_dir {
-            spans.push(Span::styled(format!(", in {}", dir), Style::default().fg(Color::DarkGray)));
-        }
-        spans.push(Span::styled(")", Style::default().fg(Color::DarkGray)));
-        lines.push(Line::from(spans));
-
-        // Approval prompt if pending
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
-        // Output if completed
-        if !self.text.is_empty() {
-            lines.extend(render_result(&self.text, 10));
-        }
-
-        // Denied message
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-
-        lines
-    }
-
-    fn call_id(&self) -> Option<&str> {
-        Some(&self.call_id)
-    }
-
-    fn tool_name(&self) -> Option<&str> {
-        Some(&self.tool_name)
-    }
-
-    fn params(&self) -> Option<&serde_json::Value> {
-        Some(&self.params)
-    }
-
-    fn set_agent_label(&mut self, label: String) {
-        self.agent_label = Some(label);
-    }
-
-    fn agent_label(&self) -> Option<&str> {
-        self.agent_label.as_deref()
     }
 }
 
