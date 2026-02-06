@@ -74,6 +74,71 @@ pub enum BrowserAction {
     Evaluate { script: String },
 }
 
+impl BrowserAction {
+    /// Parse an action name + JSON params into a BrowserAction.
+    ///
+    /// This keeps all the action-specific validation in one place,
+    /// so callers just pass the raw strings from the tool call.
+    pub fn parse(action: &str, params: &serde_json::Value) -> Result<Self, String> {
+        match action {
+            "navigate" => {
+                let url = params["url"].as_str()
+                    .ok_or("navigate action requires 'url' parameter")?;
+                Ok(BrowserAction::Navigate { url: url.to_string() })
+            }
+            "click" => {
+                let selector = params["selector"].as_str()
+                    .ok_or("click action requires 'selector' parameter")?;
+                Ok(BrowserAction::Click { selector: selector.to_string() })
+            }
+            "fill" => {
+                let selector = params["selector"].as_str()
+                    .ok_or("fill action requires 'selector' parameter")?;
+                let value = params["value"].as_str()
+                    .ok_or("fill action requires 'value' parameter")?;
+                Ok(BrowserAction::Fill {
+                    selector: selector.to_string(),
+                    value: value.to_string(),
+                })
+            }
+            "select" => {
+                let selector = params["selector"].as_str()
+                    .ok_or("select action requires 'selector' parameter")?;
+                let value = params["value"].as_str()
+                    .ok_or("select action requires 'value' parameter")?;
+                Ok(BrowserAction::Select {
+                    selector: selector.to_string(),
+                    value: value.to_string(),
+                })
+            }
+            "scroll" => {
+                let direction = match params["direction"].as_str().unwrap_or("down") {
+                    "up" => ScrollDirection::Up,
+                    _ => ScrollDirection::Down,
+                };
+                let amount = params["amount"].as_u64().map(|v| v as u32);
+                Ok(BrowserAction::Scroll { direction, amount })
+            }
+            "back" => Ok(BrowserAction::Back),
+            "forward" => Ok(BrowserAction::Forward),
+            "wait" => {
+                let ms = params["ms"].as_u64().unwrap_or(1000);
+                Ok(BrowserAction::Wait { ms })
+            }
+            "evaluate" => {
+                let script = params["script"].as_str()
+                    .ok_or("evaluate action requires 'script' parameter")?;
+                Ok(BrowserAction::Evaluate { script: script.to_string() })
+            }
+            other => Err(format!(
+                "Unknown action '{}'. Valid actions: navigate, click, fill, select, \
+                 scroll, back, forward, wait, evaluate",
+                other
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ScrollDirection {
     Up,
@@ -87,6 +152,20 @@ pub struct SessionResult {
     pub url: String,
     pub title: Option<String>,
     pub content: String,
+}
+
+impl SessionResult {
+    /// Format the result as a string for the LLM.
+    pub fn format(&self) -> String {
+        let title_info = self.title
+            .as_ref()
+            .map(|t| format!("[Title: {}]\n", t))
+            .unwrap_or_default();
+        format!(
+            "[Session: {}]\n[URL: {}]\n{}\n{}",
+            self.session_name, self.url, title_info, self.content
+        )
+    }
 }
 
 /// Session info for listing
@@ -331,6 +410,21 @@ impl BrowserSessionManager {
         })
     }
 
+    /// Perform an action on a session from raw action name + JSON params.
+    ///
+    /// This is the high-level API for effect handlers — parses the action
+    /// string, executes it, and returns a formatted result string.
+    pub async fn action_from_raw(
+        &self,
+        session_name: &str,
+        action: &str,
+        params: &serde_json::Value,
+    ) -> Result<String, String> {
+        let browser_action = BrowserAction::parse(action, params)?;
+        let result = self.action(session_name, browser_action).await?;
+        Ok(result.format())
+    }
+
     /// List all active sessions.
     pub async fn list(&self) -> Vec<SessionInfo> {
         let sessions = self.sessions.lock().await;
@@ -342,6 +436,21 @@ impl BrowserSessionManager {
                 idle_secs: session.last_accessed.elapsed().as_secs(),
             })
             .collect()
+    }
+
+    /// List all active sessions as a formatted string.
+    pub async fn format_list(&self) -> String {
+        let sessions = self.list().await;
+        if sessions.is_empty() {
+            "No active browser sessions".to_string()
+        } else {
+            sessions
+                .iter()
+                .enumerate()
+                .map(|(i, s)| format!("{}. {} [{}] idle {}s", i + 1, s.name, s.url, s.idle_secs))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
     }
 
     /// Close a specific session.

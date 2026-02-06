@@ -1474,133 +1474,27 @@ impl App {
                 }
             },
             Effect::BrowserOpen { url, session_name } => {
-                match self.browser_sessions.open(&url, session_name).await {
-                    Ok(result) => {
-                        let title_info = result.title
-                            .as_ref()
-                            .map(|t| format!("[Title: {}]\n", t))
-                            .unwrap_or_default();
-                        Ok(Some(format!(
-                            "[Session: {}]\n[URL: {}]\n{}\n{}",
-                            result.session_name, result.url, title_info, result.content
-                        )))
-                    }
-                    Err(e) => Ok(Some(format!("Error: {}", e))),
-                }
+                self.browser_sessions.open(&url, session_name).await
+                    .map(|r| Some(r.format()))
+                    .or_else(|e| Ok(Some(format!("Error: {}", e))))
             },
             Effect::BrowserAction { session_name, action, params } => {
-                use crate::tools::browser::session::{BrowserAction, ScrollDirection};
-
-                // Parse the action string + params into a BrowserAction enum
-                let browser_action = match action.as_str() {
-                    "navigate" => {
-                        let url = params["url"].as_str()
-                            .ok_or_else(|| anyhow::anyhow!("navigate action requires 'url' parameter"))?;
-                        BrowserAction::Navigate { url: url.to_string() }
-                    }
-                    "click" => {
-                        let selector = params["selector"].as_str()
-                            .ok_or_else(|| anyhow::anyhow!("click action requires 'selector' parameter"))?;
-                        BrowserAction::Click { selector: selector.to_string() }
-                    }
-                    "fill" => {
-                        let selector = params["selector"].as_str()
-                            .ok_or_else(|| anyhow::anyhow!("fill action requires 'selector' parameter"))?;
-                        let value = params["value"].as_str()
-                            .ok_or_else(|| anyhow::anyhow!("fill action requires 'value' parameter"))?;
-                        BrowserAction::Fill {
-                            selector: selector.to_string(),
-                            value: value.to_string(),
-                        }
-                    }
-                    "select" => {
-                        let selector = params["selector"].as_str()
-                            .ok_or_else(|| anyhow::anyhow!("select action requires 'selector' parameter"))?;
-                        let value = params["value"].as_str()
-                            .ok_or_else(|| anyhow::anyhow!("select action requires 'value' parameter"))?;
-                        BrowserAction::Select {
-                            selector: selector.to_string(),
-                            value: value.to_string(),
-                        }
-                    }
-                    "scroll" => {
-                        let direction = match params["direction"].as_str().unwrap_or("down") {
-                            "up" => ScrollDirection::Up,
-                            _ => ScrollDirection::Down,
-                        };
-                        let amount = params["amount"].as_u64().map(|v| v as u32);
-                        BrowserAction::Scroll { direction, amount }
-                    }
-                    "back" => BrowserAction::Back,
-                    "forward" => BrowserAction::Forward,
-                    "wait" => {
-                        let ms = params["ms"].as_u64().unwrap_or(1000);
-                        BrowserAction::Wait { ms }
-                    }
-                    "evaluate" => {
-                        let script = params["script"].as_str()
-                            .ok_or_else(|| anyhow::anyhow!("evaluate action requires 'script' parameter"))?;
-                        BrowserAction::Evaluate { script: script.to_string() }
-                    }
-                    other => {
-                        return Ok(Some(format!(
-                            "Unknown action '{}'. Valid actions: navigate, click, fill, select, \
-                             scroll, back, forward, wait, evaluate",
-                            other
-                        )));
-                    }
-                };
-
-                match self.browser_sessions.action(&session_name, browser_action).await {
-                    Ok(result) => {
-                        let title_info = result.title
-                            .as_ref()
-                            .map(|t| format!("[Title: {}]\n", t))
-                            .unwrap_or_default();
-                        Ok(Some(format!(
-                            "[Session: {}]\n[URL: {}]\n{}\n{}",
-                            result.session_name, result.url, title_info, result.content
-                        )))
-                    }
-                    Err(e) => Ok(Some(format!("Error: {}", e))),
-                }
+                self.browser_sessions.action_from_raw(&session_name, &action, &params).await
+                    .map(Some)
+                    .or_else(|e| Ok(Some(format!("Error: {}", e))))
             },
             Effect::BrowserSnapshot { session_name } => {
-                match self.browser_sessions.snapshot(&session_name).await {
-                    Ok(result) => {
-                        let title_info = result.title
-                            .as_ref()
-                            .map(|t| format!("[Title: {}]\n", t))
-                            .unwrap_or_default();
-                        Ok(Some(format!(
-                            "[Session: {}]\n[URL: {}]\n{}\n{}",
-                            result.session_name, result.url, title_info, result.content
-                        )))
-                    }
-                    Err(e) => Ok(Some(format!("Error: {}", e))),
-                }
+                self.browser_sessions.snapshot(&session_name).await
+                    .map(|r| Some(r.format()))
+                    .or_else(|e| Ok(Some(format!("Error: {}", e))))
             },
             Effect::BrowserListSessions => {
-                let sessions = self.browser_sessions.list().await;
-                if sessions.is_empty() {
-                    Ok(Some("No active browser sessions".to_string()))
-                } else {
-                    let output = sessions
-                        .iter()
-                        .enumerate()
-                        .map(|(i, s)| {
-                            format!("{}. {} [{}] idle {}s", i + 1, s.name, s.url, s.idle_secs)
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    Ok(Some(output))
-                }
+                Ok(Some(self.browser_sessions.format_list().await))
             },
             Effect::BrowserClose { session_name } => {
-                match self.browser_sessions.close(&session_name).await {
-                    Ok(()) => Ok(Some(format!("Session '{}' closed", session_name))),
-                    Err(e) => Ok(Some(format!("Error: {}", e))),
-                }
+                self.browser_sessions.close(&session_name).await
+                    .map(|()| Some(format!("Session '{}' closed", session_name)))
+                    .or_else(|e| Ok(Some(format!("Error: {}", e))))
             },
         }
     }
