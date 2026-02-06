@@ -139,8 +139,7 @@ Commands are re-executed on every LLM request, so the prompt always reflects the
 |-----|--------|
 | `Enter` | Send message |
 | `Shift+Enter` | New line in input |
-| `Ctrl+C` | Quit |
-| `Esc` | Clear input |
+| `Esc` / `Ctrl+C` | Cancel (layered, see below) |
 | `Up/Down` | Scroll chat (when input empty: history) |
 | `PageUp/PageDown` | Page scroll |
 
@@ -149,11 +148,22 @@ Commands are re-executed on every LLM request, so the prompt always reflects the
 | Key | Action |
 |-----|--------|
 | `y` | Allow |
-| `n` | Deny |
+| `n` / `Esc` | Deny |
+
+### Cancellation
+
+Esc and Ctrl+C use layered cancellation that stacks based on what's happening:
+
+1. **Pending approval** → denies the tool and lets the agent continue
+2. **Running foreground tool** → cancels the tool (kills the process), error is sent to the agent which continues its turn
+3. **Agent streaming** → ends the turn entirely
+4. **Idle** → clears the input
+
+Background tasks are never affected by cancel.
 
 ## Tools
 
-Codey provides eleven tools:
+Codey provides fourteen tools:
 
 | Tool | Description |
 |------|-------------|
@@ -166,8 +176,11 @@ Codey provides eleven tools:
 | `web_search` | Search the web and return results |
 | `open_file` | Open a file in the IDE at a specific line |
 | `spawn_agent` | Spawn a sub-agent for research/analysis tasks |
+| `list_agents` | List all sub-agents and their status |
+| `get_agent` | Retrieve the result of a finished sub-agent |
 | `list_background_tasks` | List all background tasks and their status |
 | `get_background_task` | Retrieve the result of a completed background task |
+| `record_correction` | Record a correction when a command fails, included in future prompts |
 
 ### Tool Filters
 
