@@ -271,13 +271,13 @@ impl ToolExecutor {
     }
 
     /// Cancel any active or pending tool execution
+    /// Hard cancel: abort all foreground tasks and clear the pending queue.
+    /// Used when ending the entire turn.
     pub fn cancel(&mut self) {
         self.cancelled = true;
         self.pending.clear();
         // Abort running foreground tasks. Background tasks are independent
         // and keep running across cancellations.
-        // Aborting the JoinHandle drops the spawned future, which triggers
-        // KillOnDrop for any shell processes, cleanly killing child processes.
         self.active.retain(|_, p| {
             if p.background {
                 return true;
@@ -287,6 +287,40 @@ impl ToolExecutor {
             }
             false
         });
+    }
+
+    /// Soft cancel: abort the currently running foreground task and return
+    /// error events for it. The pending queue and background tasks are untouched,
+    /// so the next tool can rise up.
+    pub fn cancel_foreground(&mut self) -> Vec<ToolEvent> {
+        let mut events = Vec::new();
+        let to_cancel: Vec<String> = self.active.iter()
+            .filter(|(_, p)| !p.background && p.status == Status::Running
+                && p.is_waiting_for_handler())
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for call_id in to_cancel {
+            if let Some(mut p) = self.active.remove(&call_id) {
+                if let WaitingFor::Handler(_, ref handle) = p.waiting {
+                    handle.abort();
+                }
+                p.waiting = WaitingFor::Nothing;
+                events.push(ToolEvent::Error {
+                    agent_id: p.agent_id,
+                    call_id: p.call_id.clone(),
+                    content: "Cancelled by user".to_string(),
+                });
+            }
+        }
+        events
+    }
+
+    /// Returns true if any foreground tool is currently running (handler spawned).
+    pub fn has_running_foreground(&self) -> bool {
+        self.active.values().any(|p|
+            !p.background && p.status == Status::Running && p.is_waiting_for_handler()
+        )
     }
 
     pub fn enqueue(&mut self, tool_calls: Vec<ToolCall>) {
