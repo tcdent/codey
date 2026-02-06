@@ -22,7 +22,7 @@ use crate::llm::{Agent, AgentId, AgentRegistry, AgentStatus, AgentStep, RequestM
 #[cfg(feature = "profiling")]
 use crate::{profile_frame, profile_span};
 use crate::notifications::{Notification, NotificationQueue};
-use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, WELCOME_MESSAGE};
+use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, welcome_message};
 use crate::tool_filter::ToolFilters;
 use crate::tools::{
     init_agent_context, init_browser_context, update_agent_oauth, EffectResult, ToolDecision,
@@ -276,10 +276,12 @@ impl App {
             None
         };
 
+        let agent_name = config.agent.name().to_string();
+
         Ok(Self {
             config,
             terminal,
-            chat: ChatView::new(transcript, terminal_size.0, chat_height),
+            chat: ChatView::new(transcript, terminal_size.0, chat_height, agent_name),
             input: InputBox::new(),
             should_quit: false,
             continue_session,
@@ -338,7 +340,8 @@ impl App {
         init_browser_context(&self.config.browser);
 
         // Use dynamic prompt builder so mdsh commands are re-executed on each LLM call
-        let system_prompt = SystemPrompt::new();
+        let system_prompt = SystemPrompt::with_config(&self.config);
+        let agent_name = system_prompt.agent_name().to_string();
         let mut agent = Agent::with_dynamic_prompt(
             AgentRuntimeConfig::foreground(&self.config),
             Box::new(move || system_prompt.build()),
@@ -350,7 +353,7 @@ impl App {
             agent.restore_from_transcript(&self.chat.transcript);
         } else {
             self.chat
-                .add_turn(Role::Assistant, TextBlock::pending(WELCOME_MESSAGE));
+                .add_turn(Role::Assistant, TextBlock::pending(&welcome_message(&agent_name)));
         }
         self.agents.register(agent);
 

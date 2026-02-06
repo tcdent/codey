@@ -92,6 +92,18 @@ theme = "base16-ocean.dark"
 
 Foreground and background agents are configured independently. Both default to `claude-opus-4-6` when not specified. See `config.example.toml` for all available options.
 
+## Agent Persona
+
+Customize the agent's name and personality:
+
+```toml
+[agent]
+name = "Jarvis"
+system_prompt = "You are Jarvis, a sophisticated AI assistant."
+```
+
+The `name` appears in the chat header and welcome message (default: "Codey"). The `system_prompt` replaces the default intro paragraph while keeping the built-in capabilities and guidelines.
+
 ## Custom System Prompts
 
 You can extend Codey's system prompt by creating `SYSTEM.md` files that are automatically appended to the base prompt. These files are loaded from two locations (in order):

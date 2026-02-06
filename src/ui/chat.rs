@@ -50,10 +50,12 @@ pub struct ChatView {
     frozen_turn_ids: HashSet<usize>,
     /// Mapping of turn ID to line count (for frozen turns)
     turn_line_counts: HashMap<usize, usize>,
+    /// Agent name for display (configurable)
+    agent_name: String,
 }
 
 impl ChatView {
-    pub fn new(transcript: Transcript, width: u16, max_lines: usize) -> Self {
+    pub fn new(transcript: Transcript, width: u16, max_lines: usize, agent_name: String) -> Self {
         Self {
             transcript,
             width,
@@ -62,6 +64,7 @@ impl ChatView {
             committed_count: 0,
             frozen_turn_ids: HashSet::new(),
             turn_line_counts: HashMap::new(),
+            agent_name,
         }
     }
 
@@ -140,7 +143,7 @@ impl ChatView {
             if self.frozen_turn_ids.contains(&turn.id) {
                 continue;
             }
-            let render = Self::render_turn_to_lines(turn, self.width);
+            let render = Self::render_turn_to_lines(turn, self.width, &self.agent_name);
             self.turn_line_counts.insert(turn.id, render.len());
             active_lines.extend(render);
         }
@@ -214,7 +217,7 @@ impl ChatView {
     }
 
     /// Render a turn to lines (header + content + separator)
-    fn render_turn_to_lines(turn: &Turn, width: u16) -> Vec<Line<'static>> {
+    fn render_turn_to_lines(turn: &Turn, width: u16, agent_name: &str) -> Vec<Line<'static>> {
         #[cfg(feature = "profiling")]
         let _span = profile_span!("ChatView::render_turn_to_lines");
 
@@ -223,19 +226,19 @@ impl ChatView {
         // Role header
         let (role_text, role_style) = match turn.role {
             Role::User => (
-                "You",
+                "You".to_string(),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             ),
             Role::Assistant => (
-                "Codey",
+                agent_name.to_string(),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
             Role::System => (
-                "System",
+                "System".to_string(),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
