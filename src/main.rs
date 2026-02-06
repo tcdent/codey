@@ -10,6 +10,7 @@ mod notifications;
 #[cfg(feature = "profiling")]
 mod profiler;
 mod prompts;
+mod shared_tasks;
 mod tool_filter;
 mod tools;
 mod transcript;

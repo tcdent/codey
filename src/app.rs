@@ -727,6 +727,10 @@ impl App {
                 Notification::BackgroundAgent { label, result, block_id } => {
                     background_agents.push((label, result, block_id));
                 }
+                Notification::SharedTaskListChanged { summary, block_id } => {
+                    // Treat like a background tool notification - combine into messages
+                    background_tools.push(("shared_task_list".to_string(), summary, block_id));
+                }
                 Notification::Compaction { block_id } => {
                     has_compaction = true;
                     // Promote compaction block from stage
@@ -914,7 +918,7 @@ impl App {
                 }
 
                 // Drain injectable notifications and append to content
-                let injectable = self.notifications.drain_injectable();
+                let injectable = self.notifications.drain_injectable(agent_id);
                 let content = if !injectable.is_empty() {
                     // Finish current assistant turn, add user turn, start new assistant turn
                     self.chat.transcript.finish_turn();
@@ -1469,6 +1473,46 @@ impl App {
                     },
                     None => Ok(Some(format!("Agent '{}' not found", label))),
                 }
+            },
+            Effect::SharedTaskListChanged { summary } => {
+                // Broadcast notification to all other active agents
+                let source_agent_id = _agent_id;
+
+                // Get all active agents (primary + running spawned agents)
+                let mut target_agents: Vec<AgentId> = Vec::new();
+                if let Some(primary_id) = self.agents.primary_id() {
+                    if primary_id != source_agent_id {
+                        target_agents.push(primary_id);
+                    }
+                }
+                for (id, meta) in self.agents.list_spawned() {
+                    if id != source_agent_id && meta.status == AgentStatus::Running {
+                        target_agents.push(id);
+                    }
+                }
+
+                // Queue a targeted notification for each agent
+                for target_id in target_agents {
+                    let block = NotificationBlock::new(
+                        "shared_task_list",
+                        "Shared task list updated".to_string(),
+                    );
+                    let block_id = self.chat.transcript.stage.push(Box::new(block));
+                    self.notifications.push_for_agent(
+                        Notification::SharedTaskListChanged {
+                            summary: summary.clone(),
+                            block_id,
+                        },
+                        target_id,
+                    );
+                }
+
+                tracing::info!(
+                    "Shared task list changed by agent {}, notifying other agents",
+                    source_agent_id
+                );
+
+                Ok(Some(summary))
             },
         }
     }

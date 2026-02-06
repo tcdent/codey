@@ -8,6 +8,7 @@ mod read_file;
 mod record_correction;
 mod shell;
 mod spawn_agent;
+mod tasks;
 mod web_search;
 mod write_file;
 
@@ -24,5 +25,6 @@ pub use read_file::ReadFileTool;
 pub use record_correction::RecordCorrectionTool;
 pub use shell::ShellTool;
 pub use spawn_agent::{init_agent_context, update_agent_oauth, SpawnAgentTool};
+pub use tasks::SharedTaskListTool;
 pub use web_search::WebSearchTool;
 pub use write_file::WriteFileTool;

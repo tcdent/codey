@@ -33,6 +33,7 @@ pub mod names {
     pub const LIST_AGENTS: &str = "mcp_list_agents";
     pub const GET_AGENT: &str = "mcp_get_agent";
     pub const RECORD_CORRECTION: &str = "mcp_record_correction";
+    pub const SHARED_TASK_LIST: &str = "mcp_shared_task_list";
 }
 
 use std::collections::HashMap;
@@ -44,7 +45,8 @@ pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
 pub use impls::{
     init_agent_context, update_agent_oauth, EditFileTool, FetchHtmlTool, FetchUrlTool,
     GetAgentTool, GetBackgroundTaskTool, ListAgentsTool, ListBackgroundTasksTool, OpenFileTool,
-    ReadFileTool, RecordCorrectionTool, ShellTool, SpawnAgentTool, WebSearchTool, WriteFileTool,
+    ReadFileTool, RecordCorrectionTool, SharedTaskListTool, ShellTool, SpawnAgentTool,
+    WebSearchTool, WriteFileTool,
 };
 #[cfg(feature = "cli")]
 pub use browser::init_browser_context;
@@ -155,6 +157,7 @@ impl ToolRegistry {
         registry.register(Arc::new(ListAgentsTool));
         registry.register(Arc::new(GetAgentTool));
         registry.register(Arc::new(RecordCorrectionTool));
+        registry.register(Arc::new(SharedTaskListTool));
 
         registry
     }
@@ -178,6 +181,7 @@ impl ToolRegistry {
         registry.register(Arc::new(FetchHtmlTool));
         registry.register(Arc::new(WebSearchTool));
         registry.register(Arc::new(OpenFileTool));
+        registry.register(Arc::new(SharedTaskListTool));
 
         registry
     }

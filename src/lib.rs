@@ -56,6 +56,8 @@ mod notifications;
 #[cfg(feature = "cli")]
 mod prompts;
 #[cfg(feature = "cli")]
+pub mod shared_tasks;
+#[cfg(feature = "cli")]
 mod tool_filter;
 
 // Re-export the public API
