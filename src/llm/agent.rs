@@ -196,6 +196,10 @@ pub struct Agent {
     /// When set, fast mode is cooling down until this instant.
     /// During cooldown, the fast mode beta header is omitted from requests.
     fast_mode_cooldown_until: Option<Instant>,
+
+    /// Retry attempt counter, persists across calls to exec_chat_with_retry.
+    /// Reset on successful request or new user message.
+    retry_attempt: u32,
 }
 
 impl Agent {
@@ -228,6 +232,7 @@ impl Agent {
             tool_responses: Vec::new(),
 
             fast_mode_cooldown_until: None,
+            retry_attempt: 0,
         }
     }
 
@@ -264,6 +269,7 @@ impl Agent {
             tool_responses: Vec::new(),
 
             fast_mode_cooldown_until: None,
+            retry_attempt: 0,
         }
     }
 
@@ -383,6 +389,7 @@ impl Agent {
     pub fn send_request(&mut self, user_input: &str, mode: RequestMode) {
         self.messages.push(ChatMessage::user(user_input));
         self.mode = mode;
+        self.retry_attempt = 0;
         self.state = Some(StreamState::NeedsChatRequest);
     }
 
@@ -604,50 +611,50 @@ impl Agent {
                 .with_reasoning_effort(ReasoningEffort::Budget(mode_opts.thinking_budget));
         }
 
-        let mut attempt = 0u32;
+        self.retry_attempt += 1;
+        match self
+            .client
+            .exec_chat_stream(&self.config.model, request.clone(), Some(&chat_options))
+            .await
+        {
+            Ok(resp) => {
+                info!("Chat request successful");
+                self.retry_attempt = 0;
+                Ok(resp)
+            },
+            Err(e) => {
+                let err = format!("{:#}", e);
+                error!("Chat request failed (attempt {}): {}", self.retry_attempt, err);
 
-        loop {
-            attempt += 1;
-            match self
-                .client
-                .exec_chat_stream(&self.config.model, request.clone(), Some(&chat_options))
-                .await
-            {
-                Ok(resp) => {
-                    info!("Chat request successful");
-                    return Ok(resp);
-                },
-                Err(e) => {
-                    let err = format!("{:#}", e);
-                    error!("Chat request failed: {}", err);
-
-                    // If fast mode is active and we hit a rate limit or overloaded
-                    // error, trigger cooldown and retry without the fast mode header.
-                    if fast_mode_active && self.is_rate_limit_error(&err) {
-                        warn!(
-                            "Fast mode rate limited, entering {}s cooldown",
-                            FAST_MODE_COOLDOWN.as_secs()
-                        );
-                        self.fast_mode_cooldown_until = Some(Instant::now() + FAST_MODE_COOLDOWN);
-                        return Err(AgentStep::Retrying {
-                            attempt,
-                            error: format!("Fast mode rate limited, falling back to standard speed"),
-                        });
-                    }
-
-                    if attempt >= self.config.max_retries {
-                        return Err(AgentStep::Error(format!(
-                            "API error ({}): {}",
-                            self.config.model, err
-                        )));
-                    }
-                    // Return retry step, caller should call next() again
+                // If fast mode is active and we hit a rate limit or overloaded
+                // error, trigger cooldown and retry without the fast mode header.
+                if fast_mode_active && self.is_rate_limit_error(&err) {
+                    warn!(
+                        "Fast mode rate limited, entering {}s cooldown",
+                        FAST_MODE_COOLDOWN.as_secs()
+                    );
+                    self.fast_mode_cooldown_until = Some(Instant::now() + FAST_MODE_COOLDOWN);
+                    // Don't count fast mode fallback as a retry attempt
+                    self.retry_attempt -= 1;
                     return Err(AgentStep::Retrying {
-                        attempt,
-                        error: err,
+                        attempt: self.retry_attempt,
+                        error: format!("Fast mode rate limited, falling back to standard speed"),
                     });
-                },
-            }
+                }
+
+                if self.retry_attempt >= self.config.max_retries {
+                    self.retry_attempt = 0;
+                    return Err(AgentStep::Error(format!(
+                        "API error ({}): {}",
+                        self.config.model, err
+                    )));
+                }
+                // Return retry step, caller should call next() again
+                Err(AgentStep::Retrying {
+                    attempt: self.retry_attempt,
+                    error: err,
+                })
+            },
         }
     }
 
@@ -897,6 +904,7 @@ impl Agent {
             );
 
             debug!("Agent: state -> NeedsChatRequest (ready for continuation)");
+            self.retry_attempt = 0;
             self.state = Some(StreamState::NeedsChatRequest);
         }
     }
