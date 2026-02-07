@@ -571,6 +571,7 @@ impl InputBox {
     pub fn widget<'a>(
         &'a self,
         model: &'a str,
+        model_icon: &'a str,
         context_tokens: u32,
         background_tasks: usize,
         agent_active: bool,
@@ -578,6 +579,7 @@ impl InputBox {
         InputBoxWidget {
             state: self,
             model,
+            model_icon,
             context_tokens,
             background_tasks,
             agent_active,
@@ -595,6 +597,7 @@ impl Default for InputBox {
 pub struct InputBoxWidget<'a> {
     state: &'a InputBox,
     model: &'a str,
+    model_icon: &'a str,
     /// Current context window size in tokens
     context_tokens: u32,
     /// Number of running background tasks
@@ -610,9 +613,9 @@ impl Widget for InputBoxWidget<'_> {
         
         // Build model title with background indicator
         let model_title = if self.background_tasks > 0 {
-            format!(" * {} ", self.model)
+            format!(" * {}{} ", self.model_icon, self.model)
         } else {
-            format!(" {} ", self.model)
+            format!(" {}{} ", self.model_icon, self.model)
         };
 
         let block = Block::default()

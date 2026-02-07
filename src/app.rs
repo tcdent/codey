@@ -470,8 +470,14 @@ impl App {
             .primary()
             .and_then(|m| m.try_lock().ok())
             .map_or(0, |a| a.total_usage().context_tokens);
+        let model_icon = self
+            .agents
+            .primary()
+            .and_then(|m| m.try_lock().ok())
+            .map_or("", |a| a.model_icon());
         let input_widget = self.input.widget(
             &self.config.agents.foreground.model,
+            model_icon,
             context_tokens,
             self.tool_executor.running_background_count() + self.agents.running_background_count(),
             self.input_mode != InputMode::Normal,
