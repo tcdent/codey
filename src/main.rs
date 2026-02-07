@@ -14,6 +14,7 @@ mod tool_filter;
 mod tools;
 mod transcript;
 mod ui;
+mod update;
 
 use std::path::PathBuf;
 

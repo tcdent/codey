@@ -57,6 +57,9 @@ mod notifications;
 mod prompts;
 #[cfg(feature = "cli")]
 mod tool_filter;
+#[cfg(feature = "cli")]
+#[allow(dead_code)]
+mod update;
 
 // Re-export the public API
 pub use config::AgentRuntimeConfig;

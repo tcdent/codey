@@ -4,6 +4,7 @@ use anyhow::Result;
 const ALL_COMMANDS: &[&dyn CommandImpl] = &[
     &Help,
     &Compact,
+    &Update,
 ];
 
 pub struct Command;
@@ -94,5 +95,29 @@ impl CommandImpl for Compact {
     fn execute(&self, app: &mut crate::app::App) -> Result<Option<String>> {
         app.queue_compaction();
         Ok(None)
+    }
+}
+
+
+pub struct Update;
+
+impl CommandImpl for Update {
+    fn name(&self) -> &'static str {
+        "update"
+    }
+
+    fn description(&self) -> &'static str {
+        "Update to the latest version and restart"
+    }
+
+    fn execute(&self, app: &mut crate::app::App) -> Result<Option<String>> {
+        match app.pending_update() {
+            Some(info) => {
+                let msg = format!("Updating v{} -> v{}...", info.current, info.latest);
+                app.queue_update()?;
+                Ok(Some(msg))
+            }
+            None => Ok(Some("Already up to date.".to_string())),
+        }
     }
 }

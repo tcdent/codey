@@ -15,8 +15,10 @@
 
 use std::collections::VecDeque;
 
+use crate::update::UpdateInfo;
+
 /// A notification queued for delivery to the agent.
-/// 
+///
 /// Notifications live in the staging area until consumed. When consumed,
 /// they become blocks in the transcript.
 #[derive(Debug, Clone)]
@@ -27,7 +29,7 @@ pub enum Notification {
         block_id: usize,
     },
 
-    /// Slash command to execute  
+    /// Slash command to execute
     Command {
         name: String,
         block_id: usize,
@@ -51,10 +53,13 @@ pub enum Notification {
     Compaction {
         block_id: usize,
     },
+
+    /// A newer version is available on GitHub
+    UpdateAvailable(UpdateInfo),
 }
 
 impl Notification {
-    /// Get the block_id for this notification.
+    /// Get the block_id for this notification, if it has one.
     pub fn block_id(&self) -> usize {
         match self {
             Notification::Message { block_id, .. } => *block_id,
@@ -62,22 +67,25 @@ impl Notification {
             Notification::BackgroundTool { block_id, .. } => *block_id,
             Notification::BackgroundAgent { block_id, .. } => *block_id,
             Notification::Compaction { block_id } => *block_id,
+            Notification::UpdateAvailable(_) => 0,
         }
     }
 
     /// Whether this notification can interrupt a streaming turn.
-    /// Commands and Compaction must wait for idle; background results can be injected.
+    /// Commands, Compaction, and UpdateAvailable must wait for idle.
     fn can_interrupt(&self) -> bool {
         match self {
-            Notification::Message { .. } 
-            | Notification::BackgroundTool { .. } 
+            Notification::Message { .. }
+            | Notification::BackgroundTool { .. }
             | Notification::BackgroundAgent { .. } => true,
-            Notification::Command { .. } | Notification::Compaction { .. } => false,
+            Notification::Command { .. }
+            | Notification::Compaction { .. }
+            | Notification::UpdateAvailable(_) => false,
         }
     }
 
     /// Format as XML for injection into tool results.
-    /// Returns None for notifications that shouldn't be injected (Commands, Compaction).
+    /// Returns None for notifications that shouldn't be injected.
     pub fn to_xml(&self) -> Option<String> {
         match self {
             Notification::Message { content, .. } => Some(format!(
@@ -92,7 +100,9 @@ impl Notification {
                 "<notification source=\"background_agent\" label=\"{}\">\n{}\n</notification>",
                 label, result
             )),
-            Notification::Command { .. } | Notification::Compaction { .. } => None,
+            Notification::Command { .. }
+            | Notification::Compaction { .. }
+            | Notification::UpdateAvailable(_) => None,
         }
     }
 }

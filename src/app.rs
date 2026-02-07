@@ -22,6 +22,7 @@ use crate::llm::{Agent, AgentId, AgentRegistry, AgentStatus, AgentStep, RequestM
 #[cfg(feature = "profiling")]
 use crate::{profile_frame, profile_span};
 use crate::notifications::{Notification, NotificationQueue};
+use crate::update::{self, UpdateInfo};
 use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, welcome_message};
 use crate::tool_filter::ToolFilters;
 use crate::tools::{
@@ -185,6 +186,12 @@ pub struct App {
     effects: EffectQueue,
     /// Notifications to inject into next tool result
     notifications: NotificationQueue,
+    /// Receiver for update availability checks
+    update_rx: tokio::sync::mpsc::Receiver<UpdateInfo>,
+    /// Pending update info (set when an update is available)
+    pending_update: Option<UpdateInfo>,
+    /// Flag set by /update command to trigger async update in the event loop
+    update_requested: bool,
 }
 
 impl App {
@@ -278,6 +285,9 @@ impl App {
 
         let agent_name = config.agent.name().to_string();
 
+        // Start background update checker
+        let update_rx = update::spawn_checker();
+
         Ok(Self {
             config,
             terminal,
@@ -296,6 +306,9 @@ impl App {
             oauth: None,
             effects: EffectQueue::new(),
             notifications: NotificationQueue::new(),
+            update_rx,
+            pending_update: None,
+            update_requested: false,
         })
     }
 
@@ -398,10 +411,24 @@ impl App {
                         self.draw();
                     }
                 }
+                // Handle update availability notification
+                Some(info) = self.update_rx.recv() => {
+                    self.pending_update = Some(info.clone());
+                    self.notifications.push(Notification::UpdateAvailable(info));
+                }
             }
 
             if self.should_quit {
                 break;
+            }
+
+            // Handle deferred update request from /update command
+            if self.update_requested {
+                self.update_requested = false;
+                if let Err(e) = self.perform_update().await {
+                    self.alert = Some(format!("Update failed: {}", e));
+                    self.draw();
+                }
             }
         }
 
@@ -540,6 +567,71 @@ impl App {
 
         self.chat.render(&mut self.terminal);
         self.draw();
+    }
+
+    /// Get the pending update info, if any.
+    pub fn pending_update(&self) -> Option<&UpdateInfo> {
+        self.pending_update.as_ref()
+    }
+
+    /// Request a self-update. Called by /update command.
+    /// The actual update runs asynchronously in the next event loop iteration.
+    pub fn queue_update(&mut self) -> Result<()> {
+        if self.pending_update.is_none() {
+            anyhow::bail!("No update available");
+        }
+        self.update_requested = true;
+        Ok(())
+    }
+
+    /// Perform self-update: download, replace binary, then restart with --continue.
+    pub async fn perform_update(&mut self) -> Result<()> {
+        let info = self
+            .pending_update
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No update available"))?;
+
+        let download_url = info
+            .download_url
+            .ok_or_else(|| anyhow::anyhow!("No binary available for this platform"))?;
+
+        self.alert = Some(format!("Downloading v{}...", info.latest));
+        self.draw();
+
+        // Save transcript so --continue can pick it up
+        if let Err(e) = self.chat.transcript.save() {
+            tracing::error!("Failed to save transcript before update: {}", e);
+        }
+
+        let exe_path = update::self_update(&download_url).await?;
+
+        self.alert = Some(format!("Updated to v{}! Restarting...", info.latest));
+        self.draw();
+
+        // Small delay so the user can see the message
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Restore terminal before exec
+        self.restore_terminal()?;
+
+        // Re-exec with --continue to resume the session.
+        // On Unix, exec() replaces the current process image.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            let err = std::process::Command::new(&exe_path)
+                .arg("--continue")
+                .exec();
+            // exec() only returns on error
+            anyhow::bail!("Failed to restart: {}", err);
+        }
+        #[cfg(not(unix))]
+        {
+            std::process::Command::new(&exe_path)
+                .arg("--continue")
+                .spawn()?;
+            std::process::exit(0);
+        }
     }
 
     /// Queue a compaction request
@@ -737,6 +829,17 @@ impl App {
                             turn.add_block(block);
                         }
                     }
+                }
+                Notification::UpdateAvailable(info) => {
+                    tracing::info!(
+                        "Update available: {} -> {} ({})",
+                        info.current, info.latest, info.release_url
+                    );
+                    self.alert = Some(format!(
+                        "Update available: v{} -> v{} (run /update to install)",
+                        info.current, info.latest
+                    ));
+                    self.draw();
                 }
             }
         }
