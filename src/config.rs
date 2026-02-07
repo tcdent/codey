@@ -49,6 +49,7 @@ pub const CORRECTIONS_FILENAME: &str = "corrections.json";
 ///     thinking_budget: 2_000,
 ///     max_retries: 5,
 ///     compaction_thinking_budget: 8_000,
+///     fast_mode: false,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -58,6 +59,9 @@ pub struct AgentRuntimeConfig {
     pub thinking_budget: u32,
     pub max_retries: u32,
     pub compaction_thinking_budget: u32,
+    /// Enable fast mode (research preview) for lower-latency responses.
+    /// Only effective with opus-4-6 models.
+    pub fast_mode: bool,
 }
 
 impl Default for AgentRuntimeConfig {
@@ -68,6 +72,7 @@ impl Default for AgentRuntimeConfig {
             thinking_budget: 2_000,
             max_retries: 5,
             compaction_thinking_budget: 8_000,
+            fast_mode: false,
         }
     }
 }
@@ -86,6 +91,7 @@ impl AgentRuntimeConfig {
             thinking_budget: config.agents.foreground.thinking_budget,
             max_retries: config.general.max_retries,
             compaction_thinking_budget: config.general.compaction_thinking_budget,
+            fast_mode: config.agents.foreground.fast_mode,
         }
     }
 
@@ -97,6 +103,7 @@ impl AgentRuntimeConfig {
             thinking_budget: config.agents.background.thinking_budget,
             max_retries: config.general.max_retries,
             compaction_thinking_budget: config.general.compaction_thinking_budget,
+            fast_mode: config.agents.background.fast_mode,
         }
     }
 }
@@ -191,6 +198,9 @@ pub struct AgentConfig {
     pub max_tokens: u32,
     /// Thinking budget in tokens
     pub thinking_budget: u32,
+    /// Enable fast mode (research preview) for lower-latency responses at higher cost.
+    /// Only works with opus-4-6 models. Adds the research-preview-2026-02-01 beta header.
+    pub fast_mode: bool,
 }
 
 #[cfg(feature = "cli")]
@@ -200,6 +210,7 @@ impl Default for AgentConfig {
             model: "claude-opus-4-6".to_string(),
             max_tokens: 8192,
             thinking_budget: 2_000,
+            fast_mode: false,
         }
     }
 }

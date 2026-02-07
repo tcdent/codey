@@ -1,6 +1,7 @@
 //! Agent loop for handling conversations with tool execution
 
-use tracing::{debug, error, info};
+use std::time::Instant;
+use tracing::{debug, error, info, warn};
 use anyhow::Result;
 use futures::StreamExt;
 use genai::chat::{
@@ -26,6 +27,12 @@ const ANTHROPIC_BETA_HEADER: &str = concat!(
     // "fine-grained-tool-streaming-2025-05-14",
 );
 const ANTHROPIC_USER_AGENT: &str = "claude-cli/2.1.2 (external, cli)";
+
+/// Beta header value that activates fast mode (research preview).
+const FAST_MODE_BETA: &str = "research-preview-2026-02-01";
+
+/// Duration to cool down fast mode after a rate limit, before re-enabling.
+const FAST_MODE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
 // Only expose internal ToolCall
 // Note: agent_id is set to 0 here - the caller (App) should set the correct ID
@@ -185,6 +192,10 @@ pub struct Agent {
     streaming_tool_calls: Vec<GenaiToolCall>,
     streaming_thinking: Vec<Thinking>,
     tool_responses: Vec<ToolResponse>,
+
+    /// When set, fast mode is cooling down until this instant.
+    /// During cooldown, the fast mode beta header is omitted from requests.
+    fast_mode_cooldown_until: Option<Instant>,
 }
 
 impl Agent {
@@ -215,6 +226,8 @@ impl Agent {
             streaming_tool_calls: Vec::new(),
             streaming_thinking: Vec::new(),
             tool_responses: Vec::new(),
+
+            fast_mode_cooldown_until: None,
         }
     }
 
@@ -249,6 +262,8 @@ impl Agent {
             streaming_tool_calls: Vec::new(),
             streaming_thinking: Vec::new(),
             tool_responses: Vec::new(),
+
+            fast_mode_cooldown_until: None,
         }
     }
 
@@ -484,8 +499,38 @@ impl Agent {
         }
     }
 
+    /// Returns true if fast mode should be active for this request.
+    ///
+    /// Fast mode requires: config flag enabled, model is opus-4-6, and not in cooldown.
+    fn is_fast_mode_active(&mut self) -> bool {
+        if !self.config.fast_mode {
+            return false;
+        }
+        if !self.config.model.to_lowercase().contains("opus-4-6") {
+            return false;
+        }
+        if let Some(until) = self.fast_mode_cooldown_until {
+            if Instant::now() < until {
+                return false;
+            }
+            // Cooldown expired, re-enable
+            info!("Fast mode cooldown expired, re-enabling");
+            self.fast_mode_cooldown_until = None;
+        }
+        true
+    }
+
+    /// Check if an error message indicates a rate limit (429) or overloaded (529) response.
+    fn is_rate_limit_error(&self, error: &str) -> bool {
+        let lower = error.to_lowercase();
+        lower.contains("429")
+            || lower.contains("rate limit")
+            || lower.contains("overloaded")
+            || lower.contains("529")
+    }
+
     /// Execute a chat request with retry and exponential backoff
-    /// 
+    ///
     /// Takes &mut self (even though it only reads) because for the future to be
     /// Send, we need &mut Agent (which requires Agent: Send) rather than &Agent
     /// (which requires Agent: Sync). Agent is Send but not Sync due to the
@@ -508,6 +553,12 @@ impl Agent {
             request = request.with_tools(self.get_tools());
         }
 
+        // Check fast mode status before building headers
+        let fast_mode_active = self.is_fast_mode_active();
+        if fast_mode_active {
+            info!("Fast mode active for this request");
+        }
+
         // Build headers based on provider and OAuth availability
         let headers = if is_openrouter_model(&self.config.model) {
             // OpenRouter uses standard Bearer auth (handled by client resolver)
@@ -517,22 +568,26 @@ impl Agent {
                 ("X-Title".to_string(), "Codey".to_string()),
             ])
         } else if let Some(ref oauth) = self.oauth {
+            let mut beta = ANTHROPIC_BETA_HEADER.to_string();
+            if fast_mode_active {
+                beta.push(',');
+                beta.push_str(FAST_MODE_BETA);
+            }
             Headers::from([
                 (
                     "authorization".to_string(),
                     format!("Bearer {}", oauth.access_token),
                 ),
-                (
-                    "anthropic-beta".to_string(),
-                    ANTHROPIC_BETA_HEADER.to_string(),
-                ),
+                ("anthropic-beta".to_string(), beta),
                 ("user-agent".to_string(), ANTHROPIC_USER_AGENT.to_string()),
             ])
         } else {
-            Headers::from([(
-                "anthropic-beta".to_string(),
-                "interleaved-thinking-2025-05-14".to_string(),
-            )])
+            let mut beta = "interleaved-thinking-2025-05-14".to_string();
+            if fast_mode_active {
+                beta.push(',');
+                beta.push_str(FAST_MODE_BETA);
+            }
+            Headers::from([("anthropic-beta".to_string(), beta)])
         };
 
         // Build chat options - reasoning_effort is only for Anthropic models
@@ -565,6 +620,21 @@ impl Agent {
                 Err(e) => {
                     let err = format!("{:#}", e);
                     error!("Chat request failed: {}", err);
+
+                    // If fast mode is active and we hit a rate limit or overloaded
+                    // error, trigger cooldown and retry without the fast mode header.
+                    if fast_mode_active && self.is_rate_limit_error(&err) {
+                        warn!(
+                            "Fast mode rate limited, entering {}s cooldown",
+                            FAST_MODE_COOLDOWN.as_secs()
+                        );
+                        self.fast_mode_cooldown_until = Some(Instant::now() + FAST_MODE_COOLDOWN);
+                        return Err(AgentStep::Retrying {
+                            attempt,
+                            error: format!("Fast mode rate limited, falling back to standard speed"),
+                        });
+                    }
+
                     if attempt >= self.config.max_retries {
                         return Err(AgentStep::Error(format!(
                             "API error ({}): {}",
