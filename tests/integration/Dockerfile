@@ -1,4 +1,5 @@
 # Build stage: compile codey from source
+# Use rust:latest which is currently based on Debian trixie/sid.
 FROM rust:latest AS builder
 
 WORKDIR /build
@@ -10,8 +11,9 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev
 # of ratatui) since it's a rendering optimization we don't need in tests.
 RUN SIMD=0 make release
 
-# Runtime stage: minimal image with test tooling
-FROM debian:bookworm-slim
+# Runtime stage: use the SAME debian base as the builder (rust:latest
+# is based on trixie/sid) to avoid glibc version mismatch.
+FROM debian:trixie-slim
 
 # System dependencies for codey + test harness
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -66,12 +66,16 @@ class CodeySession:
         # Give codey a moment to initialize the TUI.
         time.sleep(3)
 
-        # Verify codey is actually running.
-        pane = self.capture()
-        if "Pane is dead" in pane or not pane.strip():
-            # Capture whatever output remains for diagnostics.
+        # Verify codey is actually running by checking the pane process.
+        result = subprocess.run(
+            ["tmux", "list-panes", "-t", self.session, "-F", "#{pane_pid} #{pane_dead}"],
+            capture_output=True, text=True,
+        )
+        pane_info = result.stdout.strip()
+        if "1" in pane_info.split()[-1:]:
+            pane = self.capture()
             raise RuntimeError(
-                f"codey failed to start. Pane content:\n{pane}"
+                f"codey process died. Pane content:\n{pane}"
             )
 
     def stop(self):
