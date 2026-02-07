@@ -506,10 +506,10 @@ impl Agent {
         }
     }
 
-    /// Returns true if fast mode should be active for this request.
+    /// Returns true if fast mode is currently active.
     ///
     /// Fast mode requires: config flag enabled, model is opus-4-6, and not in cooldown.
-    fn is_fast_mode_active(&mut self) -> bool {
+    pub fn is_fast_mode(&self) -> bool {
         if !self.config.fast_mode {
             return false;
         }
@@ -520,11 +520,17 @@ impl Agent {
             if Instant::now() < until {
                 return false;
             }
-            // Cooldown expired, re-enable
-            info!("Fast mode cooldown expired, re-enabling");
-            self.fast_mode_cooldown_until = None;
         }
         true
+    }
+
+    /// Icon to prepend to the model name in the UI.
+    pub fn model_icon(&self) -> &'static str {
+        if self.is_fast_mode() {
+            "ϟ"
+        } else {
+            ""
+        }
     }
 
     /// Check if an error message indicates a rate limit (429) or overloaded (529) response.
@@ -561,7 +567,7 @@ impl Agent {
         }
 
         // Check fast mode status before building headers
-        let fast_mode_active = self.is_fast_mode_active();
+        let fast_mode_active = self.is_fast_mode();
         if fast_mode_active {
             info!("Fast mode active for this request");
         }
