@@ -24,17 +24,25 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 /// How long to wait for page load before timing out
 const PAGE_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long to wait after network activity stops to consider page "settled"
-const NETWORK_SETTLE_MS: u64 = 1000;
+/// How long to wait after network activity stops to consider page "settled".
+/// Falls back to this default if not configured via `page_load_wait_ms`.
+const DEFAULT_SETTLE_MS: u64 = 1000;
+
+/// Get the configured settle time in milliseconds.
+fn settle_ms() -> u64 {
+    browser_context()
+        .map(|ctx| ctx.page_load_wait_ms)
+        .unwrap_or(DEFAULT_SETTLE_MS)
+}
 
 /// A single browser session with its browser and page handles
 struct BrowserSession {
     browser: Browser,
     page: Page,
     /// Background task running the chromiumoxide event handler
-    _handler_task: JoinHandle<()>,
-    /// Temp directory for profile copy (cleaned up on drop)
-    _temp_dir: Option<std::path::PathBuf>,
+    handler_task: JoinHandle<()>,
+    /// Temp directory for profile copy (cleaned up on close)
+    temp_dir: Option<std::path::PathBuf>,
     /// Current URL
     url: String,
     /// Last time this session was accessed
@@ -231,8 +239,8 @@ impl BrowserSessionManager {
         let session = BrowserSession {
             browser,
             page,
-            _handler_task: handler_task,
-            _temp_dir: temp_dir,
+            handler_task,
+            temp_dir,
             url: url.to_string(),
             last_accessed: Instant::now(),
         };
@@ -276,7 +284,7 @@ impl BrowserSessionManager {
                     .click()
                     .await
                     .map_err(|e| format!("Click failed on '{}': {}", selector, e))?;
-                wait_for_settle(&session.page).await;
+                wait_for_settle(&session.page, settle_ms()).await;
             }
             BrowserAction::Fill { selector, value } => {
                 session
@@ -295,7 +303,7 @@ impl BrowserSessionManager {
                     .type_str(&value)
                     .await
                     .map_err(|e| format!("Fill failed on '{}': {}", selector, e))?;
-                wait_for_settle(&session.page).await;
+                wait_for_settle(&session.page, settle_ms()).await;
             }
             BrowserAction::Select { selector, value } => {
                 // Use JavaScript to set select value
@@ -311,7 +319,7 @@ impl BrowserSessionManager {
                     .evaluate(script)
                     .await
                     .map_err(|e| format!("Select failed on '{}': {}", selector, e))?;
-                wait_for_settle(&session.page).await;
+                wait_for_settle(&session.page, settle_ms()).await;
             }
             BrowserAction::Scroll { direction, amount } => {
                 let pixels = amount.unwrap_or(500) as i32;
@@ -335,7 +343,7 @@ impl BrowserSessionManager {
                     .evaluate(script)
                     .await
                     .map_err(|e| format!("Back navigation failed: {}", e))?;
-                wait_for_settle(&session.page).await;
+                wait_for_settle(&session.page, settle_ms()).await;
             }
             BrowserAction::Forward => {
                 let script = "window.history.forward()";
@@ -344,7 +352,7 @@ impl BrowserSessionManager {
                     .evaluate(script)
                     .await
                     .map_err(|e| format!("Forward navigation failed: {}", e))?;
-                wait_for_settle(&session.page).await;
+                wait_for_settle(&session.page, settle_ms()).await;
             }
             BrowserAction::Wait { ms } => {
                 let capped = ms.min(30000); // Cap at 30s
@@ -458,8 +466,8 @@ impl BrowserSessionManager {
         let mut sessions = self.sessions.lock().await;
         if let Some(mut session) = sessions.remove(session_name) {
             let _ = session.browser.close().await;
-            session._handler_task.abort();
-            if let Some(ref temp) = session._temp_dir {
+            session.handler_task.abort();
+            if let Some(ref temp) = session.temp_dir {
                 let _ = std::fs::remove_dir_all(temp);
             }
             Ok(())
@@ -473,8 +481,8 @@ impl BrowserSessionManager {
         let mut sessions = self.sessions.lock().await;
         for (_, mut session) in sessions.drain() {
             let _ = session.browser.close().await;
-            session._handler_task.abort();
-            if let Some(ref temp) = session._temp_dir {
+            session.handler_task.abort();
+            if let Some(ref temp) = session.temp_dir {
                 let _ = std::fs::remove_dir_all(temp);
             }
         }
@@ -492,8 +500,8 @@ impl BrowserSessionManager {
         for name in expired {
             if let Some(mut session) = sessions.remove(&name) {
                 let _ = session.browser.close().await;
-                session._handler_task.abort();
-                if let Some(ref temp) = session._temp_dir {
+                session.handler_task.abort();
+                if let Some(ref temp) = session.temp_dir {
                     let _ = std::fs::remove_dir_all(temp);
                 }
                 tracing::info!("Closed expired browser session '{}'", name);
@@ -532,9 +540,12 @@ pub(crate) async fn launch_browser(
     {
         let source_profile = std::path::Path::new(data_dir).join(prof);
         if source_profile.exists() {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static SESSION_COUNTER: AtomicU32 = AtomicU32::new(0);
             let temp_base = std::env::temp_dir().join(format!(
-                "codey-browser-session-{}",
-                std::process::id()
+                "codey-browser-{}-{}",
+                std::process::id(),
+                SESSION_COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
             if temp_base.exists() {
                 let _ = std::fs::remove_dir_all(&temp_base);
@@ -647,7 +658,7 @@ pub(crate) async fn launch_browser(
     .map_err(|_| "Page load timed out".to_string())??;
 
     // Wait for page to settle
-    wait_for_settle(&page).await;
+    wait_for_settle(&page, settle_ms()).await;
 
     Ok((browser, page, handler_task, temp_dir))
 }
@@ -658,7 +669,7 @@ async fn navigate_and_wait(page: &Page, url: &str) -> Result<(), String> {
         page.execute(NavigateParams::new(url))
             .await
             .map_err(|e| format!("Navigation failed: {}", e))?;
-        wait_for_settle(page).await;
+        wait_for_settle(page, settle_ms()).await;
         Ok::<(), String>(())
     })
     .await
@@ -670,7 +681,7 @@ async fn navigate_and_wait(page: &Page, url: &str) -> Result<(), String> {
 /// Uses a simple heuristic: wait for network activity to quiet down.
 /// We poll the document readyState and wait for a short debounce period
 /// with no changes.
-async fn wait_for_settle(page: &Page) {
+async fn wait_for_settle(page: &Page, settle_ms: u64) {
     // Wait for document.readyState to be at least "interactive"
     for _ in 0..30 {
         let ready = page
@@ -693,7 +704,7 @@ async fn wait_for_settle(page: &Page) {
     }
 
     // Additional settle time for SPA content loading
-    tokio::time::sleep(Duration::from_millis(NETWORK_SETTLE_MS)).await;
+    tokio::time::sleep(Duration::from_millis(settle_ms)).await;
 }
 
 /// Get the current URL from the page.

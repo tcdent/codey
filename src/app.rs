@@ -408,6 +408,9 @@ impl App {
             }
         }
 
+        // Clean up browser sessions before exit
+        self.browser_sessions.close_all().await;
+
         self.restore_terminal()
     }
 
