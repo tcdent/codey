@@ -189,6 +189,123 @@ the Agent type. Options:
 
 ---
 
+## Testing Benefits
+
+### Current state
+
+141 tests, all inline `#[cfg(test)]` modules — no integration test directory.
+19 tests are behind `#[cfg(all(test, feature = "cli"))]` and won't run in
+library-only builds. Tests that touch the filesystem, network, shell, and
+neovim RPC all live in the same compilation unit.
+
+| Category | Tests | External deps |
+|---|---|---|
+| Pure unit (queues, parsing, filters) | 63 | None |
+| Filesystem (tempfile) | 19 | Temp files |
+| Shell execution | 22 | `echo`, `ls` |
+| Network (HTTP/browser) | 4 | Real URLs + chromiumoxide |
+| Neovim RPC | 3 | Running nvim (`#[ignore]`) |
+| UI snapshots (insta) | 8 | None (TestBackend) |
+| UI widget logic | 22 | None |
+
+### What the workspace unlocks
+
+**1. Feature-gated tests disappear**
+
+The 19 tests behind `#[cfg(all(test, feature = "cli"))]` become normal tests in
+their respective crates. No more worrying about whether `cargo test` ran
+everything or only the non-gated subset.
+
+**2. Per-crate `cargo test -p` for fast iteration**
+
+`cargo test -p codey-core` skips compiling ratatui, chromiumoxide, crossterm,
+and nvim-rs entirely. On a project where the full build pulls in ~180 crates,
+this is a meaningful compile-time win during development.
+
+**3. Integration tests at crate boundaries**
+
+Each crate gets its own `tests/` directory for testing the public API contract.
+This catches breaking interface changes early — especially important since
+codey-core is the foundation everything else builds on.
+
+Proposed per-crate integration tests:
+
+```
+crates/codey-core/tests/
+├── agent_lifecycle.rs      # Create agent, send request, iterate steps
+│                           #   (mock LLM or record/replay)
+├── transcript_persistence.rs  # Save → load → roundtrip with real JSON files
+├── tool_executor.rs        # Build pipelines with mock tools, verify step
+│                           #   sequencing, foreground/background ordering
+└── tool_registry.rs        # Register, get, iterate, verify schema output
+
+crates/codey-tools/tests/
+├── file_tools.rs           # ReadFile/WriteFile/EditFile end-to-end with
+│                           #   tempfiles — compose pipeline → execute →
+│                           #   verify filesystem state
+├── shell_tool.rs           # ShellTool pipeline with real commands
+├── tool_filters.rs         # ToolFilterConfig against real tool params
+└── registries.rs           # Verify new()/subagent()/read_only() contain
+│                           #   expected tools, no duplicates, valid schemas
+
+crates/codey-ide/tests/
+└── nvim_integration.rs     # Connect → preview → diff → close lifecycle
+                            #   (#[ignore] without CODEY_TEST_NVIM=1)
+
+crates/codey-tui/tests/
+├── chat_rendering.rs       # Render full conversation turns with real
+│                           #   transcript data, snapshot the output
+├── block_rendering.rs      # Each block type renders correctly at various
+│                           #   widths (narrow terminal, wide terminal)
+└── input_sequences.rs      # Multi-step input interactions: type, navigate,
+                            #   paste, undo — verify final buffer state
+
+crates/codey-cli/tests/
+├── config_loading.rs       # Load from tempfile TOML, verify all sections
+│                           #   parse, defaults fill in, CLI overrides apply
+├── effect_queue.rs         # EffectQueue approval/resource exclusivity
+│                           #   (currently unit tests, better as integration
+│                           #   tests against PendingEffect public API)
+└── commands.rs             # Slash command parsing and dispatch
+```
+
+**4. External dependency isolation in CI**
+
+Tests that hit the network or need external services are confined to specific
+crates. CI can run the matrix:
+
+```yaml
+# Fast lane — runs on every push (~15s)
+- cargo test -p codey-core
+- cargo test -p codey-tui
+
+# Standard lane — runs on every push (~30s)
+- cargo test -p codey-tools    # filesystem + shell
+- cargo test -p codey-cli
+
+# Integration lane — runs on PR only
+- cargo test -p codey-tools -- fetch   # network tests
+- cargo test -p codey-ide -- --ignored # needs nvim
+```
+
+The fast lane never touches the filesystem, network, or shell. A flaky
+`fetch_url` test can't block an unrelated transcript bugfix.
+
+**5. Snapshot tests stay focused**
+
+The 8 insta snapshots + 44 input widget tests move to codey-tui. They only
+recompile when TUI code changes. `cargo insta review` scopes naturally to the
+crate you're working in.
+
+**6. Doc tests on the library facade**
+
+The `codey` facade crate can have doc tests that verify the public API works
+end-to-end from a library consumer's perspective — the same example from the
+current lib.rs doc comment, but now it compiles against the real published
+interface rather than testing internals.
+
+---
+
 ## What This Eliminates
 
 - **All 88 `cli` feature gates** — replaced by crate boundaries
@@ -196,3 +313,5 @@ the Agent type. Options:
 - **14 `profiling` gates** collapse to a single optional feature on codey-cli
 - **Heavy deps isolated** — library users never pull in chromiumoxide, ratatui,
   crossterm, or nvim-rs
+- **19 feature-gated tests** — become normal tests in their own crates
+- **Flaky test coupling** — network/browser tests can't block core logic tests
