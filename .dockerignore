@@ -1,0 +1,6 @@
+target/
+lib/ratatui-core/
+.cargo/
+.git/
+.codey/
+*.tar.gz
