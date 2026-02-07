@@ -1,14 +1,14 @@
 # Build stage: compile codey from source
-FROM rust:1.85-bookworm AS builder
+FROM rust:latest AS builder
 
 WORKDIR /build
 COPY . .
 
-# Build with CLI features. SIMD=0 skips the ratatui-core patching step
-# (needs `patch` + git clone of ratatui) since it's a rendering optimization
-# we don't need in the test environment.
-RUN apt-get update && apt-get install -y pkg-config libssl-dev \
-    && SIMD=0 make release
+RUN apt-get update && apt-get install -y pkg-config libssl-dev
+
+# SIMD=0 skips the ratatui-core patching step (needs `patch` + git clone
+# of ratatui) since it's a rendering optimization we don't need in tests.
+RUN SIMD=0 make release
 
 # Runtime stage: minimal image with test tooling
 FROM debian:bookworm-slim
