@@ -26,7 +26,7 @@ const ANTHROPIC_BETA_HEADER: &str = concat!(
     // Removed: causes OAuth rejection before tool calls are processed
     // "fine-grained-tool-streaming-2025-05-14",
 );
-const ANTHROPIC_USER_AGENT: &str = "claude-cli/2.1.2 (external, cli)";
+const ANTHROPIC_USER_AGENT: &str = "claude-code/2.1.37 (external, cli)";
 
 /// Beta header value that activates fast mode (research preview).
 const FAST_MODE_BETA: &str = "research-preview-2026-02-01";
