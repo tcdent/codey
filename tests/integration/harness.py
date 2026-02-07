@@ -38,21 +38,41 @@ class CodeySession:
             ["tmux", "kill-session", "-t", self.session],
             capture_output=True,
         )
-        # Start tmux with codey. Size the terminal explicitly so captures
-        # are deterministic across environments.
+        # Start tmux with remain-on-exit so we can read crash output.
+        # Size the terminal explicitly so captures are deterministic.
         subprocess.run(
             [
                 "tmux", "new-session",
                 "-d",                       # detached
                 "-s", self.session,
                 "-x", "120", "-y", "40",    # fixed size
-                f"{CODEY_BIN} --working-dir {self.working_dir}",
+            ],
+            check=True,
+        )
+        # Set remain-on-exit so pane survives if codey crashes.
+        subprocess.run(
+            ["tmux", "set-option", "-t", self.session, "remain-on-exit", "on"],
+            check=True,
+        )
+        # Launch codey inside the session.
+        subprocess.run(
+            [
+                "tmux", "send-keys", "-t", self.session,
+                f"{CODEY_BIN} --working-dir {self.working_dir}", "Enter",
             ],
             check=True,
         )
         self._started = True
         # Give codey a moment to initialize the TUI.
-        time.sleep(2)
+        time.sleep(3)
+
+        # Verify codey is actually running.
+        pane = self.capture()
+        if "Pane is dead" in pane or not pane.strip():
+            # Capture whatever output remains for diagnostics.
+            raise RuntimeError(
+                f"codey failed to start. Pane content:\n{pane}"
+            )
 
     def stop(self):
         """Kill the tmux session."""
