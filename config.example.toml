@@ -10,6 +10,11 @@
 model = "claude-opus-4-6"
 # Maximum tokens for responses
 max_tokens = 8192
+# Enable fast mode (research preview) for lower-latency Opus 4.6 responses.
+# Uses the same model with a different API configuration that prioritizes speed.
+# Higher cost per token ($30/$150 per MTok vs $5/$25 standard).
+# Only works with opus-4-6 models. Falls back to standard on rate limit with a 20min cooldown.
+# fast_mode = true
 
 # =============================================================================
 # Agent Persona
