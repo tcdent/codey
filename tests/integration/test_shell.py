@@ -21,25 +21,26 @@ def test_shell_command_execution(codey, evaluator):
     pane = codey.wait_for_approval(timeout=30)
 
     # Step 3: Verify the approval shows the command.
+    # Approval renders as: ? shell\n  {"command": "echo ..."}\n  [y]es  [n]o
     evaluator.assert_pass(
         pane,
-        "Is there an approval prompt for a shell command? "
-        "It should show the command 'echo' with 'hello from codey test' "
-        "or similar, waiting for user confirmation.",
+        "Is there a tool approval prompt with '?' icon for shell? "
+        "The parameters should show a command containing 'echo' and "
+        "'hello from codey test'. There should be a '[y]es  [n]o' prompt.",
     )
 
     # Step 4: Approve.
     codey.approve()
 
-    # Step 5: Wait for the output to appear.
+    # Step 5: Wait for completion with the output text.
     pane = codey.wait_for_text("hello from codey test", timeout=30)
 
-    # Step 6: Verify the command output is displayed.
+    # Step 6: Verify the tool completed with output.
     evaluator.assert_pass(
         pane,
-        "Did the shell command execute and display its output? "
-        "The text 'hello from codey test' should appear in the terminal "
-        "as the command's output.",
+        "Did the shell tool complete (✓ icon) and display its output? "
+        "The text 'hello from codey test' should appear as the command output "
+        "below the tool block header.",
     )
 
 

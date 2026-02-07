@@ -19,21 +19,22 @@ def test_write_new_file(codey, evaluator):
     # Wait for approval.
     pane = codey.wait_for_approval(timeout=30)
 
+    # Approval renders as: ? write_file\n  {"path": "hello.txt", ...}\n  [y]es  [n]o
     evaluator.assert_pass(
         pane,
-        "Is there an approval prompt for creating/writing a file? "
-        "It should reference 'hello.txt' and show the content 'Hello, World!' "
-        "that will be written.",
+        "Is there a tool approval prompt with '?' icon for write_file? "
+        "The parameters should show 'hello.txt' as the path and "
+        "'Hello, World!' as the content. There should be a '[y]es  [n]o' prompt.",
     )
 
     # Approve.
     codey.approve()
 
-    # Wait for completion.
-    pane = codey.wait_for_idle(timeout=30)
+    # Wait for completion (✓ icon).
+    pane = codey.wait_for_completion(timeout=30)
 
     evaluator.assert_pass(
         pane,
-        "Did the write_file tool complete successfully? There should be "
-        "confirmation that hello.txt was created.",
+        "Did the write_file tool complete? There should be a '✓' icon "
+        "next to write_file indicating the file was created successfully.",
     )

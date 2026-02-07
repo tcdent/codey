@@ -22,25 +22,26 @@ def test_read_file_approval_and_output(codey, evaluator):
     pane = codey.wait_for_approval(timeout=30)
 
     # Step 3: LLM evaluates: does the approval look right?
+    # Approval renders as: ? read_file\n  {"path": "README.md"}\n  [y]es  [n]o
     evaluator.assert_pass(
         pane,
-        "Is there a tool approval prompt visible for reading a file "
-        "(something like read_file or mcp_read_file with README.md as a parameter)? "
-        "The approval should show the tool name and the file path.",
+        "Is there a tool approval prompt visible? It should show a '?' status icon "
+        "followed by 'read_file', with 'README.md' in the parameters below, "
+        "and a '[y]es  [n]o' prompt at the bottom of the tool block.",
     )
 
     # Step 4: Approve the tool call.
     codey.approve()
 
-    # Step 5: Wait for the tool output and response to complete.
-    pane = codey.wait_for_text("Test Workspace", timeout=30)
+    # Step 5: Wait for the tool to complete (✓ icon appears).
+    pane = codey.wait_for_completion(timeout=30)
 
     # Step 6: Verify the file contents appeared.
     evaluator.assert_pass(
         pane,
-        "Did the tool successfully read a file and display its contents? "
-        "The output should contain '# Test Workspace' or similar content "
-        "from a README.md file.",
+        "Did the read_file tool complete? There should be a '✓' icon next to "
+        "read_file, and the output should show the contents of README.md "
+        "(which contains '# Test Workspace').",
     )
 
 
@@ -54,12 +55,12 @@ def test_read_file_deny(codey, evaluator):
     # Deny the tool call.
     codey.deny()
 
-    # Should return to idle state without executing.
-    pane = codey.wait_for_idle(timeout=15)
+    # Should show the denial indicator (⊘ icon + "Denied by user").
+    pane = codey.wait_for_denial(timeout=15)
 
     evaluator.assert_pass(
         pane,
-        "Was the tool call denied/cancelled? There should be an indication "
-        "that the tool was not executed (e.g., 'denied', 'cancelled', or "
-        "the assistant acknowledging the denial) and no file contents shown.",
+        "Was the tool call denied? There should be a '⊘' icon next to "
+        "read_file and the text 'Denied by user' below it. "
+        "No file contents should be shown.",
     )

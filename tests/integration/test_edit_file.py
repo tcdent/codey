@@ -22,23 +22,24 @@ def test_edit_file_applies_change(codey, evaluator):
     pane = codey.wait_for_approval(timeout=30)
 
     # Step 3: Verify the approval shows the edit details.
+    # Approval renders as: ? edit_file\n  {params with old_string/new_string}\n  [y]es  [n]o
     evaluator.assert_pass(
         pane,
-        "Is there an approval prompt for an edit_file tool call? "
-        "It should show something about editing README.md, with the "
-        "old text ('Test Workspace') being replaced by new text ('My Project').",
+        "Is there a tool approval prompt with '?' icon for edit_file? "
+        "The parameters should show README.md as the path and contain "
+        "the old text ('Test Workspace') and new text ('My Project'). "
+        "There should be a '[y]es  [n]o' prompt.",
     )
 
     # Step 4: Approve.
     codey.approve()
 
-    # Step 5: Wait for completion.
-    pane = codey.wait_for_idle(timeout=30)
+    # Step 5: Wait for completion (✓ icon).
+    pane = codey.wait_for_completion(timeout=30)
 
     # Step 6: Verify codey reports success.
     evaluator.assert_pass(
         pane,
-        "Did the edit_file tool complete successfully? There should be "
-        "some indication that the file was edited (success message, "
-        "or the assistant confirming the change was made).",
+        "Did the edit_file tool complete? There should be a '✓' icon "
+        "next to edit_file indicating success.",
     )

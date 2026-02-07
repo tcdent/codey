@@ -133,31 +133,55 @@ class CodeySession:
         return self.wait_for(lambda p: text in p, **kwargs)
 
     def wait_for_approval(self, **kwargs) -> str:
-        """Wait until an approval prompt appears."""
-        # The approval mode shows y/n keybindings in the UI.
+        """Wait until an approval prompt appears.
+
+        The approval UI renders as:
+            ? tool_name
+              {params...}
+              [y]es  [n]o
+        The '?' prefix is the Pending status icon (yellow in the real TUI,
+        but plain text in tmux capture). The key indicator is '[y]es  [n]o'.
+        """
         return self.wait_for(
-            lambda p: "y" in p.lower() and ("approve" in p.lower() or "allow" in p.lower() or "(y/n)" in p.lower()),
+            lambda p: "[y]es" in p or "[n]o" in p,
+            **kwargs,
+        )
+
+    def wait_for_completion(self, **kwargs) -> str:
+        """Wait until a tool completes (checkmark status icon appears).
+
+        Completed tools render as:
+            ✓ tool_name
+              output...
+        """
+        return self.wait_for(
+            lambda p: "✓" in p,
+            **kwargs,
+        )
+
+    def wait_for_denial(self, **kwargs) -> str:
+        """Wait until a tool denial appears.
+
+        Denied tools render as:
+            ⊘ tool_name
+              Denied by user
+        """
+        return self.wait_for(
+            lambda p: "⊘" in p or "Denied by user" in p,
             **kwargs,
         )
 
     def wait_for_idle(self, **kwargs) -> str:
+        """Wait until codey returns to the normal input mode.
+
+        Idle = no approval prompt visible and no running tool (⚙).
+        We check that there's no '[y]es' prompt and no spinner,
+        then confirm with a second capture after a short delay.
         """
-        Wait until codey returns to the normal input mode (no streaming,
-        no approval pending). Heuristic: the input prompt is visible and
-        there's no spinner/streaming indicator.
-        """
-        # Poll twice with a gap to confirm it's actually idle, not just
-        # between render frames.
         def is_idle(pane):
-            # If we see the input area and no approval prompt, we're likely idle.
-            # This heuristic will need tuning as the UI evolves.
-            lines = pane.strip().split("\n")
-            if not lines:
-                return False
-            # Check that we're not in streaming mode (no partial blocks)
-            # and not in approval mode.
-            has_approval = any("(y/n)" in line.lower() or "approve" in line.lower() for line in lines[-5:])
-            return not has_approval
+            has_approval = "[y]es" in pane
+            has_running = "⚙" in pane
+            return not has_approval and not has_running
 
         return self.wait_for(is_idle, **kwargs)
 
