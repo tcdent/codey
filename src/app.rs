@@ -185,6 +185,8 @@ pub struct App {
     effects: EffectQueue,
     /// Notifications to inject into next tool result
     notifications: NotificationQueue,
+    /// Browser session manager for persistent browser sessions
+    browser_sessions: crate::tools::browser::session::BrowserSessionManager,
 }
 
 impl App {
@@ -296,6 +298,7 @@ impl App {
             oauth: None,
             effects: EffectQueue::new(),
             notifications: NotificationQueue::new(),
+            browser_sessions: crate::tools::browser::session::BrowserSessionManager::new(),
         })
     }
 
@@ -404,6 +407,9 @@ impl App {
                 break;
             }
         }
+
+        // Clean up browser sessions before exit
+        self.browser_sessions.close_all().await;
 
         self.restore_terminal()
     }
@@ -1475,6 +1481,29 @@ impl App {
                     },
                     None => Ok(Some(format!("Agent '{}' not found", label))),
                 }
+            },
+            Effect::BrowserOpen { url, session_name } => {
+                self.browser_sessions.open(&url, session_name).await
+                    .map(|r| Some(r.format()))
+                    .or_else(|e| Ok(Some(format!("Error: {}", e))))
+            },
+            Effect::BrowserAction { session_name, action, params } => {
+                self.browser_sessions.action_from_raw(&session_name, &action, &params).await
+                    .map(Some)
+                    .or_else(|e| Ok(Some(format!("Error: {}", e))))
+            },
+            Effect::BrowserSnapshot { session_name } => {
+                self.browser_sessions.snapshot(&session_name).await
+                    .map(|r| Some(r.format()))
+                    .or_else(|e| Ok(Some(format!("Error: {}", e))))
+            },
+            Effect::BrowserListSessions => {
+                Ok(Some(self.browser_sessions.format_list().await))
+            },
+            Effect::BrowserClose { session_name } => {
+                self.browser_sessions.close(&session_name).await
+                    .map(|()| Some(format!("Session '{}' closed", session_name)))
+                    .or_else(|e| Ok(Some(format!("Error: {}", e))))
             },
         }
     }

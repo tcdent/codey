@@ -1,5 +1,6 @@
 mod agent_management;
 mod background_tasks;
+mod browser_session;
 mod edit_file;
 mod fetch_html;
 mod fetch_url;
@@ -16,6 +17,10 @@ pub use super::pipeline::{Tool, ToolPipeline};
 
 pub use agent_management::{GetAgentTool, ListAgentsTool};
 pub use background_tasks::{GetBackgroundTaskTool, ListBackgroundTasksTool};
+pub use browser_session::{
+    BrowserActionTool, BrowserCloseTool, BrowserListSessionsTool, BrowserOpenTool,
+    BrowserSnapshotTool,
+};
 pub use edit_file::EditFileTool;
 pub use fetch_html::FetchHtmlTool;
 pub use fetch_url::FetchUrlTool;
