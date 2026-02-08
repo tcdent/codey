@@ -1550,4 +1550,77 @@ mod tests {
         let drained = stage.drain_all();
         assert!(drained.is_empty());
     }
+
+    // ========================================================================
+    // Turn lifecycle: sub-agent tool completion must not corrupt turn state
+    // ========================================================================
+
+    /// Verifies that begin_turn panics when called with an already-active turn.
+    /// This is the invariant that was violated before the fix in handle_tool_event:
+    /// sub-agent tool completions with injectable notifications would call
+    /// begin_turn() creating an orphaned turn, then the next user submit would
+    /// call begin_turn() again and hit this panic.
+    #[test]
+    #[should_panic(expected = "Cannot begin turn: previous turn not finished")]
+    fn test_begin_turn_panics_if_previous_not_finished() {
+        let mut transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test_double_begin.md"));
+
+        transcript.begin_turn(Role::Assistant);
+        // Second begin_turn without finishing first -> panic
+        transcript.begin_turn(Role::Assistant);
+    }
+
+    /// Simulates the correct lifecycle when a sub-agent's tool completes
+    /// after the primary agent has finished its turn. The fix in
+    /// handle_tool_event guards notification injection behind is_primary,
+    /// so sub-agent tool completions skip the finish_turn/begin_turn calls
+    /// that would corrupt the transcript turn state.
+    #[test]
+    fn test_spawn_agent_turn_lifecycle_no_orphan() {
+        let mut transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test_spawn_ok.md"));
+
+        // User sends message
+        transcript.add_turn(Role::User, TextBlock::new("Spawn an agent to help me"));
+
+        // Primary agent's assistant turn begins
+        transcript.begin_turn(Role::Assistant);
+        transcript.stream_delta(BlockType::Text, "I'll spawn an agent.");
+        let tool_block = ToolBlock::new(
+            "call_spawn_1",
+            "mcp_spawn_agent",
+            serde_json::json!({"task": "review code"}),
+            false,
+        );
+        transcript.start_block(Box::new(tool_block));
+
+        // Primary agent finishes its turn
+        transcript.finish_turn();
+
+        // Sub-agent runs in the background. Its tool completes, but since
+        // is_primary is false, the handler does NOT call finish_turn/begin_turn.
+        // (No transcript manipulation for sub-agent tool completions.)
+
+        // Later, user submits next message - this should work without panic
+        transcript.add_turn(Role::User, TextBlock::new("What did the agent find?"));
+        transcript.begin_turn(Role::Assistant);
+        transcript.stream_delta(BlockType::Text, "The agent found...");
+        transcript.finish_turn();
+
+        // Verify transcript integrity
+        assert_eq!(transcript.turns().len(), 4); // user, assistant, user, assistant
+    }
+
+    /// Verifies that finish_turn is safe to call when no turn is active.
+    #[test]
+    fn test_finish_turn_without_active_turn_is_safe() {
+        let mut transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test_finish_safe.md"));
+
+        // finish_turn with no active turn should not panic
+        transcript.finish_turn();
+
+        // Should still work normally after
+        transcript.begin_turn(Role::Assistant);
+        transcript.stream_delta(BlockType::Text, "Hello");
+        transcript.finish_turn();
+    }
 }
