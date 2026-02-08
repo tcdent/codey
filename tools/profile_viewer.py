@@ -21,6 +21,7 @@ class Stats:
     total_us: int
     min_us: int
     max_us: int
+    item_count: int = 0
 
 
 @dataclass
@@ -49,6 +50,7 @@ class ProfileData:
                 total_us=s["total_us"],
                 min_us=s["min_us"],
                 max_us=s["max_us"],
+                item_count=s.get("item_count", 0),
             )
 
         # Parse resources
@@ -122,6 +124,78 @@ def print_summary(profile: ProfileData):
     print()
 
 
+def print_analysis(profile: ProfileData):
+    """Print detailed analysis with cumulative impact."""
+    print("=" * 72)
+    print("CODEY PERFORMANCE ANALYSIS")
+    print("=" * 72)
+    print()
+
+    total_time = sum(s.total_us for s in profile.stats.values())
+    if total_time == 0:
+        print("No profiling data collected.")
+        return
+
+    print(f"Session Duration:  {format_duration(profile.duration_ms * 1000)}")
+    print(f"Draw Calls:        {profile.draw_count}")
+    if profile.draw_count > 0 and profile.duration_ms > 0:
+        fps = profile.draw_count / (profile.duration_ms / 1000)
+        print(f"Avg FPS:           {fps:.1f}")
+    print(f"Avg Draw Time:     {format_duration(int(profile.avg_draw_time_us()))}")
+    print()
+
+    if profile.resources.samples > 0:
+        print("--- Resource Usage ---")
+        print(f"  Peak Memory:   {format_bytes(profile.resources.peak_memory_bytes)}")
+        print(f"  Final Memory:  {format_bytes(profile.resources.final_memory_bytes)}")
+        print(f"  Avg CPU:       {profile.resources.avg_cpu_percent:.1f}%")
+        print(f"  Peak CPU:      {profile.resources.peak_cpu_percent:.1f}%")
+        print(f"  Samples:       {profile.resources.samples}")
+        print()
+
+    print("--- Span Analysis (sorted by cumulative impact) ---")
+    print()
+    print(f"{'Span':<35} {'Calls':>7} {'Total':>9} {'%':>6} {'Avg':>9} {'Min':>9} {'Max':>9}")
+    print("-" * 72)
+
+    sorted_stats = sorted(profile.stats.items(), key=lambda x: x[1].total_us, reverse=True)
+    cumulative_pct = 0.0
+    for name, stat in sorted_stats:
+        pct = 100.0 * stat.total_us / total_time
+        cumulative_pct += pct
+        avg = stat.total_us // max(stat.calls, 1)
+        line = (
+            f"{name:<35} {stat.calls:>7} {format_duration(stat.total_us):>9} "
+            f"{pct:>5.1f}% {format_duration(avg):>9} "
+            f"{format_duration(stat.min_us):>9} {format_duration(stat.max_us):>9}"
+        )
+        print(line)
+        if stat.item_count > 0:
+            items_per_call = stat.item_count / max(stat.calls, 1)
+            us_per_item = stat.total_us / max(stat.item_count, 1)
+            print(f"  {'':>35} items: {stat.item_count}  ({items_per_call:.0f}/call, {format_duration(us_per_item)}/item)")
+
+    print()
+    print(f"Total profiled time: {format_duration(total_time)}")
+
+    # Hotspot warnings
+    print()
+    print("--- Hotspot Warnings ---")
+    has_warnings = False
+    for name, stat in sorted_stats:
+        pct = 100.0 * stat.total_us / total_time
+        avg = stat.total_us // max(stat.calls, 1)
+        if pct > 30:
+            print(f"  [!] {name} consumes {pct:.1f}% of profiled time")
+            has_warnings = True
+        if avg > 16000:  # > 16ms = over frame budget at 60fps
+            print(f"  [!] {name} avg {format_duration(avg)} exceeds 16ms frame budget")
+            has_warnings = True
+    if not has_warnings:
+        print("  No hotspots detected.")
+    print()
+
+
 def generate_llm_summary(profile: ProfileData) -> str:
     total_time = sum(s.total_us for s in profile.stats.values())
     sorted_stats = sorted(profile.stats.items(), key=lambda x: x[1].total_us, reverse=True)
@@ -149,14 +223,15 @@ def generate_llm_summary(profile: ProfileData) -> str:
         "",
         "## Timing",
         "",
-        "| Span | Calls | Total | % | Avg |",
-        "|------|-------|-------|---|-----|",
+        "| Span | Calls | Total | % | Avg | Items |",
+        "|------|-------|-------|---|-----|-------|",
     ])
 
     for name, stat in sorted_stats[:15]:
         pct = 100.0 * stat.total_us / max(total_time, 1)
         avg = stat.total_us // max(stat.calls, 1)
-        lines.append(f"| {name} | {stat.calls} | {format_duration(stat.total_us)} | {pct:.1f}% | {format_duration(avg)} |")
+        items = str(stat.item_count) if stat.item_count > 0 else "-"
+        lines.append(f"| {name} | {stat.calls} | {format_duration(stat.total_us)} | {pct:.1f}% | {format_duration(avg)} | {items} |")
 
     return "\n".join(lines)
 
@@ -164,6 +239,7 @@ def generate_llm_summary(profile: ProfileData) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Codey Performance Profile Viewer")
     parser.add_argument("profile", type=Path, help="Path to profile JSON file")
+    parser.add_argument("--analyze", action="store_true", help="Detailed analysis with cumulative impact and hotspot warnings")
     parser.add_argument("--llm-summary", action="store_true", help="Generate LLM-friendly markdown")
     args = parser.parse_args()
 
@@ -179,6 +255,8 @@ def main():
 
     if args.llm_summary:
         print(generate_llm_summary(profile))
+    elif args.analyze:
+        print_analysis(profile)
     else:
         print_summary(profile)
 

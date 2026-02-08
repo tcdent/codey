@@ -1479,40 +1479,6 @@ impl App {
         }
     }
 
-    /// Get output from an agent by label (for GetAgent effect)
-    #[cfg(feature = "cli")]
-    #[allow(dead_code)]
-    async fn get_agent_output(&mut self, label: &str) -> String {
-        // Find agent by label
-        let agent_id = match self.agents.find_by_label(label) {
-            Some(id) => id,
-            None => return format!("Agent '{}' not found", label),
-        };
-
-        // Check status
-        let status = self.agents.metadata(agent_id).map(|m| m.status.clone());
-
-        match status {
-            Some(status) => {
-                let status_str = format!("{:?}", status);
-                if status == AgentStatus::Finished {
-                    // Get result and remove agent (consume on retrieval)
-                    let result = if let Some(agent_mutex) = self.agents.get(agent_id) {
-                        let agent = agent_mutex.lock().await;
-                        agent.last_message().unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    self.agents.remove(agent_id);
-                    format!("[{}] [{}]:\n{}", label, status_str, result)
-                } else {
-                    // Still running - just return status
-                    format!("[{}] [{}]", label, status_str)
-                }
-            },
-            None => format!("Agent '{}' status unknown", label),
-        }
-    }
 }
 
 impl Drop for App {

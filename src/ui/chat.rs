@@ -30,7 +30,7 @@ use ratatui::{
 
 #[cfg(feature = "profiling")]
 use crate::profile_span;
-use crate::transcript::{Block, Role, Stage, Status, Transcript, Turn};
+use crate::transcript::{Block, Role, Stage, Transcript, Turn};
 
 /// Chat view with native scrollback support.
 ///
@@ -65,20 +65,6 @@ impl ChatView {
             frozen_turn_ids: HashSet::new(),
             turn_line_counts: HashMap::new(),
             agent_name,
-        }
-    }
-
-    // ==================== Transcript mutation helpers ====================
-
-    /// Mark the first block of a turn as complete
-    // TODO: Confusing - name says "last" but accesses first_mut(). Review whether
-    // this should be first or last, and rename accordingly.
-    #[allow(dead_code)]
-    pub fn mark_last_block_complete(&mut self, turn_id: usize) {
-        if let Some(turn) = self.transcript.get_mut(turn_id) {
-            if let Some(block) = turn.content.first_mut() {
-                block.set_status(Status::Complete);
-            }
         }
     }
 
