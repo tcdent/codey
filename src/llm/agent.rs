@@ -1,35 +1,27 @@
 //! Agent loop for handling conversations with tool execution
 
 use std::time::Instant;
+
 use tracing::{debug, error, info, warn};
 use anyhow::Result;
 use futures::StreamExt;
 use genai::chat::{
     CacheControl, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatStreamEvent,
-    ChatStreamResponse, ContentPart, MessageContent, ReasoningEffort, Thinking, Tool,
-    ToolCall as GenaiToolCall, ToolResponse,
+    ChatStreamResponse, ContentPart, MessageContent, Thinking, Tool, ToolCall as GenaiToolCall,
+    ToolResponse,
 };
-use genai::{Client, Headers};
+use genai::Client;
+use uuid::Uuid;
 
+use super::provider::{
+    AnthropicFastMode, AnthropicKey, AnthropicOAuth, OpenRouter, RequestCustomizer,
+};
 use super::client::build_client;
 use super::client::is_openrouter_model;
-
 use crate::auth::OAuthCredentials;
 use crate::config::AgentRuntimeConfig;
 use crate::transcript::{BlockType, Role, Transcript};
 use crate::tools::{ToolCall, ToolDecision, ToolRegistry};
-
-const ANTHROPIC_BETA_HEADER: &str = concat!(
-    "oauth-2025-04-20,",
-    "claude-code-20250219,",
-    "interleaved-thinking-2025-05-14",
-    // Removed: causes OAuth rejection before tool calls are processed
-    // "fine-grained-tool-streaming-2025-05-14",
-);
-const ANTHROPIC_USER_AGENT: &str = "claude-code/2.1.37 (external, cli)";
-
-/// Beta header value that activates fast mode (research preview).
-const FAST_MODE_BETA: &str = "research-preview-2026-02-01";
 
 /// Duration to cool down fast mode after a rate limit, before re-enabling.
 const FAST_MODE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(20 * 60);
@@ -46,7 +38,7 @@ impl From<&GenaiToolCall> for ToolCall {
             .and_then(|obj| obj.remove("background"))
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        
+
         Self {
             agent_id: 0, // Placeholder - set by App when handling ToolRequest
             call_id: tc.call_id.clone(),
@@ -200,6 +192,10 @@ pub struct Agent {
     /// Retry attempt counter, persists across calls to exec_chat_with_retry.
     /// Reset on successful request or new user message.
     retry_attempt: u32,
+
+    /// Unique session ID (UUID v4), generated once per Agent lifetime.
+    /// Used in `metadata.user_id` for billing attribution.
+    session_id: String,
 }
 
 impl Agent {
@@ -233,6 +229,7 @@ impl Agent {
 
             fast_mode_cooldown_until: None,
             retry_attempt: 0,
+            session_id: Uuid::new_v4().to_string(),
         }
     }
 
@@ -270,6 +267,7 @@ impl Agent {
 
             fast_mode_cooldown_until: None,
             retry_attempt: 0,
+            session_id: Uuid::new_v4().to_string(),
         }
     }
 
@@ -318,12 +316,7 @@ impl Agent {
                             BlockType::Tool => {
                                 // Only add tool call if it has a result (text)
                                 // Skip incomplete tools (e.g., quit while awaiting approval)
-                                if let (
-                                    Some(call_id),
-                                    Some(tool_name),
-                                    Some(params),
-                                    Some(text),
-                                ) = (
+                                if let (Some(call_id), Some(tool_name), Some(params), Some(text)) = (
                                     block.call_id(),
                                     block.tool_name(),
                                     block.params(),
@@ -506,13 +499,45 @@ impl Agent {
         }
     }
 
-    /// Returns true if fast mode is currently active.
+    /// Resolve the request customizer for the current provider.
     ///
-    /// Fast mode requires: config flag enabled, model is opus-4-6, and not in cooldown.
-    pub fn is_fast_mode(&self) -> bool {
+    /// Determines OpenRouter vs Anthropic, and within Anthropic whether
+    /// to use API key, OAuth, or fast mode based on config and state.
+    fn resolve_provider(&self) -> Box<dyn RequestCustomizer> {
+        if is_openrouter_model(&self.config.model) {
+            return Box::new(OpenRouter);
+        }
+
+        match &self.oauth {
+            Some(oauth) if self.is_fast_mode_eligible() => Box::new(AnthropicFastMode {
+                access_token: oauth.access_token.clone(),
+                cch_seed: self.config.cch_seed,
+                cc_version_salt: self.config.cc_version_salt.clone(),
+                user_id: self.config.user_id.clone(),
+                account_uuid: self.config.account_uuid.clone(),
+                session_id: self.session_id.clone(),
+            }),
+            Some(oauth) => Box::new(AnthropicOAuth {
+                access_token: oauth.access_token.clone(),
+                cch_seed: self.config.cch_seed,
+                cc_version_salt: self.config.cc_version_salt.clone(),
+                user_id: self.config.user_id.clone(),
+                account_uuid: self.config.account_uuid.clone(),
+                session_id: self.session_id.clone(),
+            }),
+            None => Box::new(AnthropicKey),
+        }
+    }
+
+    /// Whether fast mode is eligible (config + model + not in cooldown).
+    ///
+    /// This checks the preconditions; the actual provider resolution
+    /// also requires OAuth credentials.
+    fn is_fast_mode_eligible(&self) -> bool {
         if !self.config.fast_mode {
             return false;
         }
+        // TODO move the model string selection out of agent.rs; this should be generic
         if !self.config.model.to_lowercase().contains("opus-4-6") {
             return false;
         }
@@ -522,6 +547,11 @@ impl Agent {
             }
         }
         true
+    }
+
+    /// Returns true if fast mode is currently active for requests.
+    pub fn is_fast_mode(&self) -> bool {
+        self.oauth.is_some() && self.is_fast_mode_eligible()
     }
 
     /// Icon to prepend to the model name in the UI.
@@ -566,101 +596,63 @@ impl Agent {
             request = request.with_tools(self.get_tools());
         }
 
-        // Check fast mode status before building headers
-        let fast_mode_active = self.is_fast_mode();
-        if fast_mode_active {
-            info!("Fast mode active for this request");
-        }
+        loop {
+            // Resolve provider (may change after cooldown downgrades fast→oauth)
+            let provider = self.resolve_provider();
+            info!("Using provider: {}", provider.label());
 
-        // Build headers based on provider and OAuth availability
-        let headers = if is_openrouter_model(&self.config.model) {
-            // OpenRouter uses standard Bearer auth (handled by client resolver)
-            // Add recommended headers for app attribution
-            Headers::from([
-                ("HTTP-Referer".to_string(), "https://github.com/tcdent/codey".to_string()),
-                ("X-Title".to_string(), "Codey".to_string()),
-            ])
-        } else if let Some(ref oauth) = self.oauth {
-            let mut beta = ANTHROPIC_BETA_HEADER.to_string();
-            if fast_mode_active {
-                beta.push(',');
-                beta.push_str(FAST_MODE_BETA);
-            }
-            Headers::from([
-                (
-                    "authorization".to_string(),
-                    format!("Bearer {}", oauth.access_token),
-                ),
-                ("anthropic-beta".to_string(), beta),
-                ("user-agent".to_string(), ANTHROPIC_USER_AGENT.to_string()),
-            ])
-        } else {
-            let mut beta = "interleaved-thinking-2025-05-14".to_string();
-            if fast_mode_active {
-                beta.push(',');
-                beta.push_str(FAST_MODE_BETA);
-            }
-            Headers::from([("anthropic-beta".to_string(), beta)])
-        };
+            let base_options = ChatOptions::default()
+                .with_max_tokens(self.config.max_tokens)
+                .with_capture_usage(true)
+                .with_capture_tool_calls(mode_opts.capture_tool_calls);
+            let chat_options = provider.apply_chat_options(base_options, mode_opts.thinking_budget);
+            let request = provider.apply_chat_request(request.clone());
 
-        // Build chat options - reasoning_effort is only for Anthropic models
-        let mut chat_options = ChatOptions::default()
-            .with_max_tokens(self.config.max_tokens)
-            .with_capture_usage(true)
-            .with_capture_tool_calls(mode_opts.capture_tool_calls)
-            .with_extra_headers(headers);
-        
-        // Only add reasoning/thinking options for Anthropic models
-        if !is_openrouter_model(&self.config.model) {
-            chat_options = chat_options
-                .with_capture_reasoning_content(true)
-                .with_reasoning_effort(ReasoningEffort::Budget(mode_opts.thinking_budget));
-        }
-
-        self.retry_attempt += 1;
-        match self
-            .client
-            .exec_chat_stream(&self.config.model, request.clone(), Some(&chat_options))
-            .await
-        {
-            Ok(resp) => {
-                info!("Chat request successful");
-                self.retry_attempt = 0;
-                Ok(resp)
-            },
-            Err(e) => {
-                let err = format!("{:#}", e);
-                error!("Chat request failed (attempt {}): {}", self.retry_attempt, err);
-
-                // If fast mode is active and we hit a rate limit or overloaded
-                // error, trigger cooldown and retry without the fast mode header.
-                if fast_mode_active && self.is_rate_limit_error(&err) {
-                    warn!(
-                        "Fast mode rate limited, entering {}s cooldown",
-                        FAST_MODE_COOLDOWN.as_secs()
+            self.retry_attempt += 1;
+            match self
+                .client
+                .exec_chat_stream(&self.config.model, request, Some(&chat_options))
+                .await
+            {
+                Ok(resp) => {
+                    info!("Chat request successful");
+                    self.retry_attempt = 0;
+                    return Ok(resp);
+                },
+                Err(e) => {
+                    let err = format!("{:#}", e);
+                    error!(
+                        "Chat request failed (attempt {}): {}",
+                        self.retry_attempt, err
                     );
-                    self.fast_mode_cooldown_until = Some(Instant::now() + FAST_MODE_COOLDOWN);
-                    // Don't count fast mode fallback as a retry attempt
-                    self.retry_attempt -= 1;
+
+                    // Fast mode cooldown: downgrade immediately and re-dispatch
+                    // as regular OAuth instead of retrying with the same provider
+                    if self.is_fast_mode() && self.is_rate_limit_error(&err) {
+                        warn!(
+                            "{} rate limited, entering {}s cooldown — downgrading",
+                            provider.label(),
+                            FAST_MODE_COOLDOWN.as_secs()
+                        );
+                        self.fast_mode_cooldown_until = Some(Instant::now() + FAST_MODE_COOLDOWN);
+                        self.retry_attempt -= 1;
+                        continue; // re-resolve provider (now non-fast) and retry immediately
+                    }
+
+                    if self.retry_attempt >= self.config.max_retries {
+                        self.retry_attempt = 0;
+                        return Err(AgentStep::Error(format!(
+                            "API error ({}): {}",
+                            self.config.model, err
+                        )));
+                    }
+                    // Return retry step, caller should call next() again
                     return Err(AgentStep::Retrying {
                         attempt: self.retry_attempt,
-                        error: format!("Fast mode rate limited, falling back to standard speed"),
+                        error: err,
                     });
-                }
-
-                if self.retry_attempt >= self.config.max_retries {
-                    self.retry_attempt = 0;
-                    return Err(AgentStep::Error(format!(
-                        "API error ({}): {}",
-                        self.config.model, err
-                    )));
-                }
-                // Return retry step, caller should call next() again
-                Err(AgentStep::Retrying {
-                    attempt: self.retry_attempt,
-                    error: err,
-                })
-            },
+                },
+            }
         }
     }
 

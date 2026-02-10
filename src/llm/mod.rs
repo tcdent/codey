@@ -1,5 +1,6 @@
 //! LLM client and agent loop
 
+pub mod provider;
 mod agent;
 mod client;
 mod registry;
