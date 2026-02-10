@@ -1219,7 +1219,7 @@ dependencies = [
 [[package]]
 name = "genai"
 version = "0.5.2"
-source = "git+https://github.com/tcdent/rust-genai.git?branch=codey-dev#1b35d1204e380499b516eb611df8bae66e6471ad"
+source = "git+https://github.com/tcdent/rust-genai.git?rev=50effad#50effad309887415673c552d6a574afa3b090929"
 dependencies = [
  "base64 0.22.1",
  "bytes 1.11.0",
@@ -3333,6 +3333,7 @@ version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
 dependencies = [
+ "indexmap 2.13.0",
  "itoa",
  "memchr",
  "serde",

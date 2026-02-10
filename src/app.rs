@@ -352,8 +352,8 @@ impl App {
         if self.continue_session {
             agent.restore_from_transcript(&self.chat.transcript);
         } else {
-            self.chat
-                .add_turn(Role::Assistant, TextBlock::pending(&welcome_message(&agent_name)));
+            // self.chat
+            //     .add_turn(Role::Assistant, TextBlock::pending(&welcome_message(&agent_name)));
         }
         self.agents.register(agent);
 
@@ -1131,6 +1131,8 @@ impl App {
                         if let Err(e) = self.chat.transcript.save() {
                             tracing::error!("Failed to save transcript: {}", e);
                         }
+                        self.chat.render(&mut self.terminal);
+                        self.draw();
 
                         // Check if compaction is needed
                         if usage.context_tokens >= self.config.general.compaction_threshold {

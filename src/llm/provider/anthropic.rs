@@ -120,29 +120,55 @@ impl BodySerializer for CchSerializer {
     fn serialize(&self, payload: &Value) -> Result<String, String> {
         let mut payload = payload.clone();
 
-        // Build and prepend billing header as first system block
+        // Build and prepend billing header and identity as first system blocks
         if let Some(ref salt) = self.cc_version_salt {
             let first_msg = Self::first_user_message(&payload);
             let header = build_billing_header(&first_msg, salt, CC_VERSION);
-            let block = serde_json::json!({
+            let billing_block = serde_json::json!({
                 "type": "text",
                 "text": header
             });
+            let identity_block = serde_json::json!({
+                "type": "text",
+                "text": "You are Claude Code, Anthropic's official CLI for Claude."
+            });
             match payload.get_mut("system") {
-                Some(Value::Array(arr)) => arr.insert(0, block),
+                Some(Value::Array(arr)) => {
+                    arr.insert(0, identity_block);
+                    arr.insert(0, billing_block);
+                },
                 Some(Value::String(s)) => {
                     let existing = serde_json::json!({
                         "type": "text",
                         "text": s.clone(),
                         "cache_control": {"type": "ephemeral"}
                     });
-                    payload["system"] = serde_json::json!([block, existing]);
+                    payload["system"] = serde_json::json!([billing_block, identity_block, existing]);
                 },
                 _ => {
-                    payload["system"] = serde_json::json!([block]);
+                    payload["system"] = serde_json::json!([billing_block, identity_block]);
                 },
             }
         }
+
+        // Rebuild the object with `system` first so the billing header's
+        // `cch=00000` placeholder is the first occurrence in the serialized
+        // body — user/tool content may contain the same literal string.
+        let payload = if let Some(map) = payload.as_object() {
+            let mut ordered = serde_json::Map::with_capacity(map.len());
+            // system must come first
+            if let Some(v) = map.get("system") {
+                ordered.insert("system".to_string(), v.clone());
+            }
+            for (k, v) in map {
+                if k != "system" {
+                    ordered.insert(k.clone(), v.clone());
+                }
+            }
+            Value::Object(ordered)
+        } else {
+            payload
+        };
 
         let body = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
         Ok(apply_cch(&body, self.seed))
@@ -326,7 +352,7 @@ impl RequestCustomizer for AnthropicFastMode {
 /// `xxHash64(body_bytes, seed) & 0xFFFFF` → formatted as lowercase hex.
 pub fn compute_cch(body: &[u8], seed: u64) -> String {
     let hash = xxh64(body, seed);
-    format!("{:x}", hash & 0xFFFFF)
+    format!("{:05x}", hash & 0xFFFFF)
 }
 
 /// Compute the `cc_version` suffix (3-character hex string).
@@ -551,6 +577,33 @@ mod tests {
     fn test_build_user_id() {
         let uid = build_user_id("abc123", "uuid-456", "session-789");
         assert_eq!(uid, "user_abc123_account_uuid-456_session_session-789");
+    }
+
+    #[test]
+    fn test_preserve_order_system_first() {
+        let mut map = serde_json::Map::new();
+        map.insert("messages".to_string(), serde_json::json!("msg"));
+        map.insert("model".to_string(), serde_json::json!("test"));
+        map.insert("system".to_string(), serde_json::json!("sys"));
+
+        let mut ordered = serde_json::Map::with_capacity(map.len());
+        if let Some(v) = map.get("system") {
+            ordered.insert("system".to_string(), v.clone());
+        }
+        for (k, v) in &map {
+            if k != "system" {
+                ordered.insert(k.clone(), v.clone());
+            }
+        }
+        let val = serde_json::Value::Object(ordered);
+        let s = serde_json::to_string(&val).unwrap();
+        let sys_pos = s.find("\"system\"").unwrap();
+        let msg_pos = s.find("\"messages\"").unwrap();
+        assert!(
+            sys_pos < msg_pos,
+            "system ({}) should be before messages ({}): {}",
+            sys_pos, msg_pos, s
+        );
     }
 
     /// Cross-check: verify cc_version suffix matches the Python PoC output.

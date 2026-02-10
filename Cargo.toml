@@ -28,7 +28,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
 # LLM client (multi-provider) - using patched version for thinking blocks + OAuth
-genai = { git = "https://github.com/tcdent/rust-genai.git", branch = "codey-dev" }
+genai = { git = "https://github.com/tcdent/rust-genai.git", rev = "50effad" }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
@@ -41,7 +41,7 @@ htmd = { version = "0.1", optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 
 # Config
 toml = "0.8"
