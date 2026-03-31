@@ -35,6 +35,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use chromiumoxide::browser::{Browser, BrowserConfig, HeadlessMode};
+use chromiumoxide::cdp::browser_protocol::page::EventLifecycleEvent;
 use chromiumoxide::handler::viewport::Viewport;
 use futures::StreamExt;
 
@@ -379,15 +380,39 @@ async fn fetch_with_browser(
         }
     });
 
-    // Navigate to page
+    // Navigate to page and wait for network idle
     let page_result = tokio::time::timeout(Duration::from_secs(60), async {
+        // Create a blank page first so we can set up event listeners before navigation
         let page = browser
-            .new_page(url)
+            .new_page("about:blank")
+            .await
+            .map_err(|e| format!("Failed to create page: {}", e))?;
+
+        // Listen for lifecycle events (must be set up before navigation to catch all events)
+        let mut lifecycle_events = page
+            .event_listener::<EventLifecycleEvent>()
+            .await
+            .map_err(|e| format!("Failed to set up event listener: {}", e))?;
+
+        // Navigate to the target URL
+        page.goto(url)
             .await
             .map_err(|e| format!("Failed to navigate: {}", e))?;
 
-        // Wait for JavaScript to render (configurable for SPAs like Twitter)
-        tokio::time::sleep(Duration::from_millis(ctx.page_load_wait_ms)).await;
+        // Wait for networkIdle (no in-flight requests for 500ms).
+        // Falls back to timeout for pages with persistent connections (WebSockets, SSE).
+        let network_idle = async {
+            while let Some(event) = lifecycle_events.next().await {
+                if event.name == "networkIdle" {
+                    break;
+                }
+            }
+        };
+        let _ = tokio::time::timeout(
+            Duration::from_millis(ctx.page_load_wait_ms),
+            network_idle,
+        )
+        .await;
 
         // Get rendered HTML
         page.content()
