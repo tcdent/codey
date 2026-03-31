@@ -69,7 +69,8 @@ impl Tool for ListBackgroundTasksTool {
 
     fn description(&self) -> &'static str {
         "List all background tasks and their status. Returns task IDs, tool names, and status \
-         (Running, Complete, or Error). Use get_background_task to retrieve results."
+         (Running, Complete, or Error). Note: you are automatically notified when tasks complete, \
+         so you rarely need this. Only use to debug issues or if the user asks about task status."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -117,7 +118,9 @@ impl Tool for GetBackgroundTaskTool {
     fn description(&self) -> &'static str {
         "Retrieve the result of a completed background task by its task_id. \
          The result is removed from tracking after retrieval. \
-         Returns an error if the task is still running or doesn't exist."
+         Returns an error if the task is still running or doesn't exist. \
+         Note: results are automatically delivered via notifications when tasks complete, \
+         so you rarely need this tool."
     }
 
     fn schema(&self) -> serde_json::Value {

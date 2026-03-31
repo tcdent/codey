@@ -86,7 +86,7 @@ impl Tool for ShellTool {
                 },
                 "background": {
                     "type": "boolean",
-                    "description": "Run in background. Returns immediately with a task_id; use list_background_tasks/get_background_task to check status and retrieve results."
+                    "description": "Run in background. Returns immediately with a task_id. You will be automatically notified when the task completes — do not poll."
                 }
             },
             "required": ["command"]

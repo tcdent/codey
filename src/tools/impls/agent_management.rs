@@ -69,7 +69,8 @@ impl Tool for ListAgentsTool {
 
     fn description(&self) -> &'static str {
         "List all spawned sub-agents and their status. Returns agent IDs, labels, and status \
-         (Running, Finished, or Error). Use get_agent to retrieve results from finished agents."
+         (Running, Finished, or Error). Note: you are automatically notified when agents finish, \
+         so you rarely need this. Only use to debug issues or if the user asks about agent status."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -116,7 +117,9 @@ impl Tool for GetAgentTool {
     fn description(&self) -> &'static str {
         "Retrieve the result of a finished sub-agent by its label. \
          Returns the agent's final message/output. \
-         If the agent is still running, returns its current status."
+         If the agent is still running, returns its current status. \
+         Note: results are automatically delivered via notifications when agents finish, \
+         so you rarely need this tool."
     }
 
     fn schema(&self) -> serde_json::Value {
