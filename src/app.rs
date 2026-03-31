@@ -1090,11 +1090,12 @@ impl App {
                 self.tool_executor.enqueue(tool_calls);
             },
             AgentStep::Retrying { attempt, error } => {
+                let delay_secs = 2u64.pow(attempt);
                 self.alert = Some(format!(
-                    "Request failed (attempt {}): {}. Retrying...",
-                    attempt, error
+                    "Request failed (attempt {}): {}. Retrying in {}s...",
+                    attempt, error, delay_secs
                 ));
-                tracing::warn!("Retrying request: attempt {}, error: {}", attempt, error);
+                tracing::warn!("Retrying request: attempt {}, error: {}, backoff: {}s", attempt, error, delay_secs);
             },
             AgentStep::Finished { usage } => {
                 if is_primary {

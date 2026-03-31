@@ -1,6 +1,6 @@
 //! Agent loop for handling conversations with tool execution
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 use anyhow::Result;
 use futures::StreamExt;
@@ -675,6 +675,14 @@ impl Agent {
             match self.state.as_ref()? {
                 StreamState::NeedsChatRequest => {
                     debug!("Agent state: NeedsChatRequest, clearing streaming data");
+
+                    // Exponential backoff before retrying: 2s, 4s, 8s, 16s, ...
+                    if self.retry_attempt > 0 {
+                        let delay = Duration::from_secs(2u64.pow(self.retry_attempt));
+                        info!("Backoff: waiting {}s before retry attempt {}", delay.as_secs(), self.retry_attempt + 1);
+                        tokio::time::sleep(delay).await;
+                    }
+
                     // Refresh dynamic system prompt before each request
                     self.refresh_system_prompt();
 
@@ -752,10 +760,24 @@ impl Agent {
                             },
                         },
                         Some(Err(e)) => {
-                            error!("Stream error: {:?}", e);
-                            self.state = None;
+                            let err = format!("{:#}", e);
+                            error!("Stream error (attempt {}): {}", self.retry_attempt, err);
                             self.active_stream = None;
-                            return Some(AgentStep::Error(format!("Stream error: {:?}", e)));
+
+                            self.retry_attempt += 1;
+                            if self.retry_attempt >= self.config.max_retries {
+                                self.retry_attempt = 0;
+                                self.state = None;
+                                return Some(AgentStep::Error(format!(
+                                    "Stream error ({}): {}", self.config.model, err
+                                )));
+                            }
+                            // Go back to NeedsChatRequest so the retry loop picks it up
+                            self.state = Some(StreamState::NeedsChatRequest);
+                            return Some(AgentStep::Retrying {
+                                attempt: self.retry_attempt,
+                                error: err,
+                            });
                         },
                         None => {
                             debug!("Agent: stream returned None (closed)");
