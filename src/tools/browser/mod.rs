@@ -30,6 +30,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -44,6 +45,9 @@ use crate::config::BrowserConfig as AppBrowserConfig;
 
 /// Browser configuration context, initialized at app startup
 static BROWSER_CONTEXT: OnceLock<BrowserContext> = OnceLock::new();
+
+/// Monotonic counter for unique per-session temp directory names
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Context for browser-based tools (fetch_html, fetch_screenshot)
 #[derive(Debug, Clone)]
@@ -242,10 +246,15 @@ async fn fetch_with_browser(
     {
         let source_profile = std::path::Path::new(data_dir).join(prof);
         if source_profile.exists() {
-            // Use PID to isolate temp dirs between concurrent Codey instances
-            let temp_base =
-                std::env::temp_dir().join(format!("codey-browser-{}", std::process::id()));
-            // Clean up any previous temp dir to ensure fresh copy
+            // Use PID + monotonic counter to isolate temp dirs between
+            // concurrent browser sessions within the same process
+            let session_id = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let temp_base = std::env::temp_dir().join(format!(
+                "codey-browser-{}-{}",
+                std::process::id(),
+                session_id
+            ));
+            // Clean up any leftover temp dir from a previous run with same PID
             if temp_base.exists() {
                 let _ = std::fs::remove_dir_all(&temp_base);
             }
@@ -387,9 +396,14 @@ async fn fetch_with_browser(
     })
     .await;
 
-    // Clean up
+    // Clean up browser
     let _ = browser.close().await;
     handle.abort();
+
+    // Clean up temp profile directory
+    if let Some(ref temp) = temp_dir {
+        let _ = std::fs::remove_dir_all(temp);
+    }
 
     match page_result {
         Ok(Ok(html)) => Ok(html),
