@@ -342,8 +342,8 @@ The app receives a `ToolEvent::Delegate` and sends back a result via oneshot cha
 
 When `background: true` is passed:
 1. Tool runs in background, returns task_id immediately
-2. User can check status with `list_background_tasks`
-3. User retrieves result with `get_background_task(task_id)`
+2. The agent is automatically notified when the task completes via the notification system
+3. `list_background_tasks` and `get_background_task` are available but rarely needed
 4. Output is stored in `ActivePipeline.output` until retrieved
 
 The executor spawns handlers in separate tokio tasks, so they won't be lost if the main select! loop moves on to other work.

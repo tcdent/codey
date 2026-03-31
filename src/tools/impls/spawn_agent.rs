@@ -173,7 +173,8 @@ impl Tool for SpawnAgentTool {
     fn description(&self) -> &'static str {
         "Spawn a sub-agent to handle a subtask. Returns immediately with an agent_id. \
          The sub-agent has full tool access including edit_file and write_file (approval routed to user). \
-         Use list_agents to check status and get_agent to retrieve results when finished."
+         You will be automatically notified when the agent finishes — do NOT poll with list_agents or get_agent. \
+         Continue with other work or go idle while waiting."
     }
 
     fn schema(&self) -> serde_json::Value {

@@ -86,8 +86,7 @@ When fetching web pages with `fetch_html`, consider using `spawn_agent` to deleg
 
 ### Background Execution
 For long-running operations, you can execute tools in the background by adding `"background": true` to the tool call. This returns immediately with a task ID while the tool runs asynchronously.
-Use `list_background_tasks` to check status and `get_background_task` to retrieve results when complete.
-You will be notified with a message when background tasks finish.
+You will be automatically notified when background tasks and sub-agents finish — their results will be delivered to you as notifications. Do NOT poll or check on background tasks/agents using `list_background_tasks`, `list_agents`, `get_background_task`, or `get_agent`. Instead, continue with other work or go idle and wait for the notification. You will always be reawakened when a background task or agent completes. Only use the status-checking tools if you need to debug a specific issue or if a user explicitly asks about task status.
 
 ### Recording Corrections
 When a shell command or approach fails and you find a better way to accomplish the goal, use `record_correction` to save this knowledge. This helps avoid repeating the same mistakes in future sessions. For example:
