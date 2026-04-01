@@ -200,6 +200,9 @@ pub struct Agent {
     /// Retry attempt counter, persists across calls to exec_chat_with_retry.
     /// Reset on successful request or new user message.
     retry_attempt: u32,
+
+    /// Timestamp of the last successful API request (for cache keep-alive scheduling).
+    last_request_time: Option<Instant>,
 }
 
 impl Agent {
@@ -233,6 +236,7 @@ impl Agent {
 
             fast_mode_cooldown_until: None,
             retry_attempt: 0,
+            last_request_time: None,
         }
     }
 
@@ -270,6 +274,7 @@ impl Agent {
 
             fast_mode_cooldown_until: None,
             retry_attempt: 0,
+            last_request_time: None,
         }
     }
 
@@ -398,6 +403,101 @@ impl Agent {
         debug!("Agent::cancel");
         self.state = None;
         self.active_stream = None;
+    }
+
+    /// Returns true if a cache keep-alive ping is needed.
+    ///
+    /// Checks whether: keep-alive is enabled, the agent is idle (no active stream),
+    /// and enough time has elapsed since the last API request.
+    pub fn needs_cache_keepalive(&self) -> bool {
+        let interval = self.config.cache_keepalive_secs;
+        if interval == 0 {
+            return false;
+        }
+        // Don't send keep-alive if the agent is actively streaming
+        if self.state.is_some() {
+            return false;
+        }
+        // Need at least one prior request to have something cached
+        let Some(last) = self.last_request_time else {
+            return false;
+        };
+        // Don't keep-alive on OpenRouter (cache is Anthropic-specific)
+        if is_openrouter_model(&self.config.model) {
+            return false;
+        }
+        last.elapsed() >= Duration::from_secs(interval)
+    }
+
+    /// Send a minimal API request to keep the Anthropic prompt cache warm.
+    ///
+    /// Uses the existing message history as the cache prefix, appends a
+    /// disposable keep-alive message, sends with max_tokens=1 and no tools,
+    /// then discards the response. The keep-alive message is NOT added to
+    /// the agent's conversation history.
+    pub async fn send_cache_keepalive(&mut self) -> Result<Usage> {
+        info!("Sending cache keep-alive ping");
+
+        // Build messages: clone current history + cache_control on last real message
+        let mut messages = self.messages.clone();
+        if let Some(last_msg) = messages.last_mut() {
+            last_msg.options = Some(CacheControl::Ephemeral.into());
+        }
+        // Append a disposable keep-alive user message (not stored in self.messages)
+        messages.push(ChatMessage::user("[cache-keepalive] Respond with: ack"));
+
+        let request = ChatRequest::new(messages);
+
+        // Build minimal headers (same auth as normal requests)
+        let headers = if let Some(ref oauth) = self.oauth {
+            Headers::from([
+                (
+                    "authorization".to_string(),
+                    format!("Bearer {}", oauth.access_token),
+                ),
+                ("anthropic-beta".to_string(), ANTHROPIC_BETA_HEADER.to_string()),
+                ("user-agent".to_string(), ANTHROPIC_USER_AGENT.to_string()),
+            ])
+        } else {
+            Headers::from([("anthropic-beta".to_string(), "interleaved-thinking-2025-05-14".to_string())])
+        };
+
+        // Minimal options: 1 output token, no tools, no thinking
+        let chat_options = ChatOptions::default()
+            .with_max_tokens(1)
+            .with_capture_usage(true)
+            .with_extra_headers(headers);
+
+        match self
+            .client
+            .exec_chat_stream(&self.config.model, request, Some(&chat_options))
+            .await
+        {
+            Ok(resp) => {
+                // Drain the stream to complete the request
+                let mut stream = Box::pin(resp.stream);
+                let mut turn_usage = Usage::default();
+                while let Some(event) = stream.next().await {
+                    if let Ok(ChatStreamEvent::End(end)) = event {
+                        if let Some(ref genai_usage) = end.captured_usage {
+                            turn_usage = Self::extract_turn_usage(genai_usage);
+                        }
+                    }
+                }
+                self.last_request_time = Some(Instant::now());
+                info!(
+                    "Cache keep-alive complete: {} cached tokens refreshed",
+                    turn_usage.cache_read_tokens
+                );
+                Ok(turn_usage)
+            }
+            Err(e) => {
+                warn!("Cache keep-alive failed: {:#}", e);
+                // Still update timestamp to avoid hammering on repeated failures
+                self.last_request_time = Some(Instant::now());
+                Err(anyhow::anyhow!("Cache keep-alive failed: {:#}", e))
+            }
+        }
     }
 
     /// Refresh OAuth token if expired. Returns true if refresh was needed and succeeded.
@@ -626,6 +726,7 @@ impl Agent {
             Ok(resp) => {
                 info!("Chat request successful");
                 self.retry_attempt = 0;
+                self.last_request_time = Some(Instant::now());
                 Ok(resp)
             },
             Err(e) => {

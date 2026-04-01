@@ -50,6 +50,7 @@ pub const CORRECTIONS_FILENAME: &str = "corrections.json";
 ///     max_retries: 5,
 ///     compaction_thinking_budget: 8_000,
 ///     fast_mode: false,
+///     cache_keepalive_secs: 0,
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -62,6 +63,10 @@ pub struct AgentRuntimeConfig {
     /// Enable fast mode (research preview) for lower-latency responses.
     /// Only effective with opus-4-6 models.
     pub fast_mode: bool,
+    /// Interval in seconds for cache keep-alive pings. 0 = disabled.
+    /// Sends a minimal API request to refresh Anthropic's prompt cache TTL
+    /// before it expires, avoiding expensive cache re-creation on idle sessions.
+    pub cache_keepalive_secs: u64,
 }
 
 impl Default for AgentRuntimeConfig {
@@ -73,6 +78,7 @@ impl Default for AgentRuntimeConfig {
             max_retries: 5,
             compaction_thinking_budget: 8_000,
             fast_mode: false,
+            cache_keepalive_secs: 0,
         }
     }
 }
@@ -92,6 +98,7 @@ impl AgentRuntimeConfig {
             max_retries: config.general.max_retries,
             compaction_thinking_budget: config.general.compaction_thinking_budget,
             fast_mode: config.agents.foreground.fast_mode,
+            cache_keepalive_secs: config.general.cache_keepalive_secs,
         }
     }
 
@@ -104,6 +111,7 @@ impl AgentRuntimeConfig {
             max_retries: config.general.max_retries,
             compaction_thinking_budget: config.general.compaction_thinking_budget,
             fast_mode: config.agents.background.fast_mode,
+            cache_keepalive_secs: config.general.cache_keepalive_secs,
         }
     }
 }
@@ -225,6 +233,10 @@ pub struct GeneralConfig {
     pub compaction_threshold: u32,
     /// Thinking budget for compaction requests (default: 8,000)
     pub compaction_thinking_budget: u32,
+    /// Interval in seconds for cache keep-alive pings. 0 = disabled (default).
+    /// Sends a minimal API request to keep Anthropic's prompt cache warm during
+    /// idle periods. Recommended: 240 (4 min) for 5-min TTL, 3300 (55 min) for 1-hour TTL.
+    pub cache_keepalive_secs: u64,
 }
 
 #[cfg(feature = "cli")]
@@ -235,6 +247,7 @@ impl Default for GeneralConfig {
             max_retries: 5,
             compaction_threshold: 192_000,
             compaction_thinking_budget: 8_000,
+            cache_keepalive_secs: 0,
         }
     }
 }

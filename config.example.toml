@@ -5,6 +5,25 @@
 # Working directory (default: current directory)
 # working_dir = "/path/to/project"
 
+# Cache keep-alive interval in seconds (default: 0 = disabled).
+# Sends a minimal API request to keep Anthropic's prompt cache warm during
+# idle periods, preventing expensive cache re-creation when you return to
+# a session after being away.
+#
+# How it works:
+#   - Anthropic caches your conversation prefix (system prompt + message history)
+#   - Default cache TTL is 5 minutes; unused caches expire and must be re-written
+#   - Keep-alive sends a 1-token request using your existing prefix to refresh the TTL
+#   - Cache reads cost 10% of normal input pricing (e.g., $0.50/MTok vs $5 for Opus)
+#   - Without keep-alive, returning after 5+ min idle costs full cache write (1.25x input)
+#
+# Recommended values:
+#   240  = ping every 4 min (safe margin for 5-min default TTL)
+#   3300 = ping every 55 min (if using 1-hour extended TTL)
+#   0    = disabled (default)
+#
+# cache_keepalive_secs = 240
+
 [agents.foreground]
 # Model to use (default: claude-opus-4-6)
 model = "claude-opus-4-6"

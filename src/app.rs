@@ -361,6 +361,12 @@ impl App {
         self.chat.render(&mut self.terminal);
         self.draw();
 
+        // Cache keep-alive timer: check every 30s if a keep-alive ping is needed.
+        // The actual interval is configured via `cache_keepalive_secs` in config;
+        // this tick rate just controls how often we check.
+        let mut keepalive_tick = tokio::time::interval(Duration::from_secs(30));
+        keepalive_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         // CANCEL-SAFETY: When one branch of tokio::select! completes, all other
         // futures are dropped (not paused). Any async fn polled here must store
         // its state on `self`, not in local variables, so it can resume correctly
@@ -396,6 +402,29 @@ impl App {
                         self.handle_pending_effect(pending).await;
                         // Ensure UI is updated after handling effects (especially for background agent approvals)
                         self.draw();
+                    }
+                }
+                // Cache keep-alive: send minimal ping to refresh Anthropic prompt cache TTL
+                _ = keepalive_tick.tick() => {
+                    if let Some(agent_mutex) = self.agents.primary() {
+                        let mut agent = agent_mutex.lock().await;
+                        if agent.needs_cache_keepalive() {
+                            match agent.send_cache_keepalive().await {
+                                Ok(usage) => {
+                                    if usage.cache_read_tokens > 0 {
+                                        tracing::info!(
+                                            "Cache keep-alive refreshed {} cached tokens",
+                                            usage.cache_read_tokens
+                                        );
+                                    } else {
+                                        tracing::debug!("Cache keep-alive sent (no cached tokens in response)");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!("Cache keep-alive failed: {}", e);
+                                }
+                            }
+                        }
                     }
                 }
             }
