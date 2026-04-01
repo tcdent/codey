@@ -44,12 +44,141 @@ enum ActionResult {
     Interrupt,
 }
 
-/// Input modes determine which keybindings are active
+/// Input modes determine which keybindings are active.
+/// Each variant encapsulates the valid actions for that state, and transition
+/// methods enforce that only valid state changes can occur.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InputMode {
+    /// User is idle — full input keybindings active
     Normal,
+    /// Agent is streaming/executing — only Esc (interrupt) active
     Streaming,
+    /// Waiting for tool approval — only y/Enter or n/Esc active
     ToolApproval,
+}
+
+impl InputMode {
+    /// Map a terminal event to an action based on the current input mode
+    fn map_event(&self, event: Event) -> Option<Action> {
+        match event {
+            Event::Key(key) => self.map_key(key),
+            Event::Paste(content) => Some(Action::Paste(content)),
+            Event::Resize(w, h) => Some(Action::Resize(w, h)),
+            _ => None,
+        }
+    }
+
+    /// Map a key event to an action based on the current input mode
+    fn map_key(&self, key: KeyEvent) -> Option<Action> {
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+        match self {
+            InputMode::Normal => Self::map_key_normal(key),
+            InputMode::Streaming => Self::map_key_streaming(key),
+            InputMode::ToolApproval => Self::map_key_tool_approval(key),
+        }
+    }
+
+    fn map_key_normal(key: KeyEvent) -> Option<Action> {
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return match key.code {
+                KeyCode::Char('c') => Some(Action::Quit),
+                _ => None,
+            };
+        }
+
+        match key.code {
+            KeyCode::Char(c) => Some(Action::InsertChar(c)),
+            KeyCode::Backspace => Some(Action::DeleteBack),
+            KeyCode::Left => Some(Action::CursorLeft),
+            KeyCode::Right => Some(Action::CursorRight),
+            KeyCode::Home => Some(Action::CursorHome),
+            KeyCode::End => Some(Action::CursorEnd),
+            KeyCode::Enter if shift || alt => Some(Action::InsertNewline),
+            KeyCode::Enter => Some(Action::Submit),
+            KeyCode::Esc => Some(Action::ClearInput),
+            KeyCode::Up => Some(Action::HistoryPrev),
+            KeyCode::Down => Some(Action::HistoryNext),
+            KeyCode::Tab => Some(Action::TabComplete),
+            _ => None,
+        }
+    }
+
+    fn map_key_streaming(key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Esc => Some(Action::Interrupt),
+            _ => Self::map_key_normal(key),
+        }
+    }
+
+    fn map_key_tool_approval(key: KeyEvent) -> Option<Action> {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => Some(Action::ApproveTool),
+            KeyCode::Char('n') | KeyCode::Esc => Some(Action::DenyTool),
+            _ => None,
+        }
+    }
+
+    // -- State transitions --
+
+    /// Enter streaming mode when the user submits a message (Normal → Streaming)
+    fn begin_streaming(&mut self) {
+        debug_assert!(
+            matches!(self, InputMode::Normal),
+            "begin_streaming: expected Normal, was {:?}",
+            self
+        );
+        *self = InputMode::Streaming;
+    }
+
+    /// Agent finished or errored — return to idle (Streaming → Normal)
+    fn finish_streaming(&mut self) {
+        debug_assert!(
+            matches!(self, InputMode::Streaming),
+            "finish_streaming: expected Streaming, was {:?}",
+            self
+        );
+        *self = InputMode::Normal;
+    }
+
+    /// A tool needs user approval (Streaming → ToolApproval)
+    fn await_tool_approval(&mut self) {
+        debug_assert!(
+            matches!(self, InputMode::Streaming),
+            "await_tool_approval: expected Streaming, was {:?}",
+            self
+        );
+        *self = InputMode::ToolApproval;
+    }
+
+    /// Tool decided or completed, resume streaming (ToolApproval|Streaming → Streaming)
+    fn resume_streaming(&mut self) {
+        debug_assert!(
+            matches!(self, InputMode::ToolApproval | InputMode::Streaming),
+            "resume_streaming: expected ToolApproval or Streaming, was {:?}",
+            self
+        );
+        *self = InputMode::Streaming;
+    }
+
+    /// Cancel everything and return to idle (any state → Normal)
+    fn reset(&mut self) {
+        *self = InputMode::Normal;
+    }
+
+    /// Whether the app is idle and can accept new input / process notifications
+    fn is_idle(&self) -> bool {
+        matches!(self, InputMode::Normal)
+    }
+
+    /// Whether the app is busy (streaming or awaiting approval)
+    fn is_busy(&self) -> bool {
+        !self.is_idle()
+    }
 }
 
 /// Actions that can be triggered by terminal events
@@ -78,79 +207,6 @@ enum Action {
     // Tool approval
     ApproveTool,
     DenyTool,
-}
-
-/// Map a terminal event to an action based on the current input mode
-fn map_event(mode: InputMode, event: Event) -> Option<Action> {
-    match event {
-        Event::Key(key) => map_key(mode, key),
-        Event::Paste(content) => Some(Action::Paste(content)),
-        Event::Resize(w, h) => Some(Action::Resize(w, h)),
-        _ => None,
-    }
-}
-
-/// Map a key event to an action based on the current input mode
-fn map_key(mode: InputMode, key: KeyEvent) -> Option<Action> {
-    // Only handle key press events, not release or repeat
-    if key.kind != KeyEventKind::Press {
-        return None;
-    }
-
-    match mode {
-        InputMode::Normal => map_key_normal(key),
-        InputMode::Streaming => map_key_streaming(key),
-        InputMode::ToolApproval => map_key_tool_approval(key),
-    }
-}
-
-/// Keybindings for normal input mode
-fn map_key_normal(key: KeyEvent) -> Option<Action> {
-    // With REPORT_ALTERNATE_KEYS, crossterm gives us the shifted character directly
-    // (e.g., '!' instead of '1' with SHIFT) and clears the SHIFT modifier.
-    // We only need to check modifiers for special key combos.
-    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
-        return match key.code {
-            KeyCode::Char('c') => Some(Action::Quit),
-            _ => None,
-        };
-    }
-
-    match key.code {
-        KeyCode::Char(c) => Some(Action::InsertChar(c)),
-        KeyCode::Backspace => Some(Action::DeleteBack),
-        KeyCode::Left => Some(Action::CursorLeft),
-        KeyCode::Right => Some(Action::CursorRight),
-        KeyCode::Home => Some(Action::CursorHome),
-        KeyCode::End => Some(Action::CursorEnd),
-        KeyCode::Enter if shift || alt => Some(Action::InsertNewline),
-        KeyCode::Enter => Some(Action::Submit),
-        KeyCode::Esc => Some(Action::ClearInput),
-        KeyCode::Up => Some(Action::HistoryPrev),
-        KeyCode::Down => Some(Action::HistoryNext),
-        KeyCode::Tab => Some(Action::TabComplete),
-        _ => None,
-    }
-}
-
-/// Keybindings for streaming input mode
-fn map_key_streaming(key: KeyEvent) -> Option<Action> {
-    match key.code {
-        KeyCode::Esc => Some(Action::Interrupt),
-        _ => map_key_normal(key),
-    }
-}
-
-/// Keybindings for tool approval mode
-fn map_key_tool_approval(key: KeyEvent) -> Option<Action> {
-    match key.code {
-        KeyCode::Char('y') | KeyCode::Enter => Some(Action::ApproveTool),
-        KeyCode::Char('n') | KeyCode::Esc => Some(Action::DenyTool),
-        _ => None,
-    }
 }
 
 /// Application state
@@ -386,7 +442,7 @@ impl App {
                     self.handle_tool_event(tool_event).await?;
                 }
                 // Handle notifications when in normal input mode
-                _ = std::future::ready(()), if self.input_mode == InputMode::Normal && !self.notifications.is_empty() => {
+                _ = std::future::ready(()), if self.input_mode.is_idle() && !self.notifications.is_empty() => {
                     let notifications = self.notifications.drain_all();
                     self.handle_notifications(notifications).await?;
                 }
@@ -432,7 +488,7 @@ impl App {
         if let Err(e) = self.chat.transcript.save() {
             tracing::error!("Failed to save transcript on cancel: {}", e);
         }
-        self.input_mode = InputMode::Normal;
+        self.input_mode.reset();
         Ok(())
     }
 
@@ -477,7 +533,7 @@ impl App {
             model_icon,
             context_tokens,
             self.tool_executor.running_background_count() + self.agents.running_background_count(),
-            self.input_mode != InputMode::Normal,
+            self.input_mode.is_busy(),
         );
         let alert = self.alert.clone();
 
@@ -593,7 +649,7 @@ impl App {
         // If no more acknowledged approvals, switch mode
         // (next unacknowledged approval will be handled by polling)
         if !self.effects.has_active_approval() {
-            self.input_mode = InputMode::Streaming;
+            self.input_mode.resume_streaming();
         }
 
         self.chat.render(&mut self.terminal);
@@ -670,7 +726,7 @@ impl App {
             },
         };
 
-        let Some(action) = map_event(self.input_mode, event) else {
+        let Some(action) = self.input_mode.map_event(event) else {
             return Ok(());
         };
 
@@ -844,7 +900,7 @@ impl App {
                     .send_request(&combined_content, RequestMode::Normal);
             }
             self.chat.begin_turn(Role::Assistant, &mut self.terminal);
-            self.input_mode = InputMode::Streaming;
+            self.input_mode.begin_streaming();
         } else if has_compaction {
             // Handle compaction only if no messages (compaction gets its own request)
             if let Some(agent_mutex) = self.agents.primary() {
@@ -854,7 +910,7 @@ impl App {
                     .send_request(COMPACTION_PROMPT, RequestMode::Compaction);
             }
             self.chat.begin_turn(Role::Assistant, &mut self.terminal);
-            self.input_mode = InputMode::Streaming;
+            self.input_mode.begin_streaming();
         }
 
         self.chat.render(&mut self.terminal);
@@ -961,7 +1017,7 @@ impl App {
 
                 // Tool is done - only switch to streaming if no more approvals pending
                 if !self.effects.has_pending_approvals() {
-                    self.input_mode = InputMode::Streaming;
+                    self.input_mode.resume_streaming();
                 }
 
                 // Render update
@@ -990,7 +1046,7 @@ impl App {
 
                 // Tool is done - only switch to streaming if no more approvals pending
                 if !self.effects.has_pending_approvals() {
-                    self.input_mode = InputMode::Streaming;
+                    self.input_mode.resume_streaming();
                 }
 
                 // Render update
@@ -1099,7 +1155,7 @@ impl App {
             },
             AgentStep::Finished { usage } => {
                 if is_primary {
-                    self.input_mode = InputMode::Normal;
+                    self.input_mode.finish_streaming();
 
                     // Handle compaction completion
                     // TODO something more robust than checking active block type
@@ -1176,7 +1232,7 @@ impl App {
                 if let Err(e) = self.chat.transcript.save() {
                     tracing::error!("Failed to save transcript on error: {}", e);
                 }
-                self.input_mode = InputMode::Normal;
+                self.input_mode.reset();
 
                 let alert_msg = if let Some(start) = msg.find('{') {
                     serde_json::from_str::<serde_json::Value>(&msg[start..])
@@ -1301,7 +1357,7 @@ impl App {
                         tracing::error!("Failed to save transcript before tool approval: {}", e);
                     }
                 }
-                self.input_mode = InputMode::ToolApproval;
+                self.input_mode.await_tool_approval();
                 self.draw();
             },
         }
