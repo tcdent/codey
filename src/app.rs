@@ -352,8 +352,8 @@ impl App {
         if self.continue_session {
             agent.restore_from_transcript(&self.chat.transcript);
         } else {
-            self.chat
-                .add_turn(Role::Assistant, TextBlock::pending(&welcome_message(&agent_name)));
+            // self.chat
+            //     .add_turn(Role::Assistant, TextBlock::pending(&welcome_message(&agent_name)));
         }
         self.agents.register(agent);
 
@@ -555,6 +555,21 @@ impl App {
         self.notifications.push(Notification::Compaction { block_id });
     }
 
+    /// Set input mode, but never clobber an active tool approval.
+    /// If an approval is currently being shown to the user, the mode change is suppressed.
+    fn set_input_mode(&mut self, mode: InputMode) {
+        if self.input_mode == InputMode::ToolApproval && mode != InputMode::ToolApproval {
+            if self.effects.has_active_approval() {
+                tracing::debug!(
+                    "Suppressed mode change to {:?} — approval is active",
+                    mode
+                );
+                return;
+            }
+        }
+        self.input_mode = mode;
+    }
+
     /// Execute a tool decision (approve/deny) for the currently active tool
     async fn decide_pending_tool(&mut self, decision: ToolDecision) {
         tracing::debug!("decide_pending_tool: decision={:?}", decision);
@@ -593,7 +608,7 @@ impl App {
         // If no more acknowledged approvals, switch mode
         // (next unacknowledged approval will be handled by polling)
         if !self.effects.has_active_approval() {
-            self.input_mode = InputMode::Streaming;
+            self.set_input_mode(InputMode::Streaming);
         }
 
         self.chat.render(&mut self.terminal);
@@ -844,7 +859,7 @@ impl App {
                     .send_request(&combined_content, RequestMode::Normal);
             }
             self.chat.begin_turn(Role::Assistant, &mut self.terminal);
-            self.input_mode = InputMode::Streaming;
+            self.set_input_mode(InputMode::Streaming);
         } else if has_compaction {
             // Handle compaction only if no messages (compaction gets its own request)
             if let Some(agent_mutex) = self.agents.primary() {
@@ -854,7 +869,7 @@ impl App {
                     .send_request(COMPACTION_PROMPT, RequestMode::Compaction);
             }
             self.chat.begin_turn(Role::Assistant, &mut self.terminal);
-            self.input_mode = InputMode::Streaming;
+            self.set_input_mode(InputMode::Streaming);
         }
 
         self.chat.render(&mut self.terminal);
@@ -961,7 +976,7 @@ impl App {
 
                 // Tool is done - only switch to streaming if no more approvals pending
                 if !self.effects.has_pending_approvals() {
-                    self.input_mode = InputMode::Streaming;
+                    self.set_input_mode(InputMode::Streaming);
                 }
 
                 // Render update
@@ -990,7 +1005,7 @@ impl App {
 
                 // Tool is done - only switch to streaming if no more approvals pending
                 if !self.effects.has_pending_approvals() {
-                    self.input_mode = InputMode::Streaming;
+                    self.set_input_mode(InputMode::Streaming);
                 }
 
                 // Render update
@@ -1099,7 +1114,7 @@ impl App {
             },
             AgentStep::Finished { usage } => {
                 if is_primary {
-                    self.input_mode = InputMode::Normal;
+                    self.set_input_mode(InputMode::Normal);
 
                     // Handle compaction completion
                     // TODO something more robust than checking active block type
@@ -1132,6 +1147,8 @@ impl App {
                         if let Err(e) = self.chat.transcript.save() {
                             tracing::error!("Failed to save transcript: {}", e);
                         }
+                        self.chat.render(&mut self.terminal);
+                        self.draw();
 
                         // Check if compaction is needed
                         if usage.context_tokens >= self.config.general.compaction_threshold {
@@ -1176,7 +1193,7 @@ impl App {
                 if let Err(e) = self.chat.transcript.save() {
                     tracing::error!("Failed to save transcript on error: {}", e);
                 }
-                self.input_mode = InputMode::Normal;
+                self.set_input_mode(InputMode::Normal);
 
                 let alert_msg = if let Some(start) = msg.find('{') {
                     serde_json::from_str::<serde_json::Value>(&msg[start..])

@@ -50,6 +50,7 @@ pub const CORRECTIONS_FILENAME: &str = "corrections.json";
 ///     max_retries: 5,
 ///     compaction_thinking_budget: 8_000,
 ///     fast_mode: false,
+///     ..Default::default()
 /// };
 /// ```
 #[derive(Debug, Clone)]
@@ -62,6 +63,21 @@ pub struct AgentRuntimeConfig {
     /// Enable fast mode (research preview) for lower-latency responses.
     /// Only effective with opus-4-6 models.
     pub fast_mode: bool,
+
+    // ── OAuth billing fields (from [auth] config) ──────────────────────
+
+    /// xxHash64 seed for computing the `cch` body hash.
+    /// Required for OAuth Opus 4.6 requests (both normal and fast mode).
+    pub cch_seed: Option<u64>,
+    /// Salt for computing the `cc_version` suffix.
+    /// Required for OAuth Opus 4.6 requests (both normal and fast mode).
+    pub cc_version_salt: Option<String>,
+    /// Persistent user identity (random 32-byte hex string).
+    /// Used in `metadata.user_id` for billing attribution.
+    pub user_id: Option<String>,
+    /// Account UUID from the OAuth profile.
+    /// Used in `metadata.user_id` for billing attribution.
+    pub account_uuid: Option<String>,
 }
 
 impl Default for AgentRuntimeConfig {
@@ -73,6 +89,10 @@ impl Default for AgentRuntimeConfig {
             max_retries: 5,
             compaction_thinking_budget: 8_000,
             fast_mode: false,
+            cch_seed: None,
+            cc_version_salt: None,
+            user_id: None,
+            account_uuid: None,
         }
     }
 }
@@ -92,6 +112,10 @@ impl AgentRuntimeConfig {
             max_retries: config.general.max_retries,
             compaction_thinking_budget: config.general.compaction_thinking_budget,
             fast_mode: config.agents.foreground.fast_mode,
+            cch_seed: config.anthropic.cch_seed,
+            cc_version_salt: config.anthropic.cc_version_salt.clone(),
+            user_id: config.anthropic.user_id.clone(),
+            account_uuid: config.anthropic.account_uuid.clone(),
         }
     }
 
@@ -104,6 +128,10 @@ impl AgentRuntimeConfig {
             max_retries: config.general.max_retries,
             compaction_thinking_budget: config.general.compaction_thinking_budget,
             fast_mode: config.agents.background.fast_mode,
+            cch_seed: config.anthropic.cch_seed,
+            cc_version_salt: config.anthropic.cc_version_salt.clone(),
+            user_id: config.anthropic.user_id.clone(),
+            account_uuid: config.anthropic.account_uuid.clone(),
         }
     }
 }
@@ -117,6 +145,7 @@ pub struct Config {
     pub agent: AgentPersonaConfig,
     pub agents: AgentsConfig,
     pub auth: AuthConfig,
+    pub anthropic: AnthropicConfig,
     pub ui: UiConfig,
     pub tools: ToolsConfig,
     pub ide: IdeConfig,
@@ -131,6 +160,7 @@ impl Default for Config {
             agent: AgentPersonaConfig::default(),
             agents: AgentsConfig::default(),
             auth: AuthConfig::default(),
+            anthropic: AnthropicConfig::default(),
             ui: UiConfig::default(),
             tools: ToolsConfig::default(),
             ide: IdeConfig::default(),
@@ -282,6 +312,36 @@ impl Default for AuthConfig {
 pub enum AuthMethod {
     OAuth,
     ApiKey,
+}
+
+/// Anthropic-specific configuration for OAuth billing and identity.
+///
+/// These values are required for OAuth Opus 4.6 requests (both normal
+/// and fast mode). They MUST NOT be hardcoded in source.
+///
+/// # Example config.toml
+///
+/// ```toml
+/// [anthropic]
+/// cch_seed = 0x6e52736ac806831e
+/// cc_version_salt = "59cf53e54c78"
+/// user_id = "a1b2c3d4..."  # openssl rand -hex 32
+/// account_uuid = "your-account-uuid"
+/// ```
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AnthropicConfig {
+    /// xxHash64 seed for the `cch` body hash.
+    /// Hex literal supported in TOML: `0x6e52...`
+    pub cch_seed: Option<u64>,
+    /// Salt for the `cc_version` suffix.
+    pub cc_version_salt: Option<String>,
+    /// Persistent user identity (random 32-byte hex string).
+    /// Generate once with: `openssl rand -hex 32`
+    pub user_id: Option<String>,
+    /// Account UUID from the Anthropic OAuth profile.
+    pub account_uuid: Option<String>,
 }
 
 #[cfg(feature = "cli")]
@@ -573,5 +633,57 @@ name = "Assistant"
         assert_eq!(config.agent.name, Some("Assistant".to_string()));
         assert!(config.agent.system_prompt.is_none());
         assert_eq!(config.agent.name(), "Assistant");
+    }
+
+    #[test]
+    fn test_parse_anthropic_config() {
+        let toml = r#"
+[anthropic]
+cch_seed = 0x6e52736ac806831e
+cc_version_salt = "59cf53e54c78"
+user_id = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+account_uuid = "12345678-abcd-ef01-2345-6789abcdef01"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.anthropic.cch_seed, Some(0x6e52736ac806831e));
+        assert_eq!(config.anthropic.cc_version_salt.as_deref(), Some("59cf53e54c78"));
+        assert_eq!(
+            config.anthropic.user_id.as_deref(),
+            Some("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2")
+        );
+        assert_eq!(
+            config.anthropic.account_uuid.as_deref(),
+            Some("12345678-abcd-ef01-2345-6789abcdef01")
+        );
+    }
+
+    #[test]
+    fn test_anthropic_config_defaults_to_none() {
+        let toml = "";
+        let config: Config = toml::from_str(toml).unwrap();
+        assert!(config.anthropic.cch_seed.is_none());
+        assert!(config.anthropic.cc_version_salt.is_none());
+        assert!(config.anthropic.user_id.is_none());
+        assert!(config.anthropic.account_uuid.is_none());
+    }
+
+    #[test]
+    fn test_anthropic_config_flows_to_runtime() {
+        let toml = r#"
+[anthropic]
+cch_seed = 42
+cc_version_salt = "test_salt"
+user_id = "test_user"
+account_uuid = "test_acct"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let runtime = AgentRuntimeConfig::foreground(&config);
+        assert_eq!(runtime.cch_seed, Some(42));
+        assert_eq!(runtime.cc_version_salt.as_deref(), Some("test_salt"));
+        assert_eq!(runtime.user_id.as_deref(), Some("test_user"));
+        assert_eq!(runtime.account_uuid.as_deref(), Some("test_acct"));
+
+        let bg_runtime = AgentRuntimeConfig::background(&config);
+        assert_eq!(bg_runtime.cch_seed, Some(42));
     }
 }

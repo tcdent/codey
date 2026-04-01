@@ -613,9 +613,9 @@ impl Widget for InputBoxWidget<'_> {
         
         // Build model title with background indicator
         let model_title = if self.background_tasks > 0 {
-            format!(" * {}{} ", self.model_icon, self.model)
+            format!(" * {}{} ", self.model, self.model_icon)
         } else {
-            format!(" {}{} ", self.model_icon, self.model)
+            format!(" {}{} ", self.model, self.model_icon)
         };
 
         let block = Block::default()
