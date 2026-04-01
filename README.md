@@ -92,6 +92,17 @@ theme = "base16-ocean.dark"
 
 Foreground and background agents are configured independently. Both default to `claude-opus-4-6` when not specified. See `config.example.toml` for all available options.
 
+### One Million Token Context Window
+
+Claude Opus 4.6 and Sonnet 4.6 natively support one million token context windows with no additional API configuration required. To take advantage of this, increase the `compaction_threshold` in your config so that context is not compacted prematurely:
+
+```toml
+[general]
+compaction_threshold = 800000  # default: 192000
+```
+
+The default threshold of 192,000 tokens is tuned for the 200K context window of legacy models. When using Opus 4.6 or Sonnet 4.6, raising this value allows Codey to retain significantly more conversation context before triggering compaction.
+
 ## Agent Persona
 
 Customize the agent's name and personality:
