@@ -119,14 +119,25 @@ pub enum AgentStep {
     Error(String),
 }
 
-/// Internal state for the agent stream
+/// Internal state for the agent stream.
+///
+/// State-specific data is carried inside each variant, enforcing at compile time
+/// that fields like the active stream or pending tool responses can only be
+/// accessed when the agent is in the corresponding state.
 enum StreamState {
     /// Need to make a new chat API request
     NeedsChatRequest,
-    /// Currently streaming response from API (stream stored separately for cancel-safety)
-    Streaming,
+    /// Currently streaming response from API
+    Streaming {
+        stream: futures::stream::BoxStream<'static, Result<ChatStreamEvent, genai::Error>>,
+    },
     /// All tool requests emitted, waiting for decisions
-    AwaitingToolDecision,
+    AwaitingToolDecision {
+        /// The tool calls the model requested (used for count-checking and message building)
+        pending_tool_calls: Vec<GenaiToolCall>,
+        /// Tool results submitted so far
+        tool_responses: Vec<ToolResponse>,
+    },
 }
 
 /// Request mode controlling agent behavior for a single request
@@ -182,16 +193,13 @@ pub struct Agent {
 
     // Streaming state (Some when actively processing)
     state: Option<StreamState>,
-    /// Active response stream (stored separately from state for cancel-safety)
-    active_stream:
-        Option<futures::stream::BoxStream<'static, Result<ChatStreamEvent, genai::Error>>>,
     mode: RequestMode,
 
-    // Accumulated during streaming, consumed when tools complete
+    // Accumulated during streaming, consumed when tools complete or stream ends.
+    // These span multiple states (built during Streaming, read during AwaitingToolDecision
+    // completion), so they live on Agent rather than inside a single variant.
     streaming_text: String,
-    streaming_tool_calls: Vec<GenaiToolCall>,
     streaming_thinking: Vec<Thinking>,
-    tool_responses: Vec<ToolResponse>,
 
     /// When set, fast mode is cooling down until this instant.
     /// During cooldown, the fast mode beta header is omitted from requests.
@@ -222,14 +230,11 @@ impl Agent {
 
             // Streaming state starts empty
             state: None,
-            active_stream: None,
             mode: RequestMode::Normal,
 
             // Accumulated during streaming
             streaming_text: String::new(),
-            streaming_tool_calls: Vec::new(),
             streaming_thinking: Vec::new(),
-            tool_responses: Vec::new(),
 
             fast_mode_cooldown_until: None,
             retry_attempt: 0,
@@ -259,14 +264,11 @@ impl Agent {
 
             // Streaming state starts empty
             state: None,
-            active_stream: None,
             mode: RequestMode::Normal,
 
             // Accumulated during streaming
             streaming_text: String::new(),
-            streaming_tool_calls: Vec::new(),
             streaming_thinking: Vec::new(),
-            tool_responses: Vec::new(),
 
             fast_mode_cooldown_until: None,
             retry_attempt: 0,
@@ -393,11 +395,11 @@ impl Agent {
         self.state = Some(StreamState::NeedsChatRequest);
     }
 
-    /// Cancel the current streaming operation
+    /// Cancel the current streaming operation.
+    /// Dropping the state also drops any active stream or pending tool data.
     pub fn cancel(&mut self) {
         debug!("Agent::cancel");
         self.state = None;
-        self.active_stream = None;
     }
 
     /// Refresh OAuth token if expired. Returns true if refresh was needed and succeeded.
@@ -671,8 +673,7 @@ impl Agent {
     /// the agent remains in a valid state and can be polled again.
     pub async fn next(&mut self) -> Option<AgentStep> {
         loop {
-            // Check state without taking it (cancel-safe)
-            match self.state.as_ref()? {
+            match self.state.as_mut()? {
                 StreamState::NeedsChatRequest => {
                     debug!("Agent state: NeedsChatRequest, clearing streaming data");
 
@@ -686,18 +687,16 @@ impl Agent {
                     // Refresh dynamic system prompt before each request
                     self.refresh_system_prompt();
 
-                    // Clear accumulated streaming data for new request
+                    // Clear accumulated cross-state data for new request
                     self.streaming_text.clear();
-                    self.streaming_tool_calls.clear();
                     self.streaming_thinking.clear();
-                    self.tool_responses.clear();
 
                     match self.exec_chat_with_retry().await {
                         Ok(response) => {
                             debug!("Agent state: NeedsChatRequest -> Streaming");
-                            // Store stream separately and update state
-                            self.active_stream = Some(Box::pin(response.stream));
-                            self.state = Some(StreamState::Streaming);
+                            self.state = Some(StreamState::Streaming {
+                                stream: Box::pin(response.stream),
+                            });
                             // Continue to process streaming state
                         },
                         Err(step) => {
@@ -710,10 +709,7 @@ impl Agent {
                     }
                 },
 
-                StreamState::Streaming => {
-                    // Get the stream (must exist if we're in Streaming state)
-                    let stream = self.active_stream.as_mut()?;
-
+                StreamState::Streaming { stream } => {
                     match stream.next().await {
                         Some(Ok(event)) => match event {
                             ChatStreamEvent::Start => {
@@ -722,7 +718,6 @@ impl Agent {
                             },
                             ChatStreamEvent::Chunk(chunk) => {
                                 self.streaming_text.push_str(&chunk.content);
-                                // State remains Streaming, stream remains in active_stream
                                 return Some(match self.mode {
                                     RequestMode::Compaction => {
                                         AgentStep::CompactionDelta(chunk.content)
@@ -735,7 +730,6 @@ impl Agent {
                                 // Continue polling
                             },
                             ChatStreamEvent::ReasoningChunk(chunk) => {
-                                // State remains Streaming
                                 return Some(AgentStep::ThinkingDelta(chunk.content));
                             },
                             ChatStreamEvent::ThoughtSignatureChunk(_) => {
@@ -753,16 +747,32 @@ impl Agent {
                                 if let Some(captured) = end.captured_thinking_blocks.take() {
                                     self.streaming_thinking = captured;
                                 }
-                                if let Some(captured) = end.captured_into_tool_calls() {
-                                    self.streaming_tool_calls = captured;
+                                // Capture tool calls from the End event; used below
+                                // when the stream closes (None branch).
+                                let streaming_tool_calls = end
+                                    .captured_into_tool_calls()
+                                    .unwrap_or_default();
+
+                                if !streaming_tool_calls.is_empty() {
+                                    // Stream is done and we have tool calls — transition
+                                    // directly to AwaitingToolDecision.
+                                    let tool_calls: Vec<ToolCall> = streaming_tool_calls
+                                        .iter()
+                                        .map(ToolCall::from)
+                                        .collect();
+                                    self.state = Some(StreamState::AwaitingToolDecision {
+                                        pending_tool_calls: streaming_tool_calls,
+                                        tool_responses: Vec::new(),
+                                    });
+                                    return Some(AgentStep::ToolRequest(tool_calls));
                                 }
-                                // Continue to process stream end
+                                // No tool calls — continue polling; the stream will
+                                // yield None next and we'll handle finish there.
                             },
                         },
                         Some(Err(e)) => {
                             let err = format!("{:#}", e);
                             error!("Stream error (attempt {}): {}", self.retry_attempt, err);
-                            self.active_stream = None;
 
                             self.retry_attempt += 1;
                             if self.retry_attempt >= self.config.max_retries {
@@ -781,70 +791,54 @@ impl Agent {
                         },
                         None => {
                             debug!("Agent: stream returned None (closed)");
-                            // Stream ended, clean up stream
-                            self.active_stream = None;
+                            // Stream ended with no (remaining) tool calls — finish.
+                            match self.mode {
+                                RequestMode::Compaction => {
+                                    self.reset_with_summary(&self.streaming_text.clone())
+                                },
+                                RequestMode::Normal => {
+                                    let has_content = !self.streaming_thinking.is_empty()
+                                        || !self.streaming_text.is_empty();
+                                    if has_content {
+                                        let mut msg_content = MessageContent::default();
 
-                            if self.streaming_tool_calls.is_empty() {
-                                match self.mode {
-                                    RequestMode::Compaction => {
-                                        self.reset_with_summary(&self.streaming_text.clone())
-                                    },
-                                    RequestMode::Normal => {
-                                        // Build message with thinking blocks + text (same pattern as tool use)
-                                        // Only push if there's actual content
-                                        let has_content = !self.streaming_thinking.is_empty()
-                                            || !self.streaming_text.is_empty();
-                                        if has_content {
-                                            let mut msg_content = MessageContent::default();
-
-                                            // Add thinking blocks first
-                                            for thinking in &self.streaming_thinking {
-                                                msg_content = msg_content.append(
-                                                    ContentPart::Thinking(thinking.clone()),
-                                                );
-                                            }
-
-                                            // Add text if non-empty
-                                            if !self.streaming_text.is_empty() {
-                                                msg_content = msg_content.append(
-                                                    ContentPart::Text(self.streaming_text.clone()),
-                                                );
-                                            }
-
-                                            self.messages.push(ChatMessage {
-                                                role: ChatRole::Assistant,
-                                                content: msg_content,
-                                                options: None,
-                                            });
-                                        } else {
-                                            debug!(
-                                                "Agent: no content to push (no thinking, no text)"
+                                        for thinking in &self.streaming_thinking {
+                                            msg_content = msg_content.append(
+                                                ContentPart::Thinking(thinking.clone()),
                                             );
                                         }
-                                    },
-                                }
-                                debug!(
-                                    "Agent state: Streaming -> None (Finished), messages={}",
-                                    self.messages.len()
-                                );
-                                self.state = None;
-                                return Some(AgentStep::Finished {
-                                    usage: self.total_usage,
-                                });
-                            }
 
-                            let tool_calls: Vec<ToolCall> = self
-                                .streaming_tool_calls
-                                .iter()
-                                .map(ToolCall::from)
-                                .collect();
-                            self.state = Some(StreamState::AwaitingToolDecision);
-                            return Some(AgentStep::ToolRequest(tool_calls));
+                                        if !self.streaming_text.is_empty() {
+                                            msg_content = msg_content.append(
+                                                ContentPart::Text(self.streaming_text.clone()),
+                                            );
+                                        }
+
+                                        self.messages.push(ChatMessage {
+                                            role: ChatRole::Assistant,
+                                            content: msg_content,
+                                            options: None,
+                                        });
+                                    } else {
+                                        debug!(
+                                            "Agent: no content to push (no thinking, no text)"
+                                        );
+                                    }
+                                },
+                            }
+                            debug!(
+                                "Agent state: Streaming -> None (Finished), messages={}",
+                                self.messages.len()
+                            );
+                            self.state = None;
+                            return Some(AgentStep::Finished {
+                                usage: self.total_usage,
+                            });
                         },
                     }
                 },
 
-                StreamState::AwaitingToolDecision => {
+                StreamState::AwaitingToolDecision { .. } => {
                     // Blocked waiting for tool results
                     return None;
                 },
@@ -852,78 +846,83 @@ impl Agent {
         }
     }
 
-    /// Submit a tool execution result
-    /// Called by App after ToolExecutor runs the tool
+    /// Submit a tool execution result.
+    ///
+    /// Called by App after ToolExecutor runs the tool. The pending tool calls
+    /// and accumulated responses live inside the `AwaitingToolDecision` variant,
+    /// so the compiler ensures this data is only accessible in the correct state.
     pub fn submit_tool_result(&mut self, call_id: &str, content: String) {
         debug!("Agent: submit_tool_result call_id={}", call_id);
 
-        let state_name = match &self.state {
-            Some(StreamState::NeedsChatRequest) => "NeedsChatRequest",
-            Some(StreamState::Streaming { .. }) => "Streaming",
-            Some(StreamState::AwaitingToolDecision) => "AwaitingToolDecision",
-            None => "None",
+        // Extract the mutable state data from the AwaitingToolDecision variant.
+        // Any other state is a caller bug — warn and bail.
+        let (pending_tool_calls, tool_responses) = match &mut self.state {
+            Some(StreamState::AwaitingToolDecision {
+                pending_tool_calls,
+                tool_responses,
+            }) => (pending_tool_calls, tool_responses),
+            other => {
+                let state_name = match other {
+                    Some(StreamState::NeedsChatRequest) => "NeedsChatRequest",
+                    Some(StreamState::Streaming { .. }) => "Streaming",
+                    Some(StreamState::AwaitingToolDecision { .. }) => unreachable!(),
+                    None => "None",
+                };
+                tracing::warn!(
+                    "submit_tool_result called in unexpected state: {}",
+                    state_name
+                );
+                return;
+            },
         };
-        if !matches!(self.state, Some(StreamState::AwaitingToolDecision)) {
-            tracing::warn!(
-                "submit_tool_result called in unexpected state: {}",
-                state_name
-            );
-        }
 
         // Store the response
-        self.tool_responses
-            .push(ToolResponse::new(call_id.to_string(), content));
-
-        // Check if all tools have been decided
-        // Guard: streaming_tool_calls must be non-empty (otherwise we shouldn't be receiving results)
-        if self.streaming_tool_calls.is_empty() {
-            tracing::warn!("submit_tool_result called but no tool calls pending");
-            return;
-        }
+        tool_responses.push(ToolResponse::new(call_id.to_string(), content));
 
         debug!(
             "Agent: tool_responses={}/{}",
-            self.tool_responses.len(),
-            self.streaming_tool_calls.len()
+            tool_responses.len(),
+            pending_tool_calls.len()
         );
 
-        if self.tool_responses.len() >= self.streaming_tool_calls.len() {
+        if tool_responses.len() >= pending_tool_calls.len() {
             debug!(
                 "Agent: all tools complete, building message. thinking_blocks={}, text_len={}, tool_calls={}",
                 self.streaming_thinking.len(),
                 self.streaming_text.len(),
-                self.streaming_tool_calls.len()
+                pending_tool_calls.len()
             );
-            // All tools processed - build the assistant message
-            // Per Anthropic docs: thinking blocks must come first, then text/tool_use
+
+            // All tools processed — build the assistant message.
+            // Per Anthropic docs: thinking blocks must come first, then text/tool_use.
             let mut msg_content = MessageContent::default();
 
-            // Add thinking blocks first
             for thinking in &self.streaming_thinking {
                 msg_content = msg_content.append(ContentPart::Thinking(thinking.clone()));
             }
 
-            // Add text if non-empty
             if !self.streaming_text.is_empty() {
                 msg_content = msg_content.append(ContentPart::Text(self.streaming_text.clone()));
             }
 
-            // Add tool calls
-            for tc in &self.streaming_tool_calls {
+            for tc in pending_tool_calls.iter() {
                 msg_content = msg_content.append(ContentPart::ToolCall(tc.clone()));
             }
 
-            // Add assistant message
             self.messages.push(ChatMessage {
                 role: ChatRole::Assistant,
                 content: msg_content,
                 options: None,
             });
 
-            // Add tool responses
-            for response in std::mem::take(&mut self.tool_responses) {
-                debug!("Agent: adding tool response - call_id={}", response.call_id);
-                self.messages.push(ChatMessage::from(response));
+            // Take ownership of the tool responses by swapping the state.
+            // This consumes the AwaitingToolDecision data cleanly.
+            let old_state = self.state.take();
+            if let Some(StreamState::AwaitingToolDecision { tool_responses, .. }) = old_state {
+                for response in tool_responses {
+                    debug!("Agent: adding tool response - call_id={}", response.call_id);
+                    self.messages.push(ChatMessage::from(response));
+                }
             }
 
             debug!(
