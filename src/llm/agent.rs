@@ -119,12 +119,12 @@ pub enum AgentStep {
     Error(String),
 }
 
-/// Internal state for the agent stream.
+/// The current phase of the agent's request-response cycle.
 ///
-/// State-specific data is carried inside each variant, enforcing at compile time
+/// Phase-specific data is carried inside each variant, enforcing at compile time
 /// that fields like the active stream or pending tool responses can only be
-/// accessed when the agent is in the corresponding state.
-enum StreamState {
+/// accessed when the agent is in the corresponding phase.
+enum StreamPhase {
     /// Need to make a new chat API request
     NeedsChatRequest,
     /// Currently streaming response from API
@@ -138,6 +138,18 @@ enum StreamState {
         /// Tool results submitted so far
         tool_responses: Vec<ToolResponse>,
     },
+}
+
+/// Per-turn processing state that spans stream phases.
+///
+/// Created when a request begins (`send_request`), consumed on completion.
+/// Lives as a separate field from `StreamPhase` so the borrow checker allows
+/// `&mut self` method calls while the phase enum is being matched.
+struct TurnState {
+    mode: RequestMode,
+    text: String,
+    thinking: Vec<Thinking>,
+    retry_attempt: u32,
 }
 
 /// Request mode controlling agent behavior for a single request
@@ -178,36 +190,37 @@ impl RequestMode {
 /// Called before each LLM request to allow prompt content to change.
 pub type SystemPromptBuilder = Box<dyn Fn() -> String + Send + Sync>;
 
-/// Agent for handling conversations
+/// Agent for handling conversations.
+///
+/// Fields are organized by lifecycle:
+/// - **Configuration**: set at creation, rarely changes (`client`, `config`, `tools`, etc.)
+/// - **Conversation**: grows over the session (`messages`, `total_usage`)
+/// - **Active processing**: present only while handling a request (`phase`, `turn`)
+/// - **Cross-turn operational state**: spans multiple request cycles (`fast_mode_cooldown_until`)
 pub struct Agent {
+    // Configuration
     client: Client,
     config: AgentRuntimeConfig,
     tools: ToolRegistry,
-    messages: Vec<ChatMessage>,
     system_prompt: String,
-    total_usage: Usage,
-    /// OAuth credentials for Claude Max (if available)
-    oauth: Option<OAuthCredentials>,
-    /// Optional dynamic prompt builder - called before each request
     system_prompt_builder: Option<SystemPromptBuilder>,
+    oauth: Option<OAuthCredentials>,
 
-    // Streaming state (Some when actively processing)
-    state: Option<StreamState>,
-    mode: RequestMode,
+    // Conversation
+    messages: Vec<ChatMessage>,
+    total_usage: Usage,
 
-    // Accumulated during streaming, consumed when tools complete or stream ends.
-    // These span multiple states (built during Streaming, read during AwaitingToolDecision
-    // completion), so they live on Agent rather than inside a single variant.
-    streaming_text: String,
-    streaming_thinking: Vec<Thinking>,
+    // Active processing (both Some while handling a request, both None when idle).
+    // Split into two fields so the borrow checker allows &mut self method calls
+    // while matching on the phase enum.
+    phase: Option<StreamPhase>,
+    turn: Option<TurnState>,
+
+    /// Result text from the last completed turn, for `last_message()`.
+    last_result: Option<String>,
 
     /// When set, fast mode is cooling down until this instant.
-    /// During cooldown, the fast mode beta header is omitted from requests.
     fast_mode_cooldown_until: Option<Instant>,
-
-    /// Retry attempt counter, persists across calls to exec_chat_with_retry.
-    /// Reset on successful request or new user message.
-    retry_attempt: u32,
 }
 
 impl Agent {
@@ -224,20 +237,13 @@ impl Agent {
             tools,
             messages: vec![ChatMessage::system(system_prompt)],
             system_prompt: system_prompt.to_string(),
-            total_usage: Usage::default(),
-            oauth,
             system_prompt_builder: None,
-
-            // Streaming state starts empty
-            state: None,
-            mode: RequestMode::Normal,
-
-            // Accumulated during streaming
-            streaming_text: String::new(),
-            streaming_thinking: Vec::new(),
-
+            oauth,
+            total_usage: Usage::default(),
+            phase: None,
+            turn: None,
+            last_result: None,
             fast_mode_cooldown_until: None,
-            retry_attempt: 0,
         }
     }
 
@@ -258,20 +264,13 @@ impl Agent {
             tools,
             messages: vec![ChatMessage::system(&system_prompt)],
             system_prompt,
-            total_usage: Usage::default(),
-            oauth,
             system_prompt_builder: Some(prompt_builder),
-
-            // Streaming state starts empty
-            state: None,
-            mode: RequestMode::Normal,
-
-            // Accumulated during streaming
-            streaming_text: String::new(),
-            streaming_thinking: Vec::new(),
-
+            oauth,
+            total_usage: Usage::default(),
+            phase: None,
+            turn: None,
+            last_result: None,
             fast_mode_cooldown_until: None,
-            retry_attempt: 0,
         }
     }
 
@@ -386,20 +385,25 @@ impl Agent {
             .collect()
     }
 
-    /// Send a user message to the agent
-    /// Call next() repeatedly to get AgentSteps until None
+    /// Send a user message to the agent.
+    /// Call `next()` repeatedly to get `AgentStep`s until `None`.
     pub fn send_request(&mut self, user_input: &str, mode: RequestMode) {
         self.messages.push(ChatMessage::user(user_input));
-        self.mode = mode;
-        self.retry_attempt = 0;
-        self.state = Some(StreamState::NeedsChatRequest);
+        self.phase = Some(StreamPhase::NeedsChatRequest);
+        self.turn = Some(TurnState {
+            mode,
+            text: String::new(),
+            thinking: Vec::new(),
+            retry_attempt: 0,
+        });
     }
 
     /// Cancel the current streaming operation.
-    /// Dropping the state also drops any active stream or pending tool data.
+    /// Dropping the phase/turn also drops any active stream or pending tool data.
     pub fn cancel(&mut self) {
         debug!("Agent::cancel");
-        self.state = None;
+        self.phase = None;
+        self.turn = None;
     }
 
     /// Refresh OAuth token if expired. Returns true if refresh was needed and succeeded.
@@ -446,13 +450,9 @@ impl Agent {
     }
 
     /// Get the last assistant message text (for returning sub-agent results).
-    /// Returns the accumulated streaming text if present.
+    /// Returns the result text captured when the last turn completed.
     pub fn last_message(&self) -> Option<String> {
-        if self.streaming_text.is_empty() {
-            None
-        } else {
-            Some(self.streaming_text.clone())
-        }
+        self.last_result.clone()
     }
 
     /// Reset the agent with a new context after compaction
@@ -563,7 +563,8 @@ impl Agent {
         }
 
         let mut request = ChatRequest::new(messages);
-        let mode_opts = self.mode.options(&self.config);
+        let mode = self.turn.as_ref().expect("exec_chat_with_retry called without active turn").mode;
+        let mode_opts = mode.options(&self.config);
         if mode_opts.tools_enabled {
             request = request.with_tools(self.get_tools());
         }
@@ -619,7 +620,11 @@ impl Agent {
                 .with_reasoning_effort(ReasoningEffort::Budget(mode_opts.thinking_budget));
         }
 
-        self.retry_attempt += 1;
+        let turn = self.turn.as_mut().expect("exec_chat_with_retry called without active turn");
+        turn.retry_attempt += 1;
+        let attempt = turn.retry_attempt;
+        let max_retries = self.config.max_retries;
+
         match self
             .client
             .exec_chat_stream(&self.config.model, request.clone(), Some(&chat_options))
@@ -627,12 +632,12 @@ impl Agent {
         {
             Ok(resp) => {
                 info!("Chat request successful");
-                self.retry_attempt = 0;
+                self.turn.as_mut().unwrap().retry_attempt = 0;
                 Ok(resp)
             },
             Err(e) => {
                 let err = format!("{:#}", e);
-                error!("Chat request failed (attempt {}): {}", self.retry_attempt, err);
+                error!("Chat request failed (attempt {}): {}", attempt, err);
 
                 // If fast mode is active and we hit a rate limit or overloaded
                 // error, trigger cooldown and retry without the fast mode header.
@@ -643,15 +648,16 @@ impl Agent {
                     );
                     self.fast_mode_cooldown_until = Some(Instant::now() + FAST_MODE_COOLDOWN);
                     // Don't count fast mode fallback as a retry attempt
-                    self.retry_attempt -= 1;
+                    let turn = self.turn.as_mut().unwrap();
+                    turn.retry_attempt -= 1;
                     return Err(AgentStep::Retrying {
-                        attempt: self.retry_attempt,
+                        attempt: turn.retry_attempt,
                         error: format!("Fast mode rate limited, falling back to standard speed"),
                     });
                 }
 
-                if self.retry_attempt >= self.config.max_retries {
-                    self.retry_attempt = 0;
+                if attempt >= max_retries {
+                    self.turn.as_mut().unwrap().retry_attempt = 0;
                     return Err(AgentStep::Error(format!(
                         "API error ({}): {}",
                         self.config.model, err
@@ -659,66 +665,71 @@ impl Agent {
                 }
                 // Return retry step, caller should call next() again
                 Err(AgentStep::Retrying {
-                    attempt: self.retry_attempt,
+                    attempt,
                     error: err,
                 })
             },
         }
     }
 
-    /// Get the next step from the agent
-    /// Returns None when streaming is complete or awaiting tool decisions
+    /// Get the next step from the agent.
+    /// Returns None when streaming is complete or awaiting tool decisions.
     ///
     /// This method is cancel-safe: if the future is dropped mid-poll,
     /// the agent remains in a valid state and can be polled again.
     pub async fn next(&mut self) -> Option<AgentStep> {
         loop {
-            match self.state.as_mut()? {
-                StreamState::NeedsChatRequest => {
-                    debug!("Agent state: NeedsChatRequest, clearing streaming data");
+            // NeedsChatRequest doesn't capture data from the match, so the
+            // borrow on self.phase is released — allowing &mut self method calls.
+            // Streaming captures `stream`, holding the borrow, but only accesses
+            // other fields (turn, messages, total_usage) via disjoint field borrows.
+            match self.phase.as_mut()? {
+                StreamPhase::NeedsChatRequest => {
+                    let turn = self.turn.as_mut().expect("phase without turn");
+                    debug!("Agent phase: NeedsChatRequest");
 
-                    // Exponential backoff before retrying: 2s, 4s, 8s, 16s, ...
-                    if self.retry_attempt > 0 {
-                        let delay = Duration::from_secs(2u64.pow(self.retry_attempt));
-                        info!("Backoff: waiting {}s before retry attempt {}", delay.as_secs(), self.retry_attempt + 1);
+                    // Exponential backoff before retrying
+                    if turn.retry_attempt > 0 {
+                        let delay = Duration::from_secs(2u64.pow(turn.retry_attempt));
+                        info!("Backoff: waiting {}s before retry attempt {}", delay.as_secs(), turn.retry_attempt + 1);
                         tokio::time::sleep(delay).await;
                     }
 
-                    // Refresh dynamic system prompt before each request
-                    self.refresh_system_prompt();
+                    // Clear accumulated cross-phase data for new request
+                    turn.text.clear();
+                    turn.thinking.clear();
 
-                    // Clear accumulated cross-state data for new request
-                    self.streaming_text.clear();
-                    self.streaming_thinking.clear();
+                    // Borrow on `turn` is dropped here (NeedsChatRequest captured
+                    // nothing from phase), so &mut self methods are available.
+                    self.refresh_system_prompt();
 
                     match self.exec_chat_with_retry().await {
                         Ok(response) => {
-                            debug!("Agent state: NeedsChatRequest -> Streaming");
-                            self.state = Some(StreamState::Streaming {
+                            debug!("Agent phase: NeedsChatRequest -> Streaming");
+                            self.phase = Some(StreamPhase::Streaming {
                                 stream: Box::pin(response.stream),
                             });
-                            // Continue to process streaming state
                         },
                         Err(step) => {
-                            // Retrying or Error - state stays NeedsChatRequest for retry
                             if !matches!(step, AgentStep::Retrying { .. }) {
-                                self.state = None;
+                                self.phase = None;
+                                self.turn = None;
                             }
                             return Some(step);
                         },
                     }
                 },
 
-                StreamState::Streaming { stream } => {
+                StreamPhase::Streaming { stream } => {
                     match stream.next().await {
                         Some(Ok(event)) => match event {
                             ChatStreamEvent::Start => {
                                 debug!("Agent: got ChatStreamEvent::Start");
-                                // Continue polling
                             },
                             ChatStreamEvent::Chunk(chunk) => {
-                                self.streaming_text.push_str(&chunk.content);
-                                return Some(match self.mode {
+                                let turn = self.turn.as_mut().expect("phase without turn");
+                                turn.text.push_str(&chunk.content);
+                                return Some(match turn.mode {
                                     RequestMode::Compaction => {
                                         AgentStep::CompactionDelta(chunk.content)
                                     },
@@ -727,14 +738,11 @@ impl Agent {
                             },
                             ChatStreamEvent::ToolCallChunk(_) => {
                                 debug!("Agent: got ToolCallChunk");
-                                // Continue polling
                             },
                             ChatStreamEvent::ReasoningChunk(chunk) => {
                                 return Some(AgentStep::ThinkingDelta(chunk.content));
                             },
-                            ChatStreamEvent::ThoughtSignatureChunk(_) => {
-                                // Gemini thought signatures - continue polling
-                            },
+                            ChatStreamEvent::ThoughtSignatureChunk(_) => {},
                             ChatStreamEvent::End(mut end) => {
                                 debug!("Agent: got ChatStreamEvent::End");
                                 if let Some(ref genai_usage) = end.captured_usage {
@@ -744,73 +752,71 @@ impl Agent {
                                 } else {
                                     debug!("No captured_usage in End event");
                                 }
+                                let turn = self.turn.as_mut().expect("phase without turn");
                                 if let Some(captured) = end.captured_thinking_blocks.take() {
-                                    self.streaming_thinking = captured;
+                                    turn.thinking = captured;
                                 }
-                                // Capture tool calls from the End event; used below
-                                // when the stream closes (None branch).
                                 let streaming_tool_calls = end
                                     .captured_into_tool_calls()
                                     .unwrap_or_default();
 
                                 if !streaming_tool_calls.is_empty() {
-                                    // Stream is done and we have tool calls — transition
-                                    // directly to AwaitingToolDecision.
                                     let tool_calls: Vec<ToolCall> = streaming_tool_calls
                                         .iter()
                                         .map(ToolCall::from)
                                         .collect();
-                                    self.state = Some(StreamState::AwaitingToolDecision {
+                                    self.phase = Some(StreamPhase::AwaitingToolDecision {
                                         pending_tool_calls: streaming_tool_calls,
                                         tool_responses: Vec::new(),
                                     });
                                     return Some(AgentStep::ToolRequest(tool_calls));
                                 }
-                                // No tool calls — continue polling; the stream will
-                                // yield None next and we'll handle finish there.
                             },
                         },
                         Some(Err(e)) => {
                             let err = format!("{:#}", e);
-                            error!("Stream error (attempt {}): {}", self.retry_attempt, err);
+                            let turn = self.turn.as_mut().expect("phase without turn");
+                            error!("Stream error (attempt {}): {}", turn.retry_attempt, err);
 
-                            self.retry_attempt += 1;
-                            if self.retry_attempt >= self.config.max_retries {
-                                self.retry_attempt = 0;
-                                self.state = None;
+                            turn.retry_attempt += 1;
+                            if turn.retry_attempt >= self.config.max_retries {
+                                turn.retry_attempt = 0;
+                                self.phase = None;
+                                self.turn = None;
                                 return Some(AgentStep::Error(format!(
                                     "Stream error ({}): {}", self.config.model, err
                                 )));
                             }
-                            // Go back to NeedsChatRequest so the retry loop picks it up
-                            self.state = Some(StreamState::NeedsChatRequest);
+                            let attempt = turn.retry_attempt;
+                            self.phase = Some(StreamPhase::NeedsChatRequest);
                             return Some(AgentStep::Retrying {
-                                attempt: self.retry_attempt,
+                                attempt,
                                 error: err,
                             });
                         },
                         None => {
                             debug!("Agent: stream returned None (closed)");
-                            // Stream ended with no (remaining) tool calls — finish.
-                            match self.mode {
+                            let turn = self.turn.as_ref().expect("phase without turn");
+                            match turn.mode {
                                 RequestMode::Compaction => {
-                                    self.reset_with_summary(&self.streaming_text.clone())
+                                    let summary = turn.text.clone();
+                                    self.reset_with_summary(&summary);
                                 },
                                 RequestMode::Normal => {
-                                    let has_content = !self.streaming_thinking.is_empty()
-                                        || !self.streaming_text.is_empty();
+                                    let has_content = !turn.thinking.is_empty()
+                                        || !turn.text.is_empty();
                                     if has_content {
                                         let mut msg_content = MessageContent::default();
 
-                                        for thinking in &self.streaming_thinking {
+                                        for thinking in &turn.thinking {
                                             msg_content = msg_content.append(
                                                 ContentPart::Thinking(thinking.clone()),
                                             );
                                         }
 
-                                        if !self.streaming_text.is_empty() {
+                                        if !turn.text.is_empty() {
                                             msg_content = msg_content.append(
-                                                ContentPart::Text(self.streaming_text.clone()),
+                                                ContentPart::Text(turn.text.clone()),
                                             );
                                         }
 
@@ -827,10 +833,16 @@ impl Agent {
                                 },
                             }
                             debug!(
-                                "Agent state: Streaming -> None (Finished), messages={}",
+                                "Agent phase: Streaming -> None (Finished), messages={}",
                                 self.messages.len()
                             );
-                            self.state = None;
+                            // Capture result before clearing turn state
+                            let result_text = self.turn.as_ref()
+                                .map(|t| t.text.clone())
+                                .filter(|t| !t.is_empty());
+                            self.last_result = result_text;
+                            self.phase = None;
+                            self.turn = None;
                             return Some(AgentStep::Finished {
                                 usage: self.total_usage,
                             });
@@ -838,8 +850,7 @@ impl Agent {
                     }
                 },
 
-                StreamState::AwaitingToolDecision { .. } => {
-                    // Blocked waiting for tool results
+                StreamPhase::AwaitingToolDecision { .. } => {
                     return None;
                 },
             }
@@ -850,33 +861,30 @@ impl Agent {
     ///
     /// Called by App after ToolExecutor runs the tool. The pending tool calls
     /// and accumulated responses live inside the `AwaitingToolDecision` variant,
-    /// so the compiler ensures this data is only accessible in the correct state.
+    /// so the compiler ensures this data is only accessible in the correct phase.
     pub fn submit_tool_result(&mut self, call_id: &str, content: String) {
         debug!("Agent: submit_tool_result call_id={}", call_id);
 
-        // Extract the mutable state data from the AwaitingToolDecision variant.
-        // Any other state is a caller bug — warn and bail.
-        let (pending_tool_calls, tool_responses) = match &mut self.state {
-            Some(StreamState::AwaitingToolDecision {
+        let (pending_tool_calls, tool_responses) = match &mut self.phase {
+            Some(StreamPhase::AwaitingToolDecision {
                 pending_tool_calls,
                 tool_responses,
             }) => (pending_tool_calls, tool_responses),
             other => {
-                let state_name = match other {
-                    Some(StreamState::NeedsChatRequest) => "NeedsChatRequest",
-                    Some(StreamState::Streaming { .. }) => "Streaming",
-                    Some(StreamState::AwaitingToolDecision { .. }) => unreachable!(),
+                let phase_name = match other {
+                    Some(StreamPhase::NeedsChatRequest) => "NeedsChatRequest",
+                    Some(StreamPhase::Streaming { .. }) => "Streaming",
+                    Some(StreamPhase::AwaitingToolDecision { .. }) => unreachable!(),
                     None => "None",
                 };
                 tracing::warn!(
-                    "submit_tool_result called in unexpected state: {}",
-                    state_name
+                    "submit_tool_result called in unexpected phase: {}",
+                    phase_name
                 );
                 return;
             },
         };
 
-        // Store the response
         tool_responses.push(ToolResponse::new(call_id.to_string(), content));
 
         debug!(
@@ -886,23 +894,22 @@ impl Agent {
         );
 
         if tool_responses.len() >= pending_tool_calls.len() {
+            let turn = self.turn.as_ref().expect("phase without turn");
             debug!(
                 "Agent: all tools complete, building message. thinking_blocks={}, text_len={}, tool_calls={}",
-                self.streaming_thinking.len(),
-                self.streaming_text.len(),
+                turn.thinking.len(),
+                turn.text.len(),
                 pending_tool_calls.len()
             );
 
-            // All tools processed — build the assistant message.
-            // Per Anthropic docs: thinking blocks must come first, then text/tool_use.
             let mut msg_content = MessageContent::default();
 
-            for thinking in &self.streaming_thinking {
+            for thinking in &turn.thinking {
                 msg_content = msg_content.append(ContentPart::Thinking(thinking.clone()));
             }
 
-            if !self.streaming_text.is_empty() {
-                msg_content = msg_content.append(ContentPart::Text(self.streaming_text.clone()));
+            if !turn.text.is_empty() {
+                msg_content = msg_content.append(ContentPart::Text(turn.text.clone()));
             }
 
             for tc in pending_tool_calls.iter() {
@@ -915,10 +922,9 @@ impl Agent {
                 options: None,
             });
 
-            // Take ownership of the tool responses by swapping the state.
-            // This consumes the AwaitingToolDecision data cleanly.
-            let old_state = self.state.take();
-            if let Some(StreamState::AwaitingToolDecision { tool_responses, .. }) = old_state {
+            // Take ownership of the tool responses by consuming the phase.
+            let old_phase = self.phase.take();
+            if let Some(StreamPhase::AwaitingToolDecision { tool_responses, .. }) = old_phase {
                 for response in tool_responses {
                     debug!("Agent: adding tool response - call_id={}", response.call_id);
                     self.messages.push(ChatMessage::from(response));
@@ -930,9 +936,9 @@ impl Agent {
                 self.messages.len()
             );
 
-            debug!("Agent: state -> NeedsChatRequest (ready for continuation)");
-            self.retry_attempt = 0;
-            self.state = Some(StreamState::NeedsChatRequest);
+            debug!("Agent: phase -> NeedsChatRequest (ready for continuation)");
+            self.turn.as_mut().unwrap().retry_attempt = 0;
+            self.phase = Some(StreamPhase::NeedsChatRequest);
         }
     }
 }
