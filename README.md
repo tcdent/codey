@@ -24,7 +24,7 @@ brew install tcdent/tap/codey
 
 ### Download Binary
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/tcdent/codey/releases/latest):
+Download the latest release for your platform from the [GitHub Releases](https://github.com/tcdent/codey/releases/latest):
 
 - **macOS (Apple Silicon)**: `codey-darwin-arm64.tar.gz`
 - **Linux (x86_64)**: `codey-linux-x86_64.tar.gz`
