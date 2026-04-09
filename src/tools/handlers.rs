@@ -213,7 +213,10 @@ impl EffectHandler for WriteFile {
 // Shell handler
 // =============================================================================
 
-/// Execute a shell command
+/// Execute a shell command.
+///
+/// Runs on tokio's blocking thread pool via `spawn_blocking` so that shell
+/// I/O doesn't occupy async worker threads.
 pub struct Shell {
     pub command: String,
     pub working_dir: Option<String>,
@@ -223,11 +226,14 @@ pub struct Shell {
 #[async_trait::async_trait]
 impl EffectHandler for Shell {
     async fn call(self: Box<Self>) -> Step {
-        match io::execute_shell(&self.command, self.working_dir.as_deref(), self.timeout_secs).await
+        match tokio::task::spawn_blocking(move || {
+            io::execute_shell(&self.command, self.working_dir.as_deref(), self.timeout_secs)
+        })
+        .await
         {
-            Ok(result) if result.success => Step::Output(result.output),
-            Ok(result) => Step::Output(result.output), // Still output, but includes exit code
-            Err(e) => Step::Error(e),
+            Ok(Ok(result)) => Step::Output(result.output),
+            Ok(Err(e)) => Step::Error(e),
+            Err(e) => Step::Error(format!("Shell task failed: {}", e)),
         }
     }
 }

@@ -923,10 +923,12 @@ mod tests {
         assert!(bg_output.unwrap().contains("background"));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_handler_spawn_doesnt_block() {
         // This test verifies that spawning handlers doesn't block - multiple tools
-        // can have their handlers running concurrently
+        // can have their handlers running concurrently.
+        // Uses multi_thread runtime because shell handlers use spawn_blocking,
+        // which needs worker threads to poll JoinHandle completion promptly.
         let mut registry = ToolRegistry::empty();
         registry.register(std::sync::Arc::new(ShellTool::new()));
         let mut executor = ToolExecutor::new(registry);
@@ -937,7 +939,7 @@ mod tests {
                 agent_id: 0,
                 call_id: "slow1".to_string(),
                 name: "mcp_shell".to_string(),
-                params: serde_json::json!({ "command": "sleep 0.1 && echo slow1_done" }),
+                params: serde_json::json!({ "command": "sleep 0.5 && echo slow1_done" }),
                 decision: ToolDecision::Approve,
                 background: true,
             },
@@ -945,7 +947,7 @@ mod tests {
                 agent_id: 0,
                 call_id: "slow2".to_string(),
                 name: "mcp_shell".to_string(),
-                params: serde_json::json!({ "command": "sleep 0.1 && echo slow2_done" }),
+                params: serde_json::json!({ "command": "sleep 0.5 && echo slow2_done" }),
                 decision: ToolDecision::Approve,
                 background: true,
             },
@@ -954,17 +956,16 @@ mod tests {
         let start = std::time::Instant::now();
         let events = collect_events(&mut executor).await;
         let elapsed = start.elapsed();
-        
-        // If running concurrently, should take ~0.1s. If sequential, ~0.2s
-        // Allow some margin for test flakiness
-        assert!(elapsed.as_millis() < 180, "Tools should run concurrently, took {:?}", elapsed);
-        
+
+        // If running concurrently, should take ~0.5s. If sequential, ~1.0s+
+        assert!(elapsed.as_millis() < 800, "Tools should run concurrently, took {:?}", elapsed);
+
         // Both should complete
         let completed: HashSet<_> = events.iter().filter_map(|e| {
             if let ToolEvent::BackgroundCompleted { call_id, .. } = e { Some(call_id.clone()) } else { None }
         }).collect();
         assert_eq!(completed.len(), 2);
-        
+
         // Both outputs should be present
         assert!(executor.get_background_output("slow1").unwrap().contains("slow1_done"));
         assert!(executor.get_background_output("slow2").unwrap().contains("slow2_done"));
