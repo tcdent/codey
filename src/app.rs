@@ -911,7 +911,7 @@ impl App {
                 call_id,
                 content,
             } => {
-                let _is_primary = self.agents.primary_id() == Some(agent_id);
+                let is_primary = self.agents.primary_id() == Some(agent_id);
 
                 // Update block status (works for both primary and sub-agent tools)
                 if let Some(block) = self.chat.transcript.find_tool_block_mut(&call_id) {
@@ -919,34 +919,42 @@ impl App {
                     block.set_status(Status::Complete);
                 }
 
-                // Drain injectable notifications and append to content
-                let injectable = self.notifications.drain_injectable();
-                let content = if !injectable.is_empty() {
-                    // Finish current assistant turn, add user turn, start new assistant turn
-                    self.chat.transcript.finish_turn();
-                    
-                    // Add user turn with notification blocks
-                    let turn_id = self.chat.transcript.add_empty(Role::User);
-                    for notification in &injectable {
-                        let block_id = notification.block_id();
-                        if let Some(mut block) = self.chat.transcript.stage.remove(block_id) {
-                            block.set_status(Status::Complete);
-                            if let Some(turn) = self.chat.transcript.get_mut(turn_id) {
-                                turn.add_block(block);
+                // Drain injectable notifications and append to content.
+                // Only inject into the primary agent's tool results - sub-agent tool
+                // completions don't own a transcript turn, so manipulating the turn
+                // lifecycle here would create an orphaned turn and panic on the next
+                // begin_turn() call.
+                let content = if is_primary {
+                    let injectable = self.notifications.drain_injectable();
+                    if !injectable.is_empty() {
+                        // Finish current assistant turn, add user turn, start new assistant turn
+                        self.chat.transcript.finish_turn();
+
+                        // Add user turn with notification blocks
+                        let turn_id = self.chat.transcript.add_empty(Role::User);
+                        for notification in &injectable {
+                            let block_id = notification.block_id();
+                            if let Some(mut block) = self.chat.transcript.stage.remove(block_id) {
+                                block.set_status(Status::Complete);
+                                if let Some(turn) = self.chat.transcript.get_mut(turn_id) {
+                                    turn.add_block(block);
+                                }
                             }
                         }
+
+                        // Start new assistant turn for continuation
+                        self.chat.begin_turn(Role::Assistant, &mut self.terminal);
+
+                        // Generate XML for injection
+                        let xml = injectable
+                            .iter()
+                            .filter_map(|n| n.to_xml())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        format!("{}\n\n{}", content, xml)
+                    } else {
+                        content
                     }
-                    
-                    // Start new assistant turn for continuation
-                    self.chat.begin_turn(Role::Assistant, &mut self.terminal);
-                    
-                    // Generate XML for injection
-                    let xml = injectable
-                        .iter()
-                        .filter_map(|n| n.to_xml())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
-                    format!("{}\n\n{}", content, xml)
                 } else {
                     content
                 };
