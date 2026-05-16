@@ -22,114 +22,178 @@ VentureBeat / InfoWorld / Decoder coverage (May 2026 announcement).
 `src/auth.rs` and `src/llm/agent.rs`:
 
 - OAuth client ID `9d1c250a-e61b-44d9-88ed-5944d1962f5e` (the Claude Code
-  client ID).
+  client ID). Set up by `codey --login`.
 - Scopes `org:create_api_key user:profile user:inference`.
-- Outgoing requests use `Authorization: Bearer <oauth.access_token>` directly
-  against the public Messages API, with:
+- The OAuth path (only entered when `self.oauth.is_some()`, agent.rs:583) sends
+  requests directly against the public Messages API with:
+  - `Authorization: Bearer <oauth.access_token>`
   - `anthropic-beta: oauth-2025-04-20,claude-code-20250219,interleaved-thinking-2025-05-14`
   - `user-agent: claude-code/2.1.37 (external, cli)`
-- Non-OAuth path falls back to the `ANTHROPIC_API_KEY` env var via `genai`'s
-  default Anthropic adapter, or routes through OpenRouter when the model name
-  is prefixed `openrouter::`.
+- The non-OAuth path falls back to `ANTHROPIC_API_KEY` via `genai`'s default
+  Anthropic adapter, or routes through OpenRouter when the model name is
+  prefixed `openrouter::`. Neither sends the Claude Code beta/UA headers.
 
-So today Codey *presents itself as Claude Code* on the wire. Anthropic's
-billing pipeline almost certainly classifies that traffic as Claude Code, which
-means it currently lands in the **interactive** pool described above.
+So the OAuth path *presents itself as Claude Code* on the wire and rides an
+undocumented Claude-Code-only carve-out. The API-key and OpenRouter paths
+don't, and post-June-15 they're completely unaffected by the split.
 
 ## The technical wall
 
 The single most important fact for this research:
 
-> **The public Messages API rejects OAuth tokens.** The error is literally
+> **The public Messages API rejects OAuth tokens** from anything that doesn't
+> look like Claude Code. The error is literally
 > `"OAuth authentication is currently not supported."`
 
 Issue `anthropics/claude-code#37205` requested official OAuth support on
-`/v1/messages` and was **closed as not planned**. The only reason Codey's
-OAuth flow works at all is that Anthropic carves out an exception for traffic
-that looks like Claude Code (specific beta header + UA + scope combination).
-That exception is undocumented, conditional on Anthropic's discretion, and was
-publicly tightened earlier in 2026 (the "OpenClaw ban" episode).
+`/v1/messages` and was **closed as not planned**. The only reason any OAuth
+flow works at all is that Anthropic carves out an exception for traffic that
+looks like Claude Code. That exception is gated by *multi-layer fingerprinting*
+that the third-party-proxy projects have reverse-engineered:
+
+1. **OAuth scope**: token must carry `user:inference` (from `claude setup-token`
+   or the Claude Code OAuth flow).
+2. **Beta header**: `anthropic-beta: …,claude-code-20250219,…`.
+3. **User-agent**: `claude-code/<version> (external, cli)`.
+4. **System-prompt fingerprint**: the API checks that the system prompt
+   contains a specific ~84-character Claude Code billing identifier string.
+   Without it, OAuth requests are routed to "Extra Usage" (pay-as-you-go API)
+   billing rather than the subscription pool.
+5. **Body "trigger phrases"**: an inbound streaming classifier looks at the
+   request body for phrases that indicate a third-party tool; presence of those
+   bumps you off the subscription path.
+
+The OpenClaw episode in April 2026 was Anthropic tightening these. The
+`zacdcook/openclaw-billing-proxy` project documents the four-layer detection
+and lists explicit countermeasures — injecting the billing identifier into the
+system prompt, replacing tool names to PascalCase, stripping ~30 trigger
+phrases, and swapping in a Claude Code OAuth token. That's clearly out of
+bounds: it's documented as "impersonating the official Claude Code CLI" and
+exists specifically to evade Anthropic's enforcement.
+
+Codey today implements layers 1–3 (and that's it). It does **not** inject the
+84-char billing identifier into the system prompt, doesn't rename tools to
+match Claude Code's, and doesn't sanitize trigger phrases. So even on the
+OAuth path, Codey's traffic likely already falls into Extra Usage rather than
+the subscription pool — and going further down the spoofing rabbit hole to
+reach the subscription pool is explicitly the path that risks an account ban.
 
 So the practical landscape post-June 15 looks like:
 
-| Approach                                                | Subscription? | Hits new SDK credit? | Sanctioned?          | Notes |
-| ------------------------------------------------------- | ------------- | -------------------- | -------------------- | ----- |
-| Direct Messages API with OAuth, presenting as Claude Code (status quo) | Yes — interactive pool | No                   | Gray area; relies on undocumented carve-out | Can be revoked unilaterally; user-agent spoofing is exactly the pattern Anthropic has cracked down on |
-| Shell out to `claude -p` (Agent SDK CLI subprocess)     | Yes           | **Yes**              | Yes — explicitly named in the announcement | Requires `claude` binary installed on the user's box; adds 3-5s overhead per turn; loses fine-grained streaming/tool-loop control |
-| Wrap the Node/Python Agent SDK in a sidecar process     | Yes           | **Yes**              | Yes — "third-party apps that authenticate through the Agent SDK" | Same install footprint as above; cleaner JSON protocol via SDK stdio, but still a subprocess hop |
-| `ANTHROPIC_API_KEY` (pay-as-you-go)                     | No            | N/A                  | Yes                  | Trivial, no policy risk, loses subscription-billing UX |
-| OpenRouter (`openrouter::…`)                            | No            | N/A                  | Yes (third-party)    | Already implemented in `src/llm/client.rs`; passes through OpenRouter billing |
+| Approach                                                | Subscription? | Hits new SDK credit? | Sanctioned? | First-class Rust? | Notes |
+| ------------------------------------------------------- | ------------- | -------------------- | ----------- | ----------------- | ----- |
+| Direct Messages API with OAuth, partial Claude-Code spoofing (status quo OAuth path) | Likely Extra Usage today | No  | Gray area | Yes | Carve-out is undocumented and conditional; only "works" for the interactive pool if you also spoof layers 4–5, which is the actively-enforced ban zone |
+| Direct Messages API with OAuth + full fingerprint match (84-char id, tool renames, trigger-phrase scrubbing) | Yes — interactive | No  | **No** — explicit ToS violation, OpenClaw-style ban risk | Yes | Don't |
+| Persistent `claude` binary sidecar (stdio JSON protocol, same shape the official SDK uses) | Yes  | **Yes**  | Yes — explicitly named in the announcement | No — subprocess | One spawn per session, not per turn; ~hundreds of ms startup, near-zero per-turn overhead; this is what `@anthropic-ai/claude-agent-sdk` is |
+| Per-turn `claude -p` exec                              | Yes  | **Yes**  | Yes | No — subprocess | 3–5s per-turn overhead; simplest but worst UX |
+| `ANTHROPIC_API_KEY` (pay-as-you-go)                    | No   | N/A      | Yes | Yes | Trivial, no policy risk, loses subscription-billing UX |
+| OpenRouter (`openrouter::…`)                           | No   | N/A      | Yes (third-party) | Yes | Already in `src/llm/client.rs` |
+
+### Why there is no first-class Rust path to the SDK credit pool
+
+The SDK credit pool isn't gated by a documented header, scope, or endpoint.
+It's gated by *being the Claude Code binary*, identified through the same
+multi-layer fingerprint described above. The official Agent SDK (TypeScript
+and Python) is itself a stdio wrapper around the bundled `claude` binary —
+even Anthropic doesn't speak the wire protocol directly from their SDK code.
+
+That means a "first-class" Rust implementation that legitimately draws from
+the new SDK credit pool would require Anthropic to either:
+
+- publish a stable wire-protocol contract for SDK-authenticated requests
+  (currently they have not, and the closest documented endpoint, Managed
+  Agents, is a different product with its own beta and pricing); or
+- expose a new OAuth scope / API path for third-party SDK clients post-June-15
+  (the announcement language hints this could come, but nothing has been
+  published as of May 2026).
+
+Neither exists today. Anthropic appears to have deliberately funneled
+third-party access through the SDK subprocess rather than the wire protocol so
+they retain enforcement leverage over fingerprint changes.
 
 ## What this means for Codey
 
-The June 15 change does not *force* Codey to do anything — the question is
-which of these tradeoffs to pick.
+The "make the SDK first-class, no subprocess" version of this doesn't exist
+without crossing into spoofing — see the previous section. So the real choice
+is between three sanctioned shapes:
 
-**1. Doing nothing.** Codey continues to ride the Claude Code carve-out, and
-post-June 15 that traffic continues hitting the interactive subscription pool
-(shared with the user's chat / Claude Code sessions). Pros: zero work,
-preserves the streaming Rust agent loop. Cons: not on the new $100–$200 SDK
-credit; exposed to enforcement at any time; spoofing `user-agent` as
-`claude-code/2.1.37` to access the Claude Code-only API path is the kind of
-thing the AVP team has shown willingness to break.
+**1. API-key default, drop OAuth.** Simplest. Users bring an `sk-ant-...`
+API key, requests go pay-as-you-go (or against the new SDK credit pool *if*
+Anthropic later opens a documented OAuth path for it — TBD). Zero policy
+risk, no subprocess, native Rust streaming, but no subscription billing for
+end users.
 
-**2. Add a `claude-cli` backend.** Following the OpenClaw / Conductor /
-Zed pattern: when the user opts in, Codey shells out to a long-running
-`claude` (or `@anthropic-ai/claude-agent-sdk`) subprocess, talks to it over
-stdio JSON, and forwards its events into the existing UI. Pros: officially
-sanctioned, draws from the new dedicated SDK credit pool (an extra $200/mo
-of headroom for Max 20x users on top of the interactive pool), survives any
-future tightening of the OAuth carve-out. Cons: requires the `claude` binary
-or Node SDK on the user's system, adds subprocess latency, and the tool loop
-is partly owned by the SDK — Codey's own tool registry, IDE/Neovim hooks,
-permission system, fast-mode handling, and sub-agent registry would have to
-either delegate to the SDK's equivalents or be layered on top.
+**2. Persistent `claude` binary sidecar as a new backend.** Codey spawns
+`claude` (or `@anthropic-ai/claude-agent-sdk`) once per session and speaks
+to it over the stdio JSON protocol — same shape the official SDKs use. Per
+turn this is roughly as fast as direct HTTP; the startup cost is paid once.
+Subprocess in the literal sense, but not "shell out per turn". This is the
+only sanctioned path onto the new SDK credit pool. Cost: significant
+integration work, because Codey's tool registry, IDE/Neovim hooks, permission
+system, fast-mode handling, and sub-agent registry overlap with what the SDK
+expects to own. Each one needs to be either delegated to the SDK
+(`PreToolUse` hook, `agents` option, `permissionMode`) or kept in Codey with
+the SDK's matching feature disabled.
 
-**3. Add only the API-key path (deprecate OAuth).** Cleanest legally,
-worst UX — users on Pro/Max who are already paying Anthropic suddenly have
-to also fund a developer-console balance to use Codey.
+**3. Status quo (partial Claude-Code spoofing on the OAuth path).** Today
+this almost certainly already falls into Extra Usage rather than the
+subscription pool because Codey doesn't inject the 84-char system-prompt
+identifier. So you're getting the spoofing risk without the billing benefit.
+If preserving the OAuth login UX matters, keeping it is fine; if it doesn't,
+the cleanest move is to remove the `claude-code-20250219` beta and
+`claude-code/2.1.37 (external, cli)` user-agent and let the OAuth path
+explicitly fall back to whatever Anthropic does with an unbranded OAuth
+request (currently: reject). That's a controlled deprecation rather than
+silently leaning on an enforcement carve-out.
 
 ## Recommendation
 
-Treat backends as a choice the user makes, not a single rewrite:
+Given you've already been steering away from spoofing:
 
-1. **Keep the current direct-OAuth backend** as the default for now. Document
-   that it's running against the interactive subscription pool and is subject
-   to Anthropic policy. No code change required for June 15 itself.
-2. **Add a `claude-cli` backend** as an opt-in second backend (config:
-   `runtime = "claude-cli"` per agent, in addition to today's implicit
-   `direct` runtime). This is the only path that's explicitly named as
-   eligible for the new credit pool and the only path that's robust to
-   Anthropic revoking the Claude Code carve-out for non-Claude-Code clients.
-   The existing two-backend pattern (`direct` Anthropic vs `openrouter::`
-   prefix) already establishes the precedent for routing per request.
-3. **Leave API-key fallback alone** — already works via genai's default
-   adapter when `ANTHROPIC_API_KEY` is set and OAuth isn't.
-
-The thing to weigh before committing to (2) is how much of Codey's value
-(streaming UX, native tool registry, IDE diff previews, sub-agent registry,
-fast-mode) survives running on top of a `claude` subprocess vs being
-re-implemented as SDK hooks/agents. That's the architectural call, and it's
-the actual question hiding behind "which backend".
+1. **Strip the spoofed `user-agent` and `claude-code-20250219` beta from the
+   OAuth path now.** They give nothing back (the request likely isn't even
+   landing on the subscription pool) and they're the visible signal that
+   most invites enforcement action.
+2. **Add an `ANTHROPIC_API_KEY`-first default**, with clear docs that
+   subscription users who want subscription billing should pick option 3.
+3. **Build option 2 (persistent `claude` subprocess backend) as a real
+   second runtime,** behind config like `runtime = "claude-sdk"` per agent —
+   the same shape that already distinguishes `direct` Anthropic from
+   `openrouter::`. This is genuinely the only sanctioned route to the new
+   $100/$200 SDK credit pool, and being a subprocess in the per-session sense
+   is acceptable.
+4. **Track Anthropic's June-15 announcement closely** for any new documented
+   OAuth scope, endpoint, or beta flag that would expose the SDK credit pool
+   to native HTTP clients. If/when that lands, the persistent-subprocess
+   backend can be paralleled by a native Rust backend; today, it can't.
 
 ## Open questions worth confirming before implementing
 
-- Whether Anthropic intends the existing `user-agent: claude-code/(external, cli)`
-  + `oauth-2025-04-20` beta path to keep working after June 15 for non-Claude-Code
-  clients, or whether the carve-out is being narrowed as part of the split.
-  Worth a direct support ticket — the public docs don't say.
-- Whether the Agent SDK subprocess can be driven without the full `claude`
-  binary install (the TypeScript SDK ships a bundled binary as an optional
-  dep, so `npm i @anthropic-ai/claude-agent-sdk` may be sufficient).
-- Whether the SDK's stdio protocol exposes enough to keep Codey's existing
-  tool-permission UX (the `PreToolUse` hook seems sufficient, but worth
-  verifying against current tool flow).
+- Whether Anthropic publishes a documented OAuth scope / endpoint / beta flag
+  for third-party SDK-billing access on or around June 15. The announcement
+  language ("third-party apps that authenticate with your Claude subscription
+  through the Agent SDK") implies a sanctioned mechanism exists; right now
+  the only mechanism is "be a subprocess of the binary." A direct support
+  ticket asking whether a Rust client can target the SDK credit pool natively
+  would resolve this — the public docs are silent.
+- Whether the Agent SDK subprocess can be driven without a separate `claude`
+  binary install. The TypeScript SDK ships a bundled binary as an optional
+  npm dep, so `npm i @anthropic-ai/claude-agent-sdk` may be sufficient — that
+  would let Codey ship a "subscription backend" install step that's one npm
+  command rather than a full Claude Code installation.
+- Whether the SDK's stdio protocol exposes enough hooks (`PreToolUse`,
+  `agents`, `permissionMode`, `mcpServers`, `appendSystemPrompt`) to keep
+  Codey's existing UX intact — tool permissions, IDE diff previews, sub-agent
+  registry, fast mode. If any of those would have to regress, that's the
+  real cost of the sidecar approach.
 
 ## References
 
 - https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan
 - https://code.claude.com/docs/en/agent-sdk/overview
 - https://github.com/anthropics/claude-code/issues/37205
+- https://github.com/zacdcook/openclaw-billing-proxy (documents the four-layer detection; do not emulate)
+- https://github.com/majdyz/openclaw-claude-proxy (explicitly shells out to `claude` to avoid spoofing)
 - https://venturebeat.com/technology/anthropic-reinstates-openclaw-and-third-party-agent-usage-on-claude-subscriptions-with-a-catch
 - https://www.infoworld.com/article/4171274/anthropic-puts-claude-agents-on-a-meter-across-its-subscriptions.html
 - https://the-decoder.com/claude-subscriptions-get-separate-budgets-for-programmatic-use-billed-at-full-api-prices/
