@@ -317,6 +317,129 @@ Given you've already been steering away from spoofing:
    native HTTP clients. If/when that lands, a third runtime can be added; for
    now, the subprocess path is the only sanctioned route to the credit pool.
 
+## Integration into Codey (replacing the genai wrapper)
+
+This is the part that's easy to underestimate. **`claude-codes` is not a peer
+replacement for the genai wrapper — it sits a layer higher**, and that changes
+what "replace the Anthropic wrapper" actually means.
+
+### Where the layers sit today
+
+- **genai** is a *stateless per-turn streaming client*:
+  `exec_chat_stream(model, request, options) -> stream of events`. It holds no
+  conversation state.
+- **`src/llm/agent.rs` owns the agent loop.** The `Agent` struct holds
+  `messages: Vec<ChatMessage>` (full history), the `StreamState` machine
+  (`NeedsChatRequest` → `Streaming` → `AwaitingToolDecision`), accumulates
+  text/thinking/tool-calls during a stream, and in `submit_tool_result()`
+  rebuilds the assistant message + tool responses and loops back to
+  `NeedsChatRequest` for the continuation. It also owns `restore_from_transcript`,
+  `reset_with_summary` (compaction), prompt caching (`CacheControl::Ephemeral`),
+  thinking-block preservation, and OAuth.
+- The **`claude` binary owns that entire loop**: session/history (in
+  `~/.claude`), the turn loop, tool orchestration, context management,
+  auto-compaction, caching, thinking handling, and auth.
+
+So adopting `claude-codes` doesn't just replace `src/llm/client.rs` — it
+replaces `client.rs` **plus most of `agent.rs`'s loop, plus message-history
+management, plus compaction.** That's a loop transplant, not a wrapper swap.
+
+### The blast radius is small, though, because the seam is well-placed
+
+genai types appear in only two files: `src/llm/agent.rs` and
+`src/llm/client.rs`. Everything above the `Agent` interface is genai-free:
+
+- `app.rs` drives agents purely through `send_request()` / `next() ->
+  AgentStep` / `submit_tool_result()` and never names a genai type.
+- `AgentStep` and `ToolCall` are Codey-native (`crate::tools`), not genai.
+- Tools are already Codey-native (`ToolRegistry`, `ToolExecutor`) and the tool
+  names are already MCP-style (`mcp_read_file`, `mcp_shell`, …).
+- The `Transcript` is Codey's own model.
+
+So the integration strategy is to **branch at the `Agent` boundary**: turn
+`Agent` into a trait (or enum) with two implementations behind the same
+interface —
+
+- `GenaiAgent` — today's implementation (genai; Codey owns the loop). Keeps
+  `ANTHROPIC_API_KEY` and `openrouter::` routing.
+- `SdkAgent` — `claude-codes`-backed (the binary owns the loop).
+
+`app.rs`, `ToolExecutor`, `ToolRegistry`, `Transcript`, and the
+`AgentRegistry` multiplexing stay essentially unchanged.
+
+### The `AgentStep` round-trip maps cleanly onto the SDK control protocol
+
+This is the part that makes it tractable. `SdkAgent` translates:
+
+| Binary event (via `claude-codes`)             | Codey `AgentStep` / action |
+| --------------------------------------------- | -------------------------- |
+| assistant text delta                          | `AgentStep::TextDelta`     |
+| thinking delta                                | `AgentStep::ThinkingDelta` |
+| `McpMessageRequest` `tools/call` / permission request | `AgentStep::ToolRequest(..)` |
+| (app approves, `ToolExecutor` runs Codey's tool, `submit_tool_result`) | write the `tools/call` MCP response / permission allow back over the control channel |
+| `result`                                      | `AgentStep::Finished { usage }` (usage from the result event) |
+| error event                                   | `AgentStep::Error` / `Retrying` |
+
+So the existing `ToolRequest` → `tool_executor` → `submit_tool_result` path —
+including approvals, IDE diff previews, and background tasks — works as-is. The
+difference is internal: `SdkAgent::submit_tool_result` writes an MCP response
+over stdio instead of rebuilding `messages` and re-calling the API.
+
+### What moves into the binary and drops out of `SdkAgent`
+
+- `messages: Vec<ChatMessage>` history → binary session; use `--resume
+  <session_id>`. Codey can still record the streamed events into its own
+  `Transcript` for display/persistence, but it no longer replays history into
+  requests.
+- `StreamState` continuation logic in `submit_tool_result` → binary's loop.
+- `restore_from_transcript` → binary session import / `--resume`.
+- Compaction: `RequestMode::Compaction`, `reset_with_summary`,
+  `src/compaction.rs`, and the `compaction_threshold` check in the `Finished`
+  handler → binary auto-compaction (`PreCompact` hook). Codey's compaction is
+  unused on this runtime.
+- `CacheControl::Ephemeral`, thinking-block preservation, OAuth
+  (`oauth` field, `refresh_oauth_if_needed`, `src/auth.rs`) → binary owns all
+  three; none used by `SdkAgent`.
+
+### What's at risk or needs remapping
+
+- **Fast mode** (`research-preview-2026-02-01` beta, opus-4-6 only) is injected
+  as a wire-level beta header. The binary owns the wire, so unless `--settings`
+  exposes it, fast mode is **likely unreachable on the SDK runtime** — it stays
+  a `GenaiAgent`-only feature. (Separately unclear whether the subscription/SDK
+  path even honors that beta.)
+- **`thinking_budget: u32`** → the binary uses effort *levels* (`low`…`xhigh`),
+  not a raw token budget, so Codey's budget maps to an effort bucket.
+- **`max_tokens`, `model`** → query options / `--settings`. Note the binary only
+  routes Anthropic models, so `openrouter::` models can't use the SDK runtime —
+  giving a 3-way: genai+API-key (Anthropic), genai+OpenRouter, SDK+subscription.
+- **Usage accounting** — `extract_turn_usage` is reimplemented against the
+  binary's `result` event (`total_cost_usd`, token counts); cache-token
+  breakdown may differ from genai's shape.
+- **Sub-agents** — Codey's `spawn_agent` + `AgentRegistry` spawn independent
+  `Agent`s today. Simplest mapping: each Codey sub-agent on the SDK runtime is
+  its own `claude` subprocess (matches the current independent-agent model;
+  costs N processes). Alternative: drive the binary's native `--agents` and
+  bridge via `parent_tool_use_id` — fewer processes, more bridging work.
+
+### Config
+
+Add a `runtime` selector to `AgentRuntimeConfig` (today: `model`, `max_tokens`,
+`thinking_budget`, `compaction_thinking_budget`, `fast_mode`), defaulting to the
+genai path. Since runtime is already per-agent (foreground vs background),
+foreground can run on the SDK runtime (subscription billing) while background
+runs on genai+API-key, or any mix.
+
+### Net
+
+The genai dependency is well-contained, so the *mechanical* replacement is
+small and the `Agent`/`AgentStep` seam is exactly the right branch point. But
+`SdkAgent` is a genuinely different implementation rather than a re-skinned one,
+because the binary owns the loop `agent.rs` currently owns. Budget the work as:
+(1) a `claude-codes` transport + control-request loop, (2) an `Agent` trait with
+`GenaiAgent`/`SdkAgent`, (3) deleting/bypassing history+compaction+caching+OAuth
+on the SDK path, (4) accepting fast-mode and OpenRouter as genai-only.
+
 ## Open questions worth confirming before implementing
 
 - Whether Anthropic publishes a documented OAuth scope / endpoint / beta flag
