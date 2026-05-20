@@ -113,6 +113,10 @@ they retain enforcement leverage over fingerprint changes.
 
 ## What this means for Codey
 
+> Exploration of the options. The chosen direction (see **Decision** below) is
+> option 2, exclusively — option 1 is recorded here as the considered-and-
+> rejected alternative.
+
 The "make the SDK first-class in pure Rust, no subprocess" version doesn't
 exist without crossing into spoofing. So the real choice is between two
 sanctioned shapes, plus removing the spoofing risk on the OAuth path:
@@ -292,44 +296,55 @@ Strip the `claude-code-20250219` beta and `claude-code/2.1.37 (external, cli)`
 user-agent from the OAuth path — they buy nothing and are the visible
 enforcement signal.
 
-## Recommendation
+## Decision: standardize on a single Anthropic-SDK backend
 
-Given you've already been steering away from spoofing:
+The exploration above lays out the options; the chosen direction is to collapse
+them. Codey migrates its **entire** backend path onto the Anthropic Agent SDK
+driven through the `claude` binary (via `claude-codes`), and removes every other
+path.
 
-1. **Strip the spoofed `user-agent` and `claude-code-20250219` beta from the
-   OAuth path in `src/llm/agent.rs:584–595`.** They give nothing back
-   (requests likely already land in Extra Usage, not the subscription pool)
-   and they're the visible signal that invites enforcement.
-2. **Replace genai outright.** Drop the `tcdent/rust-genai` fork. The direct
-   in-process path (needed for `ANTHROPIC_API_KEY` and library consumers — see
-   the integration section) moves to a focused, Codey-owned Anthropic Messages
-   client. Document that subscription billing requires the `claude-sdk` runtime.
-3. **Build the `claude` subprocess backend as a real second runtime,** behind
-   config like `runtime = "claude-sdk"` per agent — the same shape that
-   already distinguishes `direct` Anthropic from `openrouter::`. Build it on
-   **`claude-codes`** for the subprocess + framing + protocol types (actively
-   maintained, CLI-version-pinned), and write the control-request loop in Codey
-   so its existing `ToolRegistry`, permission UI, and IDE hooks plug in
-   directly. Do **not** depend on the full-SDK ports (`claude-agent-sdk-rs`,
-   `claude-code-agent-sdk`) — both are unmaintained since February; keep
-   tyrchen's as an MIT reference for the control-loop shape only.
-4. **Track Anthropic's June-15 announcement** for any new documented OAuth
-   scope, endpoint, or beta flag that would expose the SDK credit pool to
-   native HTTP clients. If/when that lands, a third runtime can be added; for
-   now, the subprocess path is the only sanctioned route to the credit pool.
+1. **One backend.** The `claude` binary is the only LLM path. Delete the genai
+   dependency (`tcdent/rust-genai`), `src/llm/client.rs`, the `openrouter::`
+   routing, and the hand-rolled direct-HTTP idea. There is no `DirectAgent` and
+   no second runtime — just the SDK backend.
+2. **Billing is the binary's problem, not Codey's.** The binary accepts either
+   the subscription OAuth session (→ the new SDK credit pool) *or*
+   `ANTHROPIC_API_KEY` (→ pay-as-you-go), via its own auth precedence. So both
+   billing methods are covered by the single backend, and Codey no longer owns
+   authentication: `src/auth.rs` (the OAuth/PKCE flow, token storage, refresh)
+   is removed, and `codey --login` either goes away or delegates to
+   `claude --login`. No spoofed headers, no token management.
+3. **The binary is a hard dependency — everywhere, including library mode.**
+   Codey-as-a-library consumers also run on the SDK backend and also require
+   `claude` installed. This is an accepted requirement, not a problem to design
+   around. Codey must keep working as a library (other projects depend on it),
+   so the library API stays — it just runs on the SDK backend like the CLI.
+4. **No generic multi-provider abstraction.** A universal "any LLM" adapter
+   isn't worth it — tool use, thinking, caching, and the other Anthropic
+   specifics carry too much subtlety, and reapplying all of that to something
+   like litellm is verbose, tedious, and test-heavy. (The genai/OpenRouter path
+   was an experiment that was hacked in; it's dropped without regret.) The
+   *internal contract* between Codey and the backend should still be a clean,
+   somewhat-abstract seam over Codey-owned types — generic enough not to leak
+   the SDK's internals upward, but not engineered to span providers.
 
-## Integration into Codey (replacing the genai wrapper)
+What this removes from the tree: `genai` + `src/llm/client.rs`, `src/auth.rs`,
+OpenRouter routing, most of `agent.rs`'s loop, `src/compaction.rs`, the
+`cache_control` logic, and thinking-block bookkeeping — all now owned by the
+binary. Codey gets meaningfully smaller.
 
-This is the part that's easy to underestimate. **`claude-codes` is not a peer
-replacement for the genai wrapper — it sits a layer higher**, and that changes
+## Integration into Codey (migrating to the SDK backend)
+
+The seam is well-placed, but the work is real: **the `claude` binary owns the
+agent loop that `src/llm/agent.rs` owns today.**
 what "replace the Anthropic wrapper" actually means.
 
 ### Where the layers sit today
 
-- **genai** is a *stateless per-turn streaming client*:
+- **genai (being removed)** is a *stateless per-turn streaming client*:
   `exec_chat_stream(model, request, options) -> stream of events`. It holds no
-  conversation state.
-- **`src/llm/agent.rs` owns the agent loop.** The `Agent` struct holds
+  conversation state, so `src/llm/agent.rs` had to hold all of it.
+- **`src/llm/agent.rs` owns the agent loop today.** The `Agent` struct holds
   `messages: Vec<ChatMessage>` (full history), the `StreamState` machine
   (`NeedsChatRequest` → `Streaming` → `AwaitingToolDecision`), accumulates
   text/thinking/tool-calls during a stream, and in `submit_tool_result()`
@@ -341,14 +356,16 @@ what "replace the Anthropic wrapper" actually means.
   `~/.claude`), the turn loop, tool orchestration, context management,
   auto-compaction, caching, thinking handling, and auth.
 
-So adopting `claude-codes` doesn't just replace `src/llm/client.rs` — it
-replaces `client.rs` **plus most of `agent.rs`'s loop, plus message-history
-management, plus compaction.** That's a loop transplant, not a wrapper swap.
+So the migration doesn't just delete `src/llm/client.rs` — it deletes
+`client.rs` **plus most of `agent.rs`'s loop, plus message-history management,
+plus compaction**, because the binary now does all of that. A loop transplant,
+not a wrapper swap.
 
-### The blast radius is small, though, because the seam is well-placed
+### The seam is well-placed, so the rest of Codey is mostly untouched
 
 genai types appear in only two files: `src/llm/agent.rs` and
-`src/llm/client.rs`. Everything above the `Agent` interface is genai-free:
+`src/llm/client.rs`. Everything above the `Agent` interface is already
+backend-agnostic:
 
 - `app.rs` drives agents purely through `send_request()` / `next() ->
   AgentStep` / `submit_tool_result()` and never names a genai type.
@@ -357,58 +374,33 @@ genai types appear in only two files: `src/llm/agent.rs` and
   names are already MCP-style (`mcp_read_file`, `mcp_shell`, …).
 - The `Transcript` is Codey's own model.
 
-So the integration strategy is to **branch at the `Agent` boundary**: turn
-`Agent` into a trait (or enum) with two implementations behind the same
-interface —
+### The contract: one backend behind a clean Codey-owned seam
 
-- `DirectAgent` — Codey owns the loop (as today), but on a **Codey-owned,
-  focused Anthropic Messages client** rather than genai. Serves the
-  `ANTHROPIC_API_KEY` / in-process path.
-- `SdkAgent` — `claude-codes`-backed (the binary owns the loop). Serves the
-  subscription / SDK-credit path.
+There is a single implementation — the SDK backend — but it's worth defining
+the `Agent` interface as a deliberate **contract over Codey-owned types**
+rather than letting the backend's types leak upward. That's the "somewhat more
+generic" seam without the multi-provider tax:
 
-`app.rs`, `ToolExecutor`, `ToolRegistry`, `Transcript`, and the
-`AgentRegistry` multiplexing stay essentially unchanged.
+- **Input side:** `send_request(prompt, mode)`, `submit_tool_result(call_id,
+  content)`, `cancel()` — already Codey-owned.
+- **Output side:** the `AgentStep` stream (`TextDelta`, `ThinkingDelta`,
+  `ToolRequest`, `Finished { usage }`, `Error`, `Retrying`) — already
+  Codey-owned.
+- **Tool advertisement:** from the `ToolRegistry` (name/description/schema) —
+  already Codey-owned; rendered to MCP descriptors for the binary instead of
+  genai `Tool`s.
 
-### genai is removed entirely, not retained for the direct path
-
-It's tempting to keep genai as the `DirectAgent` backend and only add
-`SdkAgent`. That's the wrong call, and conflates two separable things —
-"keep a direct in-process path" vs "keep genai":
-
-- **genai is a forked, multi-provider crate** (`tcdent/rust-genai`, branch
-  `codey-dev`). Codey uses two of its providers (Anthropic, OpenRouter).
-  Carrying a maintained fork of a general abstraction to serve a shrinking
-  role is exactly the dependency to shed — and the fork is already a standing
-  maintenance cost.
-- **The chat primitives it provides** (`ChatMessage`, `ContentPart`,
-  `ToolCall`, `Thinking`, usage) are already translated at Codey's boundary in
-  `agent.rs` and `Transcript`. Owning them as Codey types tailored to exactly
-  what's used is cleaner in net, not more work.
-
-So the direct path stays — but on a client Codey owns. **Why a direct path is
-needed at all:** Codey ships as a library (`src/lib.rs`), and the headline
-example is an in-process `Agent` over `ANTHROPIC_API_KEY` with `None` oauth and
-no subprocess. A crate consumer (`use codey::{Agent, …}`) can't be forced to
-install and shell out to a `claude` binary, so the subprocess `SdkAgent` can't
-be the *only* runtime. (If Codey were CLI-only and willing to require the
-binary, even the direct path could go and genai removal would be total.)
-
-**What building the direct client ourselves costs:** a focused Anthropic
-Messages SSE client — request/response shapes, stream event types, `tool_use`
-streaming, thinking-block signatures and thinking-first ordering,
-`cache_control` headers, and usage / cache-token parsing. Bounded, and every
-one of those concepts is already handled at Codey's boundary today. The real
-ongoing cost is owning wire-protocol maintenance for the direct path (new beta
-flags, message-shape changes) — but that cost is *already* being paid via the
-genai fork, and a focused single-provider client is less surface than a
-multi-provider fork. `openrouter::` routing becomes either a small Codey-owned
-OpenAI-compatible client or is dropped, depending on whether non-Anthropic
-models still matter.
+Nothing in that contract names Anthropic or the binary. The SDK backend is the
+only thing behind it, but the rest of Codey (TUI, tools, transcript, library
+API) depends only on the contract. If a different backend ever became
+necessary, it'd implement the same contract — but the contract is **not**
+designed by surveying providers for common surface (the explicitly-rejected
+approach); it's designed around what Codey already needs and already passes
+across this boundary.
 
 ### The `AgentStep` round-trip maps cleanly onto the SDK control protocol
 
-This is the part that makes it tractable. `SdkAgent` translates:
+This is the part that makes it tractable. The SDK backend translates:
 
 | Binary event (via `claude-codes`)             | Codey `AgentStep` / action |
 | --------------------------------------------- | -------------------------- |
@@ -421,71 +413,76 @@ This is the part that makes it tractable. `SdkAgent` translates:
 
 So the existing `ToolRequest` → `tool_executor` → `submit_tool_result` path —
 including approvals, IDE diff previews, and background tasks — works as-is. The
-difference is internal: `SdkAgent::submit_tool_result` writes an MCP response
-over stdio instead of rebuilding `messages` and re-calling the API.
+difference is internal: the SDK backend's `submit_tool_result` writes an MCP
+response over stdio instead of rebuilding `messages` and re-calling the API.
 
-### What moves into the binary and drops out of `SdkAgent`
+### What moves into the binary and is deleted from Codey
 
 - `messages: Vec<ChatMessage>` history → binary session; use `--resume
-  <session_id>`. Codey can still record the streamed events into its own
-  `Transcript` for display/persistence, but it no longer replays history into
-  requests.
+  <session_id>`. Codey still records the streamed events into its own
+  `Transcript` for display/persistence/library access, but it no longer
+  replays history into requests.
 - `StreamState` continuation logic in `submit_tool_result` → binary's loop.
 - `restore_from_transcript` → binary session import / `--resume`.
 - Compaction: `RequestMode::Compaction`, `reset_with_summary`,
   `src/compaction.rs`, and the `compaction_threshold` check in the `Finished`
-  handler → binary auto-compaction (`PreCompact` hook). Codey's compaction is
-  unused on this runtime.
-- `CacheControl::Ephemeral`, thinking-block preservation, OAuth
-  (`oauth` field, `refresh_oauth_if_needed`, `src/auth.rs`) → binary owns all
-  three; none used by `SdkAgent`.
+  handler → binary auto-compaction (`PreCompact` hook). Codey's compaction code
+  is removed.
+- `CacheControl::Ephemeral`, thinking-block preservation → binary-owned.
+- Auth: `src/auth.rs` (OAuth/PKCE, token storage, `refresh_oauth_if_needed`),
+  the `oauth` field on `Agent`, and the spoofed beta/user-agent headers → all
+  removed. The binary owns auth (subscription OAuth or `ANTHROPIC_API_KEY`).
 
 ### What's at risk or needs remapping
 
 - **Fast mode** (`research-preview-2026-02-01` beta, opus-4-6 only) is injected
-  as a wire-level beta header. The binary owns the wire, so unless `--settings`
-  exposes it, fast mode is **likely unreachable on the SDK runtime** — it stays
-  a `DirectAgent`-only feature (where Codey's own client controls headers).
-  (Separately unclear whether the subscription/SDK path even honors that beta.)
+  today as a wire-level beta header — Codey won't control the wire anymore.
+  **But the binary (Claude Code) has its own native fast mode** (`/fast`), so
+  the right move is to check whether it's reachable via `--settings` / a flag /
+  env and drive *that* instead of the beta header. If it isn't exposed to
+  SDK/`-p` callers, fast mode is lost on the migrated backend — an accepted
+  cost, to confirm.
 - **`thinking_budget: u32`** → the binary uses effort *levels* (`low`…`xhigh`),
   not a raw token budget, so Codey's budget maps to an effort bucket.
-- **`max_tokens`, `model`** → query options / `--settings`. Note the binary only
-  routes Anthropic models, so non-Anthropic models can't use the SDK runtime —
-  giving a 3-way: `DirectAgent`+API-key (Anthropic), `DirectAgent`+OpenRouter
-  (if kept), SDK+subscription.
+- **`max_tokens`, `model`** → query options / `--settings`. The binary only
+  routes Anthropic models; with OpenRouter intentionally dropped, that's fine.
 - **Usage accounting** — `extract_turn_usage` is reimplemented against the
   binary's `result` event (`total_cost_usd`, token counts); the cache-token
-  breakdown may differ from what the Anthropic Messages response gives the
-  `DirectAgent`.
+  breakdown may differ in shape from the genai usage it replaces.
 - **Sub-agents** — Codey's `spawn_agent` + `AgentRegistry` spawn independent
-  `Agent`s today. Simplest mapping: each Codey sub-agent on the SDK runtime is
-  its own `claude` subprocess (matches the current independent-agent model;
-  costs N processes). Alternative: drive the binary's native `--agents` and
-  bridge via `parent_tool_use_id` — fewer processes, more bridging work.
+  `Agent`s today. Simplest mapping: each Codey sub-agent is its own `claude`
+  subprocess (matches the current independent-agent model; costs N processes).
+  Alternative: drive the binary's native `--agents` and bridge via
+  `parent_tool_use_id` — fewer processes, more bridging work.
 
 ### Config
 
-Add a `runtime` selector to `AgentRuntimeConfig` (today: `model`, `max_tokens`,
-`thinking_budget`, `compaction_thinking_budget`, `fast_mode`), defaulting to the
-`DirectAgent` path. Since runtime is already per-agent (foreground vs
-background), foreground can run on the SDK runtime (subscription billing) while
-background runs on `DirectAgent`+API-key, or any mix.
+`AgentRuntimeConfig` (today: `model`, `max_tokens`, `thinking_budget`,
+`compaction_thinking_budget`, `fast_mode`) loses the genai-era knobs that the
+binary now owns (caching is implicit; `compaction_thinking_budget` is the
+binary's concern). No `runtime` selector is needed — there's one backend.
+`model` and effort still pass through; `fast_mode` depends on the investigation
+above. Per-agent config (foreground vs background) stays, e.g. different models
+or effort levels per agent.
 
 ### Net
 
-genai types live in only two files, so the seam is well-placed — but this is
-**two pieces of work, not one**:
+This is a single migration, not an addition: `agent.rs` and `client.rs` are
+rewritten against `claude-codes`, and a chunk of Codey is deleted along the way
+(`auth.rs`, `compaction.rs`, genai dep, OpenRouter routing, the history/caching
+machinery). Budget the work as:
 
-1. **Replace genai with a Codey-owned Anthropic Messages client** behind a
-   `DirectAgent` that keeps today's loop. This is the "build the primitives
-   ourselves" piece: a focused SSE client + Codey-owned message/usage types.
-2. **Add `SdkAgent`** on `claude-codes` — a genuinely different implementation,
-   because the binary owns the loop `agent.rs` currently owns: a transport +
-   control-request loop, with history/compaction/caching/OAuth deleted on this
-   path, and fast-mode + non-Anthropic models accepted as `DirectAgent`-only.
+1. A `claude-codes`-backed `Agent` implementation: spawn/manage the binary,
+   stream events, and a control-request loop that routes `ToolPermissionRequest`
+   → Codey's permission UI and `McpMessageRequest` → `ToolRegistry`.
+2. Defining the `Agent` trait contract over Codey-owned types so `app.rs`,
+   `ToolExecutor`, `ToolRegistry`, `Transcript`, and the library API depend only
+   on it — not on `claude-codes` internals.
+3. Deleting the now-dead paths (auth, compaction, caching, history replay,
+   OpenRouter) and confirming the fast-mode story.
 
-Both sit behind one `Agent` trait; `app.rs`, `ToolExecutor`, `ToolRegistry`,
-and `Transcript` are unaffected by either.
+`app.rs`, `ToolExecutor`, `ToolRegistry`, and `Transcript` are otherwise
+unaffected — they already sit above the `Agent` seam.
 
 ## Open questions worth confirming before implementing
 
