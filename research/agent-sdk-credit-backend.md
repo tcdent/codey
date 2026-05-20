@@ -173,9 +173,69 @@ Concretely the design splits:
 | Fast mode            | needs investigation — likely `--settings` JSON                  |
 | Transcript / session | binary writes `~/.claude/sessions/*.jsonl`; Codey can mirror via `SessionStore` analog or its own |
 
-### Shape of a Rust port
+### Existing Rust crates (don't write the transport from scratch)
 
-The Python SDK source maps cleanly onto Rust crates:
+There are already Rust ports of the Agent SDK, so the realistic plan is to
+adopt one rather than reimplement `subprocess_cli.py` + `query.py`.
+
+| Crate | Ver | Last pub | Downloads | License | Scope |
+| ----- | --- | -------- | --------- | ------- | ----- |
+| **claude-agent-sdk-rs** (tyrchen) | 0.6.4 | 2026-02-09 | ~15.5k | MIT | Full SDK |
+| claude-codes (meawoppl) | 2.1.141 | 2026-05-18 | ~4.2k | Apache-2.0 | Types/protocol only |
+| claude-code-agent-sdk (soddygo) | 0.1.39 | 2026-02-13 | ~2.1k | MIT | Full SDK (parallel effort) |
+| claude-sdk-rs (bredmond1019) | 1.0.2 | 2025-11-07 | ~1.9k | MIT | Full SDK (older) |
+| claude-code-rs, claude-code-client-sdk | early | — | <100 | — | too new/unproven |
+
+**`claude-agent-sdk-rs` is the direct port of `claude-agent-sdk-python`** and
+confirmed to expose exactly the four primitives this design needs:
+
+- **In-process MCP server via a `tool!` macro** — the hook for surfacing
+  Codey's existing `ToolRegistry` without surrendering it.
+- **Permission callbacks** (`CanUseToolCallback`) — maps to Codey's approval UX.
+- **6 hook types** (PreToolUse, PostToolUse, UserPromptSubmit, Stop,
+  SubagentStop, PreCompact).
+- **Bidirectional streaming** via `ClaudeClient`, plus `query()` /
+  `query_stream()`. It uses the **system-installed `claude` (requires
+  ≥ 2.0.0), and does not bundle the binary.**
+
+With this crate the work collapses to: an adapter from `ClaudeClient`'s event
+stream into `agent.rs` (matching how genai events are consumed today), plus
+registering Codey's tools through the `tool!` macro. The transport,
+control-protocol demux, and MCP bridge are already implemented.
+
+#### On its apparent staleness
+
+Last release is 0.6.4 (2026-02-09); the official Python SDK meanwhile shipped
+dozens of releases through 0.2.82 (2026-05-15). That gap is less alarming than
+it looks, for two structural reasons:
+
+1. **Most upstream releases don't apply to a system-binary wrapper.** The
+   Python/TS SDKs *bundle* the `claude` binary as a dependency, so the majority
+   of their releases are "Updated bundled Claude CLI to version X" with no SDK
+   code change. tyrchen's crate uses the system binary, so those bumps are
+   no-ops for it.
+2. **The genuinely new protocol changes are additive and
+   backward-compatible** — `'defer'` hook decision, `include_hook_events`,
+   `strict_mcp_config`, `'xhigh'`/`EffortLevel`, `api_error_status` on
+   `ResultMessage`, `session_store_flush` (all 0.1.73–0.2.82). NDJSON-with-a-
+   `type`-tag degrades gracefully: a Feb-era parser still handles the core
+   init/assistant/tool_use/result/permission flow against a May binary, it just
+   ignores new fields and lacks the new knobs.
+
+So it's "quiet since Feb," not "broken." For Codey the only missing addition
+likely worth having is `EffortLevel`/`'xhigh'` (Codey already drives
+`reasoning_effort`), which is a small patch. The real risk is a future
+*breaking* protocol change landing with no maintainer present — mitigated by
+the MIT license (fork freely) and by **`claude-codes`** as a backstop:
+that crate is types-only (no subprocess, no MCP, no permissions) but its
+**version mirrors the CLI version it's tested against** (2.1.141 ↔ CLI 2.1.141)
+and warns on divergence, and it was updated within the last few days. If
+tyrchen's crate falls behind on a breaking change, drop to `claude-codes` for
+trustworthy protocol types and own a thin subprocess+control layer.
+
+### Shape of a Rust port (only if not adopting a crate)
+
+If a crate isn't adopted, the Python SDK source maps cleanly onto Rust:
 
 - `_internal/transport/subprocess_cli.py` → a transport crate:
   `tokio::process::Child`, `LinesCodec` for NDJSON framing, binary discovery
@@ -252,8 +312,11 @@ Given you've already been steering away from spoofing:
    already distinguishes `direct` Anthropic from `openrouter::`. Codey's
    existing `ToolRegistry` plugs into the binary via the in-process MCP
    bridge described above, so almost nothing about the rest of the codebase
-   changes. The Rust port follows the Python SDK structure file-for-file in a
-   small transport crate.
+   changes. Start by evaluating **`claude-agent-sdk-rs`** (tyrchen) rather than
+   writing the transport from scratch — it already implements the subprocess,
+   control-protocol demux, `tool!`-macro MCP bridge, and permission callbacks.
+   Keep `claude-codes` (CLI-version-pinned protocol types) in reserve as a
+   backstop against a future breaking protocol change.
 4. **Track Anthropic's June-15 announcement** for any new documented OAuth
    scope, endpoint, or beta flag that would expose the SDK credit pool to
    native HTTP clients. If/when that lands, a third runtime can be added; for
@@ -296,6 +359,8 @@ Given you've already been steering away from spoofing:
 - https://github.com/anthropics/claude-code/issues/37205
 - https://github.com/anthropics/claude-code/issues/24594 (open issue requesting docs for `--input-format stream-json`)
 - https://github.com/anthropics/claude-agent-sdk-python/tree/main/src/claude_agent_sdk (reference architecture for a Rust port)
+- https://github.com/tyrchen/claude-agent-sdk-rs (full Rust port; primary candidate, quiet since 2026-02)
+- https://github.com/meawoppl/rust-code-agent-sdks (`claude-codes`; CLI-version-pinned protocol types, backstop)
 - https://github.com/zacdcook/openclaw-billing-proxy (documents the four-layer detection; do not emulate)
 - https://github.com/majdyz/openclaw-claude-proxy (explicitly shells out to `claude` to avoid spoofing)
 - https://venturebeat.com/technology/anthropic-reinstates-openclaw-and-third-party-agent-usage-on-claude-subscriptions-with-a-catch
