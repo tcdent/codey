@@ -174,7 +174,7 @@ Concretely the design splits:
 | Tool registry        | **Codey**, exposed via in-process MCP server over stdio JSON-RPC|
 | Tool permission UX   | **Codey**, via `--permission-prompt-tool stdio` callbacks       |
 | IDE/Neovim hooks     | **Codey**, in the tool implementations                          |
-| Fast mode            | needs investigation — likely `--settings` JSON                  |
+| Fast mode            | `--settings '{"fastMode": true}'` (confirmed); binary handles cooldown/fallback; bills to usage credits, not the SDK pool |
 | Transcript / session | binary writes `~/.claude/sessions/*.jsonl`; Codey can mirror via `SessionStore` analog or its own |
 
 ### Existing Rust crates
@@ -435,13 +435,28 @@ response over stdio instead of rebuilding `messages` and re-calling the API.
 
 ### What's at risk or needs remapping
 
-- **Fast mode** (`research-preview-2026-02-01` beta, opus-4-6 only) is injected
-  today as a wire-level beta header — Codey won't control the wire anymore.
-  **But the binary (Claude Code) has its own native fast mode** (`/fast`), so
-  the right move is to check whether it's reachable via `--settings` / a flag /
-  env and drive *that* instead of the beta header. If it isn't exposed to
-  SDK/`-p` callers, fast mode is lost on the migrated backend — an accepted
-  cost, to confirm.
+- **Fast mode — reachable, confirmed.** Codey added fast mode by reverse-
+  engineering the `research-preview-2026-02-01` beta header; the binary has it
+  natively. `/fast` is interactive-only, **but the docs give a second path:
+  `"fastMode": true` in the settings file**, and `claude -p` accepts
+  `--settings <file-or-json>`. So Codey enables it by spawning with
+  `--settings '{"fastMode": true}'` (works even under `--bare`, which otherwise
+  skips settings discovery). Caveats:
+  - **Billing:** fast mode draws from **usage credits (pay-as-you-go,
+    $30/$150 MTok), not the SDK credit pool** — "fast mode tokens do not count
+    against your plan's included usage and are charged at the fast mode rate
+    from the first token." The account must have *usage credits turned on*
+    (admin-gated on Team/Enterprise). So fast mode is a separate, explicit cost
+    even on the subscription backend.
+  - **Model:** enabling fast mode auto-switches to Opus; the default is now
+    Opus **4.7** (v2.1.142+). Codey currently gates fast mode to opus-4-6 —
+    set `CLAUDE_CODE_OPUS_4_6_FAST_MODE_OVERRIDE=1` to preserve that.
+  - **Simplification:** the binary natively handles fast-mode rate-limit
+    fallback, cooldown, and auto-re-enable — exactly what `agent.rs` hand-rolls
+    (`FAST_MODE_COOLDOWN`, `is_rate_limit_error`, the cooldown branch). That
+    logic is deleted, not ported.
+  - Requires Claude Code v2.1.36+; not available on Bedrock/Vertex/Azure (fine
+    for Codey's direct-Anthropic case).
 - **`thinking_budget: u32`** → the binary uses effort *levels* (`low`…`xhigh`),
   not a raw token budget, so Codey's budget maps to an effort bucket.
 - **`max_tokens`, `model`** → query options / `--settings`. The binary only
@@ -518,6 +533,9 @@ unaffected — they already sit above the `Agent` seam.
 
 - https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan
 - https://code.claude.com/docs/en/agent-sdk/overview
+- https://code.claude.com/docs/en/fast-mode (fast mode via `"fastMode": true`; usage-credit billing; Opus 4.7 default)
+- https://code.claude.com/docs/en/headless (`--settings <file-or-json>`, `--bare`, stream-json)
+- https://code.claude.com/docs/en/env-vars (`CLAUDE_CODE_OPUS_4_6_FAST_MODE_OVERRIDE`, `CLAUDE_CODE_DISABLE_FAST_MODE`)
 - https://github.com/anthropics/claude-code/issues/37205
 - https://github.com/anthropics/claude-code/issues/24594 (open issue requesting docs for `--input-format stream-json`)
 - https://github.com/anthropics/claude-agent-sdk-python/tree/main/src/claude_agent_sdk (reference architecture for a Rust port)
