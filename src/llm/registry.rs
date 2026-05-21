@@ -7,7 +7,8 @@ use std::time::Instant;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Mutex;
 
-use super::agent::{Agent, AgentStep};
+use super::agent::AgentStep;
+use super::sdk_agent::SdkAgent as Agent;
 
 /// Unique identifier for an agent
 pub type AgentId = u32;

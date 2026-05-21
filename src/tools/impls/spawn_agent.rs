@@ -262,7 +262,6 @@ impl EffectHandler for SpawnAgentHandler {
         let mut agent = Agent::new(
             ctx.runtime_config.clone(),
             &system_prompt,
-            oauth,
             tools,
         );
         agent.send_request(&self.task, RequestMode::Normal);

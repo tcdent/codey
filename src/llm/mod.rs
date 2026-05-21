@@ -1,15 +1,12 @@
 //! LLM client and agent loop
 
 mod agent;
-mod client;
 mod registry;
 mod sdk_agent;
 
 #[allow(unused_imports)]
-pub use agent::{Agent, AgentStep, RequestMode, SystemPromptBuilder, Usage};
+pub use agent::{AgentStep, RequestMode, SystemPromptBuilder, Usage};
 #[allow(unused_imports)]
-pub use sdk_agent::SdkAgent;
-#[allow(unused_imports)]
-pub use client::{build_client, is_openrouter_model, OPENROUTER_PREFIX};
+pub use sdk_agent::SdkAgent as Agent;
 #[allow(unused_imports)]
 pub use registry::{AgentId, AgentMetadata, AgentRegistry, AgentStatus, PRIMARY_AGENT_ID};

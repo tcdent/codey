@@ -313,10 +313,6 @@ impl App {
                         self.oauth = Some(new_creds.clone());
                         // Update agent context for sub-agents
                         update_agent_oauth(self.oauth.clone()).await;
-                        // Update primary agent's copy
-                        if let Some(agent_mutex) = self.agents.primary() {
-                            agent_mutex.lock().await.set_oauth(Some(new_creds));
-                        }
                     },
                     Err(e) => {
                         tracing::warn!("Failed to refresh OAuth token: {}", e);
@@ -345,16 +341,14 @@ impl App {
         let mut agent = Agent::with_dynamic_prompt(
             AgentRuntimeConfig::foreground(&self.config),
             Box::new(move || system_prompt.build()),
-            self.oauth.clone(),
             self.tool_executor.tools().clone(),
         );
 
-        if self.continue_session {
-            agent.restore_from_transcript(&self.chat.transcript);
-        } else {
+        if !self.continue_session {
             self.chat
                 .add_turn(Role::Assistant, TextBlock::pending(&welcome_message(&agent_name)));
         }
+        // Session continuation is owned by the claude binary (--resume); TODO wire it.
         self.agents.register(agent);
 
         // Initial render - populate hot zone from transcript
