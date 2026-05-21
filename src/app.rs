@@ -307,7 +307,7 @@ impl App {
         // Use dynamic prompt builder so mdsh commands are re-executed on each LLM call
         let system_prompt = SystemPrompt::with_config(&self.config);
         let agent_name = system_prompt.agent_name().to_string();
-        let mut agent = Agent::with_dynamic_prompt(
+        let agent = Agent::with_dynamic_prompt(
             AgentRuntimeConfig::foreground(&self.config),
             Box::new(move || system_prompt.build()),
             self.tool_executor.tools().clone(),

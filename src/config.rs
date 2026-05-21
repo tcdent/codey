@@ -54,8 +54,12 @@ pub const CORRECTIONS_FILENAME: &str = "corrections.json";
 #[derive(Debug, Clone)]
 pub struct AgentRuntimeConfig {
     pub model: String,
+    // TODO: max_tokens/max_retries are not yet wired to the SDK backend (the
+    // binary manages output limits and retries). Retained as config knobs.
+    #[allow(dead_code)]
     pub max_tokens: u32,
     pub thinking_budget: u32,
+    #[allow(dead_code)]
     pub max_retries: u32,
     /// Enable fast mode (research preview) for lower-latency responses.
     /// Only effective with opus models.

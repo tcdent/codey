@@ -106,8 +106,9 @@ impl ChatView {
         self.width = width;
     }
 
-    /// Replace the transcript and reset view state (used after compaction rotation)
+    /// Replace the transcript and reset view state.
     /// Renders the new transcript fully to scrollback
+    #[allow(dead_code)]
     pub fn reset_transcript(
         &mut self,
         transcript: Transcript,

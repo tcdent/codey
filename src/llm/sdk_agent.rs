@@ -88,7 +88,15 @@ impl SdkMcpServer for CodeyToolBridge {
             "tools/call" => {
                 let params = &message["params"];
                 let name = params["name"].as_str().unwrap_or_default().to_string();
-                let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+                let mut args = params.get("arguments").cloned().unwrap_or(Value::Null);
+
+                // Extract and remove `background` from args (matches the legacy
+                // tool-call handling); when true the tool runs in the background.
+                let background = args
+                    .as_object_mut()
+                    .and_then(|obj| obj.remove("background"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 // Bridge to Codey's approval/execution flow.
                 let call_id = uuid::Uuid::new_v4().to_string();
@@ -101,7 +109,7 @@ impl SdkMcpServer for CodeyToolBridge {
                     name,
                     params: args,
                     decision: ToolDecision::Pending,
-                    background: false,
+                    background,
                 };
                 if self
                     .step_tx
@@ -257,6 +265,9 @@ impl SdkAgent {
             mcp_servers: McpServers::Dict(servers),
             model: Some(self.config.model.clone()),
             include_partial_messages: true,
+            // The installed CLI (2.1.x) is newer than the crate's tested version;
+            // skip the version gate so it doesn't refuse to start.
+            skip_version_check: true,
             ..Default::default()
         };
 
