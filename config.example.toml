@@ -32,14 +32,9 @@ max_tokens = 8192
 # The capabilities and guidelines section is automatically appended.
 # system_prompt = "You are Jarvis, a sophisticated AI assistant with a dry wit and encyclopedic knowledge."
 
-[auth]
-# Authentication method: "oauth" or "api_key"
-method = "oauth"
-
-# API key (only if method = "api_key")
-# api_key = "sk-ant-..."
-#
-# Or set the ANTHROPIC_API_KEY environment variable
+# Authentication is handled by the `claude` binary, which Codey drives via the
+# Claude Agent SDK. Log in once with `claude` (subscription) or set
+# ANTHROPIC_API_KEY for pay-as-you-go. Codey does not manage credentials itself.
 
 [ui]
 # Syntax highlighting theme

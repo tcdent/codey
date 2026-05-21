@@ -12,7 +12,7 @@ A terminal-based AI coding assistant built in Rust.
 - **IDE Integration**: Neovim integration for diff previews and buffer management
 - **Sub-agents**: Spawn background agents for research tasks
 - **Session Persistence**: Continue previous sessions with full context restoration
-- **OAuth Authentication**: Secure authentication via Anthropic OAuth
+- **Subscription or API billing**: runs on the Claude Agent SDK via the `claude` binary (subscription login or `ANTHROPIC_API_KEY`)
 
 ## Installation
 
@@ -47,8 +47,9 @@ sudo cp target/release/codey /usr/local/bin/
 
 ### Requirements
 
+- **Claude CLI** (required): Codey drives the `claude` binary via the Claude Agent SDK. Install it from https://docs.claude.com/claude-code and make sure `claude` is on your `PATH`.
 - **Neovim** (optional, for IDE integration): `brew install neovim`
-- **Authentication**: Either OAuth (`codey --login`) or `ANTHROPIC_API_KEY` environment variable
+- **Authentication**: handled by the `claude` binary — log in once with `claude` (subscription) or set `ANTHROPIC_API_KEY` for pay-as-you-go.
 
 ## Usage
 
@@ -65,12 +66,15 @@ codey --working-dir /path/to/project
 
 ### Authentication
 
-```bash
-# OAuth login (recommended)
-codey --login              # Prints auth URL
-codey --login <code>       # Exchanges code for token
+Codey itself stores no credentials — the `claude` binary it drives owns auth.
+Authenticate once with the Claude CLI (uses your subscription's programmatic
+credit), or set an API key for pay-as-you-go:
 
-# Or use API key
+```bash
+# Subscription login (via the Claude CLI)
+claude   # follow the login prompt once
+
+# Or use an API key (pay-as-you-go)
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 

@@ -115,7 +115,6 @@ pub struct Config {
     pub general: GeneralConfig,
     pub agent: AgentPersonaConfig,
     pub agents: AgentsConfig,
-    pub auth: AuthConfig,
     pub ui: UiConfig,
     pub tools: ToolsConfig,
     pub ide: IdeConfig,
@@ -129,7 +128,6 @@ impl Default for Config {
             general: GeneralConfig::default(),
             agent: AgentPersonaConfig::default(),
             agents: AgentsConfig::default(),
-            auth: AuthConfig::default(),
             ui: UiConfig::default(),
             tools: ToolsConfig::default(),
             ide: IdeConfig::default(),
@@ -249,32 +247,6 @@ impl AgentPersonaConfig {
     pub fn name(&self) -> &str {
         self.name.as_deref().unwrap_or(crate::prompts::DEFAULT_AGENT_NAME)
     }
-}
-
-#[cfg(feature = "cli")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AuthConfig {
-    pub method: AuthMethod,
-    pub api_key: Option<String>,
-}
-
-#[cfg(feature = "cli")]
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            method: AuthMethod::ApiKey,
-            api_key: None,
-        }
-    }
-}
-
-#[cfg(feature = "cli")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthMethod {
-    OAuth,
-    ApiKey,
 }
 
 #[cfg(feature = "cli")]
@@ -482,17 +454,12 @@ mod tests {
 model = "claude-opus-4-20250514"
 max_tokens = 4096
 
-[auth]
-method = "api_key"
-api_key = "sk-test"
-
 [ui]
 theme = "monokai"
 auto_scroll = false
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.agents.foreground.model, "claude-opus-4-20250514");
-        assert_eq!(config.auth.method, AuthMethod::ApiKey);
         assert_eq!(config.ui.theme, "monokai");
     }
 
