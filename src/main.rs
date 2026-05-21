@@ -1,5 +1,4 @@
 mod app;
-mod auth;
 mod commands;
 mod compaction;
 mod config;
@@ -34,58 +33,15 @@ struct Args {
     #[arg(short, long)]
     r#continue: bool,
 
-    /// Override the model (e.g., "openrouter::anthropic/claude-3.5-sonnet")
+    /// Override the model (e.g., "claude-opus-4-7")
     #[arg(short, long)]
     model: Option<String>,
-
-    /// OAuth login - without code prints auth URL, with code exchanges for token
-    #[arg(long, num_args = 0..=1, default_missing_value = "")]
-    login: Option<String>,
 
     /// Enable performance profiling (requires --features profiling)
     /// Exports profile data to the specified path on exit
     #[cfg(feature = "profiling")]
     #[arg(long, value_name = "OUTPUT_PATH")]
     profile: Option<PathBuf>,
-}
-
-/// Handle the OAuth login flow
-async fn handle_login(code: Option<String>) -> Result<()> {
-    match code {
-        Some(code) if !code.is_empty() => {
-            // Exchange code for tokens
-            // Load the verifier from the temp file
-            let verifier_path = std::env::temp_dir().join("codey_pkce_verifier");
-            let verifier = std::fs::read_to_string(&verifier_path)
-                .map_err(|_| anyhow::anyhow!("No pending login. Run 'codey --login' first."))?;
-            
-            // Clean up verifier file
-            let _ = std::fs::remove_file(&verifier_path);
-
-            println!("Exchanging code for tokens...");
-            let credentials = auth::exchange_code(&code, &verifier).await?;
-            credentials.save()?;
-            
-            println!("Authenticated successfully!");
-            println!("Token saved to: {}", auth::OAuthCredentials::path()?.display());
-            Ok(())
-        }
-        _ => {
-            // Generate and print auth URL
-            let (url, verifier) = auth::generate_auth_url();
-            
-            // Save verifier for later exchange
-            let verifier_path = std::env::temp_dir().join("codey_pkce_verifier");
-            std::fs::write(&verifier_path, &verifier)?;
-
-            println!("Visit this URL to authorize:");
-            println!();
-            println!("  {}", url);
-            println!();
-            println!("Then run: codey --login <code>");
-            Ok(())
-        }
-    }
 }
 
 #[tokio::main]
@@ -105,11 +61,6 @@ async fn main() -> Result<()> {
     }
 
     let args = Args::parse();
-
-    // Handle OAuth login flow
-    if let Some(login_arg) = args.login {
-        return handle_login(Some(login_arg).filter(|s| !s.is_empty())).await;
-    }
 
     // Load configuration
     let mut config = config::Config::load()?;

@@ -1,6 +1,8 @@
 //! Codey - A terminal-based AI coding assistant
 //!
 //! This crate can be used as a library to create AI agents with custom system prompts.
+//! Agents run on the Claude Agent SDK, which drives the `claude` binary — it must
+//! be installed and authenticated (subscription login or `ANTHROPIC_API_KEY`).
 //!
 //! # Example
 //!
@@ -13,7 +15,6 @@
 //!     let mut agent = Agent::new(
 //!         AgentRuntimeConfig::default(),
 //!         "You are a helpful assistant. Answer questions concisely.",
-//!         None, // oauth credentials (uses ANTHROPIC_API_KEY env var)
 //!         ToolRegistry::empty(),
 //!     );
 //!
@@ -40,7 +41,6 @@
 //! ```
 
 // Core modules (always available)
-mod auth;
 mod config;
 mod effect;
 mod ide;

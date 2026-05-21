@@ -27,9 +27,6 @@ crossterm = { version = "0.28", features = ["event-stream"], optional = true }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
-# LLM client (multi-provider) - using patched version for thinking blocks + OAuth
-genai = { git = "https://github.com/tcdent/rust-genai.git", branch = "codey-dev" }
-
 # Claude Agent SDK backend (drives the `claude` binary; subscription / SDK-credit billing)
 claude-agent-sdk-rs = "0.6.4"
 

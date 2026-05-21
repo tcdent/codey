@@ -42,7 +42,7 @@ pub use crate::effect::EffectResult;
 pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
 #[cfg(feature = "cli")]
 pub use impls::{
-    init_agent_context, update_agent_oauth, EditFileTool, FetchHtmlTool, FetchUrlTool,
+    init_agent_context, EditFileTool, FetchHtmlTool, FetchUrlTool,
     GetAgentTool, GetBackgroundTaskTool, ListAgentsTool, ListBackgroundTasksTool, OpenFileTool,
     ReadFileTool, RecordCorrectionTool, ShellTool, SpawnAgentTool, WebSearchTool, WriteFileTool,
 };

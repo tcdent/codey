@@ -3,7 +3,6 @@
 use std::sync::OnceLock;
 
 use super::{Tool, ToolPipeline};
-use crate::auth::OAuthCredentials;
 use crate::config::AgentRuntimeConfig;
 use crate::impl_tool_block;
 use crate::llm::{Agent, RequestMode};
@@ -17,40 +16,26 @@ use ratatui::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::RwLock;
 
 // =============================================================================
 // Agent Context - global state for spawning sub-agents
 // =============================================================================
 
 // TODO: Refactor to avoid global state. We use OnceLock here because tool handlers
-// (EffectHandler::call) don't have access to app-level context like config and OAuth
-// credentials. Ideally we'd pass this context through the tool pipeline, but that
-// would require changes to the Tool/EffectHandler traits. For now, the app initializes
-// this at startup and updates OAuth after refresh.
+// (EffectHandler::call) don't have access to app-level context like the runtime
+// config. The app initializes this at startup. Auth is owned by the claude binary,
+// so no credentials are threaded through here.
 
 /// Context needed to spawn sub-agents, initialized at app startup
 pub struct AgentContext {
     pub runtime_config: AgentRuntimeConfig,
-    /// OAuth credentials - wrapped in RwLock so app can update after refresh
-    pub oauth: RwLock<Option<OAuthCredentials>>,
 }
 
 static AGENT_CONTEXT: OnceLock<AgentContext> = OnceLock::new();
 
 /// Initialize the agent context. Called once at app startup.
-pub fn init_agent_context(runtime_config: AgentRuntimeConfig, oauth: Option<OAuthCredentials>) {
-    AGENT_CONTEXT.set(AgentContext {
-        runtime_config,
-        oauth: RwLock::new(oauth),
-    }).ok();
-}
-
-/// Update the oauth credentials (called after refresh)
-pub async fn update_agent_oauth(oauth: Option<OAuthCredentials>) {
-    if let Some(ctx) = AGENT_CONTEXT.get() {
-        *ctx.oauth.write().await = oauth;
-    }
+pub fn init_agent_context(runtime_config: AgentRuntimeConfig) {
+    AGENT_CONTEXT.set(AgentContext { runtime_config }).ok();
 }
 
 /// Get the agent context, if initialized.
@@ -245,9 +230,6 @@ impl EffectHandler for SpawnAgentHandler {
             Some(c) => c,
             None => return Step::Error("Agent context not initialized".into()),
         };
-
-        // Get OAuth credentials (may be None for API key auth)
-        let oauth = ctx.oauth.read().await.clone();
 
         // Build system prompt
         let system_prompt = if let Some(context) = &self.task_context {

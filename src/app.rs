@@ -25,7 +25,7 @@ use crate::notifications::{Notification, NotificationQueue};
 use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, welcome_message};
 use crate::tool_filter::ToolFilters;
 use crate::tools::{
-    init_agent_context, init_browser_context, update_agent_oauth, EffectResult, ToolDecision,
+    init_agent_context, init_browser_context, EffectResult, ToolDecision,
     ToolEvent, ToolExecutor, ToolRegistry,
 };
 use crate::transcript::{Block, BlockType, NotificationBlock, Role, Status, TextBlock, Transcript};
@@ -179,8 +179,6 @@ pub struct App {
     agents: AgentRegistry,
     /// Tool executor for managing tool approval and execution
     tool_executor: ToolExecutor,
-    /// OAuth credentials for agent creation
-    oauth: Option<crate::auth::OAuthCredentials>,
     /// Queue for pending effects (approvals, IDE previews, etc.)
     effects: EffectQueue,
     /// Notifications to inject into next tool result
@@ -293,44 +291,15 @@ impl App {
             input_mode: InputMode::Normal,
             agents: AgentRegistry::new(),
             tool_executor: ToolExecutor::new(ToolRegistry::new()),
-            oauth: None,
             effects: EffectQueue::new(),
             notifications: NotificationQueue::new(),
         })
     }
 
-    /// Refresh OAuth credentials if expired, updating both App and primary agent
-    async fn refresh_oauth(&mut self) {
-        if let Some(ref oauth) = self.oauth {
-            if oauth.is_expired() {
-                tracing::info!("Refreshing expired OAuth token");
-                match crate::auth::refresh_token(oauth).await {
-                    Ok(new_creds) => {
-                        if let Err(e) = new_creds.save() {
-                            tracing::warn!("Failed to save refreshed OAuth credentials: {}", e);
-                        }
-                        // Update App's copy
-                        self.oauth = Some(new_creds.clone());
-                        // Update agent context for sub-agents
-                        update_agent_oauth(self.oauth.clone()).await;
-                    },
-                    Err(e) => {
-                        tracing::warn!("Failed to refresh OAuth token: {}", e);
-                    },
-                }
-            }
-        }
-    }
-
     /// Run the main event loop - purely event-driven rendering
     pub async fn run(&mut self) -> Result<()> {
-        self.oauth = crate::auth::OAuthCredentials::load().ok().flatten();
-
         // Initialize agent context for sub-agent spawning
-        init_agent_context(
-            AgentRuntimeConfig::background(&self.config),
-            self.oauth.clone(),
-        );
+        init_agent_context(AgentRuntimeConfig::background(&self.config));
 
         // Initialize browser context for fetch_html
         init_browser_context(&self.config.browser);
@@ -703,9 +672,6 @@ impl App {
     /// Handle notifications from the queue.
     /// Batches messages together into a single request, executes commands individually.
     async fn handle_notifications(&mut self, notifications: Vec<Notification>) -> Result<()> {
-        // Refresh OAuth token if needed
-        self.refresh_oauth().await;
-
         // Separate by type: messages get batched, commands execute individually
         let mut messages: Vec<(String, usize)> = Vec::new();  // (content, block_id)
         let mut commands: Vec<(String, usize)> = Vec::new();  // (name, block_id)
