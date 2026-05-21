@@ -3,9 +3,12 @@
 mod agent;
 mod client;
 mod registry;
+mod sdk_agent;
 
 #[allow(unused_imports)]
 pub use agent::{Agent, AgentStep, RequestMode, SystemPromptBuilder, Usage};
+#[allow(unused_imports)]
+pub use sdk_agent::SdkAgent;
 #[allow(unused_imports)]
 pub use client::{build_client, is_openrouter_model, OPENROUTER_PREFIX};
 #[allow(unused_imports)]
