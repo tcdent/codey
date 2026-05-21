@@ -177,81 +177,105 @@ Concretely the design splits:
 | Fast mode            | `--settings '{"fastMode": true}'` (confirmed); binary handles cooldown/fallback; bills to usage credits, not the SDK pool |
 | Transcript / session | binary writes `~/.claude/sessions/*.jsonl`; Codey can mirror via `SessionStore` analog or its own |
 
-### Existing Rust crates
+### Existing Rust crates (evaluated against the two hard requirements)
 
-There are several Rust crates in this space. The decision that matters: the
-full-SDK ports are unmaintained, and the one actively maintained crate is the
-lower-level protocol+client layer.
+Codey's backend has two non-negotiable requirements that narrow the field:
+**(1) live token streaming** (a `stream_event`/partial-message type the consumer
+can render incrementally), and **(2) in-process custom tool execution** (the
+binary delegates `tools/call` back to Codey's `ToolRegistry` over the control
+channel — an "SDK MCP server" — so Codey's effect pipeline, IDE diff previews,
+permission filters, and custom tools like `spawn_agent` run, *not* the binary's
+built-in Read/Write/Bash). Source-verified, version by version:
 
-| Crate | Ver | Last pub | Downloads | License | Scope | Maintained? |
-| ----- | --- | -------- | --------- | ------- | ----- | ----------- |
-| claude-codes (meawoppl) | 2.1.141 | 2026-05-18 | ~4.2k | Apache-2.0 | Subprocess + protocol + control-msg types | **Yes — every 1–2 wks, CLI-version-pinned** |
-| claude-agent-sdk-rs (tyrchen) | 0.6.4 | 2026-02-09 | ~15.5k | MIT | Full SDK (`tool!` macro, callbacks) | No — quiet since Feb |
-| claude-code-agent-sdk (soddygo) | 0.1.39 | 2026-02-13 | ~2.1k | MIT | Full SDK (parallel effort) | No — quiet since Feb |
-| claude-sdk-rs (bredmond1019) | 1.0.2 | 2025-11-07 | ~1.9k | MIT | Full SDK (older) | No — quiet since Nov |
-| claude-code-rs, claude-code-client-sdk | early | — | <100 | — | unproven | n/a |
+| Crate | Ver | Live streaming | In-process custom tools | Maintained |
+| ----- | --- | -------------- | ----------------------- | ---------- |
+| **claude-agent-sdk-rs** (tyrchen) | 0.6.4 | ✅ `Message::StreamEvent` | ✅ **wired**: `mcp_message` ctrl req → `SdkMcpServer::handle_message`; `tool!` macro | ✗ quiet since Feb 9 |
+| **claude-code-agent-sdk** (soddygo) | 0.1.39 | ✅ | ✅ wired (near-identical port) | ✗ quiet since Feb 13 |
+| claude-agent-sdk-rust | 1.0.0 | ✅ | ✗ **stub** — `McpSdkServerConfig.instance: Option<()>`, "future feature" | ~Mar |
+| claude-wrapper | 0.9.0 | ✅ (callback) | ✗ external-only (`Http`/`Stdio`) | ✅ May |
+| claude-codes (meawoppl) | 2.1.141 | ✗ no `stream_event` variant (parse-errors on partials) | ✗ external-only (`Stdio`/`Sse`/`Http`) | ✅ May |
+| claude-sdk-rs (bredmond1019) | 1.0.2 | ✗ | ✗ (external example only) | ✗ Nov |
 
-**No actively-maintained full Rust Agent SDK exists.** Both full-SDK ports
-(tyrchen, soddygo) went quiet in February. Building the backend on either means
-adopting an unmaintained dependency in a critical path — not acceptable for a
-core runtime.
+**The two axes are in genuine conflict.** Every actively-maintained crate fails
+requirement (2): `claude-codes` and `claude-wrapper` only support *external* MCP
+servers, and `claude-agent-sdk-rust`'s SDK server is an explicit stub. The only
+crates that implement both — verified by reading the source, not the docs — are
+the two full Python-SDK ports, `claude-agent-sdk-rs` (tyrchen) and
+`claude-code-agent-sdk` (soddygo), both quiet since February.
 
-**`claude-codes` is the right foundation,** and it's more capable than its
-repo README ("typed interfaces") implies. The published 2.1.141 crate exposes:
+> Correction note: an earlier revision of this doc recommended `claude-codes`
+> on maintenance signals. That was wrong. `claude-codes` is a lower-level
+> protocol-types client built around "the binary runs autonomously, you observe
+> and approve" — its `ClaudeOutput` enum has no streaming variant and its
+> `McpServerConfig` has no `Sdk` variant, so it can deliver neither live
+> streaming nor in-process tools. The "claude-codes owns transport, Codey writes
+> the glue" framing does not hold.
 
-- `client_async::AsyncClient` / `client_sync::SyncClient` that spawn and manage
-  the `claude` subprocess, with `ResponseStream` / `AsyncStreamProcessor` for
-  typed streaming.
-- An `io` module defining the full control protocol: `ControlRequest`,
-  `ControlResponse`, `ToolPermissionRequest`, `McpMessageRequest`,
-  `HookCallbackRequest`.
-- `protocol` / `messages` / `types` / `tool_inputs` — the serde layer.
-- `version` — CLI version checking, and the **crate version literally tracks
-  the CLI version it's tested against** (2.1.141 ↔ CLI 2.1.141), with
-  divergence warnings. This is the direct fix for the protocol-drift caveat.
+### Recommendation: fork/vendor `claude-agent-sdk-rs`
 
-What it does *not* provide is the higher-level sugar — no `tool!` macro, no
-permission-callback registration. It hands you the typed control message and
-you respond. **For Codey that's the ideal split, not a gap:**
+Since the only complete implementations are unmaintained, and Codey cannot
+compromise on running its own tools, the pragmatic choice is to **fork or
+vendor tyrchen's `claude-agent-sdk-rs`** (MIT, ~15.5k downloads). It is
+verified to provide everything the backend needs:
 
-| Layer | Owner | Why |
-| ----- | ----- | --- |
-| Subprocess spawn, JSON-Lines framing, protocol/message types, CLI version pinning | `claude-codes` | Mechanical, drift-prone, actively maintained; low lock-in (Apache-2.0, easy to vendor) |
-| Control-request loop: answer `ToolPermissionRequest` via Codey's permission UI; dispatch `McpMessageRequest` (`tools/list`, `tools/call`) to Codey's `ToolRegistry`; handle `HookCallbackRequest` | **Codey** | The opinionated glue Codey wants to own — integrates the existing registry, permission filters, IDE/Neovim hooks |
-| Adapter from the output `messages` stream into `AgentStep` | **Codey** | Same `AgentStep` shape `app.rs` already consumes |
+- `query()` / `query_stream()` one-shot APIs and a bidirectional `ClaudeClient`
+  with `receive_messages() -> Stream<Item = Result<Message>>`.
+- `Message::StreamEvent` for live deltas (with `--include-partial-messages`).
+- `McpServerConfig::Sdk` + the `SdkMcpServer { async fn handle_message(Value)
+  -> Result<Value> }` trait + `tool!` macro + `ToolHandler` — and the wiring
+  (`internal/query_full.rs` routes `control_request`/`mcp_message` →
+  `handle_sdk_mcp_request` → the registered server). Codey implements
+  `SdkMcpServer` to bridge JSON-RPC `tools/list`/`tools/call` to its
+  `ToolRegistry`.
+- Permission callbacks (`CanUseToolCallback`) and 6 hook types.
 
-The only thing tyrchen's full SDK adds over this is the `tool!` macro and
-callback registration — exactly the layer Codey would replace with direct
-`ToolRegistry` / permission-UI integration anyway. So depending on the
-unmaintained crate buys sugar that gets thrown away; depending on
-`claude-codes` buys the maintained mechanical layer and leaves Codey to write
-the stable, opinionated glue. tyrchen's crate stays useful as an MIT
-*reference* for the control-loop shape — cribbed, not depended on.
+Why fork rather than depend: the upstream is unmaintained, the CLI protocol is
+additive but does drift, and Codey already maintains a genai fork — owning a
+fork of a *complete, focused* SDK crate is a strict improvement over that, and
+converts the "dead upstream" risk into something we control. soddygo's
+`claude-code-agent-sdk` is a viable near-identical alternate to diff against.
 
-Residual risk: `claude-codes` is also a single-maintainer crate. But the
-dependency is on framing + types (mechanical, CLI-pinned, trivially
-vendorable), not on behavior — far lower lock-in than depending on a full
-SDK's agent logic.
+Rejected alternatives and why:
+- **claude-codes / claude-wrapper** — maintained, but external-MCP-only, so
+  Codey's tools can't run in-process. Adopting either would mean reimplementing
+  the SDK MCP server + (for claude-codes) the streaming parse ourselves — i.e.
+  rebuilding most of `claude-agent-sdk-rs`'s `query_full.rs` on a thinner base.
+- **claude-agent-sdk-rust 1.0.0** — streaming works, but the SDK MCP server is
+  a stub (`instance: Option<()>`); custom tools don't execute.
+
+### Validation gap (must close before committing)
+
+This evaluation is source-level. It has **not** been validated at runtime: this
+environment has no `ANTHROPIC_API_KEY` and no `~/.claude/.credentials.json`, so
+the binary can't authenticate here. Before the migration lands, smoke-test the
+chosen crate against the installed `claude` (2.1.146): (a) stream a response and
+confirm `StreamEvent` deltas arrive, (b) round-trip one in-process tool
+(`tools/list` + `tools/call` → `ToolRegistry` → result), (c) confirm a
+permission `CanUseTool` request can be answered. tyrchen pins an older tested
+CLI version; verify the protocol still parses against 2.1.x.
 
 ### Shape of the Codey-owned glue
 
-The control loop Codey writes on top of `claude-codes` maps to the Python
-SDK's `_internal/query.py` (the reference for the demux):
+On top of the (forked) `claude-agent-sdk-rs`, Codey writes the adapter from the
+crate's `Message` stream into `AgentStep`, and an `SdkMcpServer` impl that
+dispatches to `ToolRegistry`:
 
-- `_internal/transport/subprocess_cli.py` → a transport crate:
-- Subprocess spawn, NDJSON framing, version check, the ~15 output event
-  variants and the control-protocol message types → **provided by
-  `claude-codes`** (`AsyncClient`, `io::*`, `protocol`, `messages`, `version`).
-  Not Codey's code to write or maintain.
-- `_internal/query.py`'s demux → the loop Codey writes: read the `AsyncClient`
-  stream, and on each `ControlRequest` branch on its variant —
-  `ToolPermissionRequest` → Codey's permission UI → `ControlResponse`;
-  `McpMessageRequest` (`tools/list`, `tools/call`) → Codey's `ToolRegistry`
-  → `ControlResponse`; `HookCallbackRequest` → transcript/fast-mode handling.
-  Output `messages` get mapped into the event type `agent.rs` already consumes.
-- The MCP bridge is just the `McpMessageRequest` arm of that loop: translate
-  `tools/list` and `tools/call` into `ToolRegistry` calls. No listening socket,
-  no separate process — dispatch over the existing control channel.
+- Subprocess spawn, NDJSON framing, version check, the message/event types, the
+  control-protocol loop, streaming, permission-callback plumbing, and MCP
+  dispatch (`mcp_message` ctrl req → registered `SdkMcpServer`) → **provided by
+  the (forked) crate.** Not Codey's code to write or maintain.
+- **The tool bridge** is an `impl SdkMcpServer for CodeyTools` whose
+  `handle_message(Value) -> Result<Value>` answers MCP JSON-RPC `tools/list`
+  and `tools/call` from the existing `ToolRegistry` (and routes execution
+  through Codey's effect pipeline / approval UI / IDE previews). Registered via
+  `McpServerConfig::Sdk`; the binary calls it over the control channel — no
+  socket, no extra process.
+- **The permission callback** (`CanUseToolCallback`) maps to Codey's existing
+  approval UX.
+- **The `Message` → `AgentStep` adapter**: map `StreamEvent` text deltas →
+  `TextDelta`/`ThinkingDelta`, tool-use requests → `ToolRequest`, `Result` →
+  `Finished { usage }`, errors → `Error`/`Retrying` — the shape `app.rs`
+  already consumes, so the rest of Codey is unchanged.
 
 ### Spawn line
 
@@ -276,15 +300,14 @@ docs is "the recommended mode for scripted and SDK calls."
 
 - **`--input-format stream-json` is intentionally undocumented**
   (`anthropics/claude-code#24594` is open). The output side is documented,
-  the input side is reverse-engineered. This is largely handled for us:
-  `claude-codes` tracks the CLI version it's tested against and warns on
-  divergence, so the drift surface is owned by a maintained crate rather than
-  Codey. Still worth pinning a known-good `claude` version range in Codey's
-  docs and surfacing the crate's divergence warning to the user.
-- **Min CLI version is enforced** by `claude-codes` (`version` module). No
-  separate handling needed in Codey beyond surfacing the error.
-- **No binary bundling.** `claude-codes` uses the system-installed `claude`,
-  so Codey requires users to install it themselves (`brew install
+  the input side is reverse-engineered. The forked `claude-agent-sdk-rs` owns
+  this surface; since the fork is ours, **we** track CLI-version drift. Pin a
+  known-good `claude` version range and re-test the protocol on bumps —
+  tyrchen pins an older tested version, so re-validate against current 2.1.x.
+- **Min CLI version** is checked by the crate's `version` module; surface its
+  error to the user.
+- **No binary bundling.** The crate uses the system-installed `claude`, so
+  Codey requires users to install it themselves (`brew install
   anthropic/claude/claude` or the install script). Add a setup-doc note and a
   clear "claude not found / wrong version" error path.
 
@@ -300,7 +323,7 @@ enforcement signal.
 
 The exploration above lays out the options; the chosen direction is to collapse
 them. Codey migrates its **entire** backend path onto the Anthropic Agent SDK
-driven through the `claude` binary (via `claude-codes`), and removes every other
+driven through the `claude` binary (via a forked `claude-agent-sdk-rs`), and removes every other
 path.
 
 1. **One backend.** The `claude` binary is the only LLM path. Delete the genai
@@ -402,7 +425,7 @@ across this boundary.
 
 This is the part that makes it tractable. The SDK backend translates:
 
-| Binary event (via `claude-codes`)             | Codey `AgentStep` / action |
+| Binary event (via the forked SDK crate)       | Codey `AgentStep` / action |
 | --------------------------------------------- | -------------------------- |
 | assistant text delta                          | `AgentStep::TextDelta`     |
 | thinking delta                                | `AgentStep::ThinkingDelta` |
@@ -483,16 +506,19 @@ or effort levels per agent.
 ### Net
 
 This is a single migration, not an addition: `agent.rs` and `client.rs` are
-rewritten against `claude-codes`, and a chunk of Codey is deleted along the way
-(`auth.rs`, `compaction.rs`, genai dep, OpenRouter routing, the history/caching
-machinery). Budget the work as:
+rewritten against the forked `claude-agent-sdk-rs`, and a chunk of Codey is
+deleted along the way (`auth.rs`, `compaction.rs`, genai dep, OpenRouter
+routing, the history/caching machinery). Budget the work as:
 
-1. A `claude-codes`-backed `Agent` implementation: spawn/manage the binary,
-   stream events, and a control-request loop that routes `ToolPermissionRequest`
-   → Codey's permission UI and `McpMessageRequest` → `ToolRegistry`.
+0. Fork/vendor `claude-agent-sdk-rs` and smoke-test it against the installed
+   `claude` (streaming deltas, an in-process tool round-trip, a permission
+   request) — close the validation gap before building on it.
+1. An SDK-crate-backed `Agent` implementation: spawn/manage the binary, stream
+   events, an `SdkMcpServer` impl bridging `tools/*` to `ToolRegistry`, and the
+   `CanUseToolCallback` wired to Codey's permission UI.
 2. Defining the `Agent` trait contract over Codey-owned types so `app.rs`,
    `ToolExecutor`, `ToolRegistry`, `Transcript`, and the library API depend only
-   on it — not on `claude-codes` internals.
+   on it — not on the SDK crate's internals.
 3. Deleting the now-dead paths (auth, compaction, caching, history replay,
    OpenRouter) and confirming the fast-mode story.
 
@@ -539,8 +565,12 @@ unaffected — they already sit above the `Agent` seam.
 - https://github.com/anthropics/claude-code/issues/37205
 - https://github.com/anthropics/claude-code/issues/24594 (open issue requesting docs for `--input-format stream-json`)
 - https://github.com/anthropics/claude-agent-sdk-python/tree/main/src/claude_agent_sdk (reference architecture for a Rust port)
-- https://github.com/meawoppl/rust-code-agent-sdks (`claude-codes`; actively maintained, CLI-version-pinned subprocess+protocol layer — recommended foundation)
-- https://github.com/tyrchen/claude-agent-sdk-rs (full Rust port; unmaintained since 2026-02 — reference only, do not depend on)
+- https://github.com/meawoppl/rust-code-agent-sdks (`claude-codes`; maintained protocol-types client — evaluated and rejected: no streaming variant, no in-process tools)
+- https://github.com/tyrchen/claude-agent-sdk-rs (full Rust port — **chosen base to fork/vendor**: streaming + in-process SDK MCP + permissions + hooks; unmaintained since 2026-02)
+- https://github.com/soddygo/claude-code-agent-sdk (near-identical full port; viable alternate to diff against)
+- https://crates.io/crates/claude-agent-sdk-rust (v1.0.0; streaming, but SDK MCP server is a stub — not usable for in-process tools)
+- https://crates.io/crates/claude-wrapper (maintained, streaming; external-MCP-only — no in-process tools)
+- https://crates.io/crates/claude-codes (maintained protocol-types client; no streaming variant, no in-process tools — not suitable)
 - https://github.com/zacdcook/openclaw-billing-proxy (documents the four-layer detection; do not emulate)
 - https://github.com/majdyz/openclaw-claude-proxy (explicitly shells out to `claude` to avoid spoofing)
 - https://venturebeat.com/technology/anthropic-reinstates-openclaw-and-third-party-agent-usage-on-claude-subscriptions-with-a-catch
