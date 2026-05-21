@@ -30,6 +30,9 @@ tokio-stream = "0.1"
 # LLM client (multi-provider) - using patched version for thinking blocks + OAuth
 genai = { git = "https://github.com/tcdent/rust-genai.git", branch = "codey-dev" }
 
+# Claude Agent SDK backend (drives the `claude` binary; subscription / SDK-credit billing)
+claude-agent-sdk-rs = "0.6.4"
+
 # HTTP client
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
 futures = "0.3"
