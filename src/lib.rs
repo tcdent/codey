@@ -50,8 +50,6 @@ mod transcript;
 
 // CLI-only modules
 #[cfg(feature = "cli")]
-mod compaction;
-#[cfg(feature = "cli")]
 mod notifications;
 #[cfg(feature = "cli")]
 mod prompts;

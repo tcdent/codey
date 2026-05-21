@@ -103,20 +103,6 @@ When a shell command or approach fails and you find a better way to accomplish t
 - Always get confirmation before making destructive changes (this includes building a release)
 "#;
 
-/// Prompt used when compacting conversation context
-pub const COMPACTION_PROMPT: &str = r#"The conversation context is getting large and needs to be compacted.
-
-Please provide a comprehensive summary of our conversation so far in markdown format. Include:
-
-1. **What was accomplished** - Main tasks and changes completed as a bulleted list
-2. **What still needs to be done** - Remaining tasks or open areas of work as a bulleted list
-3. **Key project information** - Important facts about the project that the user has shared or that we're not immediately apparent
-4. **Relevant files** - Files most relevant to the current work with brief descriptions, line numbers, or method/variable names
-5. **Relevant documentation paths or URLs** - Links to docs or resources we will use to continue our work
-6. **Quotes and log snippets** - Any important quotes or logs that the user provided that we'll need later
-
-Be thorough but concise - this summary will seed a fresh conversation context."#;
-
 /// System prompt for sub-agents (background research agents)
 pub const SUB_AGENT_PROMPT: &str = r#"You are a background agent. Your task is to investigate, explore, analyze, or implement as directed.
 

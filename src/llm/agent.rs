@@ -5,7 +5,6 @@
 //! that backend and the rest of Codey (App, transcript, tools).
 #![allow(dead_code)]
 
-use crate::config::AgentRuntimeConfig;
 use crate::tools::ToolCall;
 
 /// Token usage tracking
@@ -55,8 +54,6 @@ pub enum AgentStep {
     TextDelta(String),
     /// Streaming thinking/reasoning chunk (extended thinking)
     ThinkingDelta(String),
-    /// Streaming compaction summary chunk
-    CompactionDelta(String),
     /// Agent wants to execute tools, needs approval
     ToolRequest(Vec<ToolCall>),
     /// Retrying after error
@@ -67,38 +64,15 @@ pub enum AgentStep {
     Error(String),
 }
 
-/// Request mode controlling agent behavior for a single request
+/// Request mode controlling agent behavior for a single request.
+///
+/// Retained for the public `send_request` signature; the `claude` binary owns
+/// the agent loop, so only `Normal` is used today.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum RequestMode {
     /// Normal conversation mode with tool access
     #[default]
     Normal,
-    /// Compaction mode: no tools, focused on summarization
-    Compaction,
-}
-
-/// Options derived from a RequestMode
-pub struct RequestOptions {
-    pub tools_enabled: bool,
-    pub thinking_budget: u32,
-    pub capture_tool_calls: bool,
-}
-
-impl RequestMode {
-    pub fn options(&self, config: &AgentRuntimeConfig) -> RequestOptions {
-        match self {
-            Self::Normal => RequestOptions {
-                tools_enabled: true,
-                thinking_budget: config.thinking_budget,
-                capture_tool_calls: true,
-            },
-            Self::Compaction => RequestOptions {
-                tools_enabled: false,
-                thinking_budget: config.compaction_thinking_budget,
-                capture_tool_calls: false,
-            },
-        }
-    }
 }
 
 /// A function that builds a dynamic system prompt.

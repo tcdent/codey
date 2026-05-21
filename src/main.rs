@@ -1,6 +1,5 @@
 mod app;
 mod commands;
-mod compaction;
 mod config;
 mod effect;
 mod ide;

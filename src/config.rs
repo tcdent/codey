@@ -48,7 +48,6 @@ pub const CORRECTIONS_FILENAME: &str = "corrections.json";
 ///     max_tokens: 8192,
 ///     thinking_budget: 2_000,
 ///     max_retries: 5,
-///     compaction_thinking_budget: 8_000,
 ///     fast_mode: false,
 /// };
 /// ```
@@ -58,9 +57,8 @@ pub struct AgentRuntimeConfig {
     pub max_tokens: u32,
     pub thinking_budget: u32,
     pub max_retries: u32,
-    pub compaction_thinking_budget: u32,
     /// Enable fast mode (research preview) for lower-latency responses.
-    /// Only effective with opus-4-6 models.
+    /// Only effective with opus models.
     pub fast_mode: bool,
 }
 
@@ -71,7 +69,6 @@ impl Default for AgentRuntimeConfig {
             max_tokens: 8192,
             thinking_budget: 2_000,
             max_retries: 5,
-            compaction_thinking_budget: 8_000,
             fast_mode: false,
         }
     }
@@ -90,7 +87,6 @@ impl AgentRuntimeConfig {
             max_tokens: config.agents.foreground.max_tokens,
             thinking_budget: config.agents.foreground.thinking_budget,
             max_retries: config.general.max_retries,
-            compaction_thinking_budget: config.general.compaction_thinking_budget,
             fast_mode: config.agents.foreground.fast_mode,
         }
     }
@@ -102,7 +98,6 @@ impl AgentRuntimeConfig {
             max_tokens: config.agents.background.max_tokens,
             thinking_budget: config.agents.background.thinking_budget,
             max_retries: config.general.max_retries,
-            compaction_thinking_budget: config.general.compaction_thinking_budget,
             fast_mode: config.agents.background.fast_mode,
         }
     }
@@ -221,10 +216,6 @@ impl Default for AgentConfig {
 pub struct GeneralConfig {
     pub working_dir: Option<PathBuf>,
     pub max_retries: u32,
-    /// Token threshold at which to trigger context compaction (default: 100,000)
-    pub compaction_threshold: u32,
-    /// Thinking budget for compaction requests (default: 8,000)
-    pub compaction_thinking_budget: u32,
 }
 
 #[cfg(feature = "cli")]
@@ -233,8 +224,6 @@ impl Default for GeneralConfig {
         Self {
             working_dir: None,
             max_retries: 5,
-            compaction_threshold: 192_000,
-            compaction_thinking_budget: 8_000,
         }
     }
 }

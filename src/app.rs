@@ -22,7 +22,7 @@ use crate::llm::{Agent, AgentId, AgentRegistry, AgentStatus, AgentStep, RequestM
 #[cfg(feature = "profiling")]
 use crate::{profile_frame, profile_span};
 use crate::notifications::{Notification, NotificationQueue};
-use crate::prompts::{SystemPrompt, COMPACTION_PROMPT, welcome_message};
+use crate::prompts::{SystemPrompt, welcome_message};
 use crate::tool_filter::ToolFilters;
 use crate::tools::{
     init_agent_context, init_browser_context, EffectResult, ToolDecision,
@@ -511,13 +511,6 @@ impl App {
         self.draw();
     }
 
-    /// Queue a compaction request
-    pub fn queue_compaction(&mut self) {
-        let block = TextBlock::pending("[Compaction requested]");
-        let block_id = self.chat.transcript.stage.push(Box::new(block));
-        self.notifications.push(Notification::Compaction { block_id });
-    }
-
     /// Execute a tool decision (approve/deny) for the currently active tool
     async fn decide_pending_tool(&mut self, decision: ToolDecision) {
         tracing::debug!("decide_pending_tool: decision={:?}", decision);
@@ -677,7 +670,6 @@ impl App {
         let mut commands: Vec<(String, usize)> = Vec::new();  // (name, block_id)
         let mut background_tools: Vec<(String, String, usize)> = Vec::new();  // (label, result, block_id)
         let mut background_agents: Vec<(String, String, usize)> = Vec::new();  // (label, result, block_id)
-        let mut has_compaction = false;
 
         for notification in notifications {
             match notification {
@@ -692,17 +684,6 @@ impl App {
                 }
                 Notification::BackgroundAgent { label, result, block_id } => {
                     background_agents.push((label, result, block_id));
-                }
-                Notification::Compaction { block_id } => {
-                    has_compaction = true;
-                    // Promote compaction block from stage
-                    if let Some(mut block) = self.chat.transcript.stage.remove(block_id) {
-                        block.set_status(Status::Complete);
-                        let turn_id = self.chat.transcript.add_empty(Role::User);
-                        if let Some(turn) = self.chat.transcript.get_mut(turn_id) {
-                            turn.add_block(block);
-                        }
-                    }
                 }
             }
         }
@@ -802,16 +783,6 @@ impl App {
                     .lock()
                     .await
                     .send_request(&combined_content, RequestMode::Normal);
-            }
-            self.chat.begin_turn(Role::Assistant, &mut self.terminal);
-            self.input_mode = InputMode::Streaming;
-        } else if has_compaction {
-            // Handle compaction only if no messages (compaction gets its own request)
-            if let Some(agent_mutex) = self.agents.primary() {
-                agent_mutex
-                    .lock()
-                    .await
-                    .send_request(COMPACTION_PROMPT, RequestMode::Compaction);
             }
             self.chat.begin_turn(Role::Assistant, &mut self.terminal);
             self.input_mode = InputMode::Streaming;
@@ -1025,14 +996,6 @@ impl App {
                 }
                 self.chat.transcript.stream_delta(BlockType::Text, &text);
             },
-            AgentStep::CompactionDelta(text) => {
-                if !is_primary {
-                    return Ok(());
-                }
-                self.chat
-                    .transcript
-                    .stream_delta(BlockType::Compaction, &text);
-            },
             AgentStep::ThinkingDelta(text) => {
                 if !is_primary {
                     return Ok(());
@@ -1057,46 +1020,14 @@ impl App {
                 ));
                 tracing::warn!("Retrying request: attempt {}, error: {}, backoff: {}s", attempt, error, delay_secs);
             },
-            AgentStep::Finished { usage } => {
+            AgentStep::Finished { usage: _ } => {
                 if is_primary {
                     self.input_mode = InputMode::Normal;
 
-                    // Handle compaction completion
-                    // TODO something more robust than checking active block type
-                    if self
-                        .chat
-                        .transcript
-                        .is_streaming_block_type(BlockType::Compaction)
-                    {
-                        self.chat.transcript.finish_turn();
-                        if let Err(e) = self.chat.transcript.save() {
-                            tracing::error!("Failed to save transcript before compaction: {}", e);
-                        }
-                        match self.chat.transcript.rotate() {
-                            Ok(new_transcript) => {
-                                tracing::info!(
-                                    "Compaction complete, rotating to {:?}",
-                                    new_transcript.path()
-                                );
-                                self.chat
-                                    .reset_transcript(new_transcript, &mut self.terminal);
-                                self.draw();
-                            },
-                            Err(e) => {
-                                tracing::error!("Failed to rotate transcript: {}", e);
-                            },
-                        }
-                    } else {
-                        // Normal completion
-                        self.chat.transcript.finish_turn();
-                        if let Err(e) = self.chat.transcript.save() {
-                            tracing::error!("Failed to save transcript: {}", e);
-                        }
-
-                        // Check if compaction is needed
-                        if usage.context_tokens >= self.config.general.compaction_threshold {
-                            self.queue_compaction();
-                        }
+                    // Context management / compaction is owned by the claude binary.
+                    self.chat.transcript.finish_turn();
+                    if let Err(e) = self.chat.transcript.save() {
+                        tracing::error!("Failed to save transcript: {}", e);
                     }
                 } else {
                     // Sub-agent finished - queue notification with result

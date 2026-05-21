@@ -3,7 +3,6 @@ use anyhow::Result;
 
 const ALL_COMMANDS: &[&dyn CommandImpl] = &[
     &Help,
-    &Compact,
 ];
 
 pub struct Command;
@@ -76,23 +75,5 @@ impl CommandImpl for Help {
             help_text.push_str(&format!("\n  /{} - {}", cmd.name(), cmd.description()));
         }
         Ok(Some(help_text))
-    }
-}
-
-
-pub struct Compact;
-
-impl CommandImpl for Compact {
-    fn name(&self) -> &'static str {
-        "compact"
-    }
-
-    fn description(&self) -> &'static str {
-        "Compact conversation history to reduce context size"
-    }
-
-    fn execute(&self, app: &mut crate::app::App) -> Result<Option<String>> {
-        app.queue_compaction();
-        Ok(None)
     }
 }
