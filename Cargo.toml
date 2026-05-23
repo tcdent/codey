@@ -27,8 +27,10 @@ crossterm = { version = "0.28", features = ["event-stream"], optional = true }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
-# Claude Agent SDK backend (drives the `claude` binary; subscription / SDK-credit billing)
-claude-agent-sdk-rs = "0.6.4"
+# Claude Agent SDK backend (drives the `claude` binary; subscription / SDK-credit billing).
+# Vendored fork of claude-agent-sdk-rs 0.6.4 (upstream unmaintained since Feb);
+# patched for forward-compatible message parsing against newer CLI versions.
+claude-agent-sdk-rs = { path = "vendor/claude-agent-sdk-rs" }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }

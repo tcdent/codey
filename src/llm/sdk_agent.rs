@@ -446,7 +446,7 @@ fn forward_message(message: Message, step_tx: &mpsc::UnboundedSender<AgentStep>)
             // messages are not re-emitted to avoid duplication.
             false
         },
-        Message::ControlCancelRequest(_) => false,
+        Message::ControlCancelRequest(_) | Message::Unknown => false,
     }
 }
 
