@@ -265,6 +265,10 @@ impl SdkAgent {
             mcp_servers: McpServers::Dict(servers),
             model: Some(self.config.model.clone()),
             include_partial_messages: true,
+            // Full control: Codey supplies the system prompt and tools. Load no
+            // filesystem config from ~/.claude or .claude (no CLAUDE.md, hooks,
+            // skills, slash commands, output styles, or settings).
+            setting_sources: Some(Vec::new()),
             // The installed CLI (2.1.x) is newer than the crate's tested version;
             // skip the version gate so it doesn't refuse to start.
             skip_version_check: true,
