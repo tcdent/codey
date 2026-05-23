@@ -24,7 +24,7 @@ use tracing::{debug, warn};
 use claude_agent_sdk_rs::types::mcp::McpSdkServerConfig;
 use claude_agent_sdk_rs::{
     ClaudeAgentOptions, ClaudeClient, McpServerConfig, McpServers, Message, Result as SdkResult,
-    SdkMcpServer, SystemPrompt,
+    SdkMcpServer, SettingSource, SystemPrompt,
 };
 
 use super::agent::{AgentStep, RequestMode, SystemPromptBuilder, Usage};
@@ -259,16 +259,32 @@ impl SdkAgent {
             .map(|t| format!("mcp__{CODEY_MCP_SERVER}__{}", t.name()))
             .collect();
 
+        // Relocate the binary's config dir under Codey's control (settings,
+        // hooks, credentials, sessions) so we neither inherit nor pollute the
+        // user's interactive ~/.claude. Respect an explicit CLAUDE_CONFIG_DIR.
+        let mut env = HashMap::new();
+        if std::env::var_os("CLAUDE_CONFIG_DIR").is_none() {
+            if let Some(home) = dirs::home_dir() {
+                let dir = home.join(".codey").join("claude");
+                let _ = std::fs::create_dir_all(&dir);
+                env.insert(
+                    "CLAUDE_CONFIG_DIR".to_string(),
+                    dir.to_string_lossy().into_owned(),
+                );
+            }
+        }
+
         let mut options = ClaudeAgentOptions {
             system_prompt: Some(SystemPrompt::Text(self.system_prompt.clone())),
             allowed_tools,
             mcp_servers: McpServers::Dict(servers),
             model: Some(self.config.model.clone()),
             include_partial_messages: true,
-            // Full control: Codey supplies the system prompt and tools. Load no
-            // filesystem config from ~/.claude or .claude (no CLAUDE.md, hooks,
-            // skills, slash commands, output styles, or settings).
-            setting_sources: Some(Vec::new()),
+            env,
+            // Load settings only from Codey's relocated config dir (above) — the
+            // user level now points at ~/.codey/claude, not the user's ~/.claude.
+            // Codey supplies the system prompt and tools; this dir starts empty.
+            setting_sources: Some(vec![SettingSource::User]),
             // The installed CLI (2.1.x) is newer than the crate's tested version;
             // skip the version gate so it doesn't refuse to start.
             skip_version_check: true,

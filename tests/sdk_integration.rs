@@ -149,3 +149,84 @@ async fn tool_round_trip() {
         out.text.trim()
     );
 }
+
+/// Multi-turn: the binary owns the session, so a follow-up question should
+/// retain context from the first turn (same `Agent`, same session).
+#[tokio::test]
+#[ignore = "spawns the claude binary and hits the network; needs ANTHROPIC_API_KEY"]
+async fn multi_turn_context() {
+    let mut agent = Agent::new(
+        test_config(),
+        "You are a terse test assistant.",
+        ToolRegistry::empty(),
+    );
+
+    agent.send_request(
+        "Remember that my favorite color is teal. Reply with just: OK",
+        RequestMode::Normal,
+    );
+    let first = drive(&mut agent, |_, _| String::new()).await;
+    assert!(first.error.is_none(), "turn 1 errored: {:?}", first.error);
+    assert!(first.finished, "turn 1 did not finish");
+
+    agent.send_request("What is my favorite color? Reply with one word.", RequestMode::Normal);
+    let second = drive(&mut agent, |_, _| String::new()).await;
+    assert!(second.error.is_none(), "turn 2 errored: {:?}", second.error);
+    assert!(second.finished, "turn 2 did not finish");
+    assert!(
+        second.text.to_uppercase().contains("TEAL"),
+        "expected the model to recall 'teal' from turn 1, got: {:?}",
+        second.text
+    );
+    eprintln!("[multi_turn_context] turn 2 response: {}", second.text.trim());
+}
+
+/// Cancel: interrupting mid-stream should terminate the turn promptly rather
+/// than hang.
+#[tokio::test]
+#[ignore = "spawns the claude binary and hits the network; needs ANTHROPIC_API_KEY"]
+async fn cancel_interrupts() {
+    let mut agent = Agent::new(
+        test_config(),
+        "You are a verbose test assistant.",
+        ToolRegistry::empty(),
+    );
+
+    agent.send_request(
+        "Write a detailed 600-word essay about the history of cartography.",
+        RequestMode::Normal,
+    );
+
+    // Read until the first streamed text (generation has started), then cancel.
+    let mut started = false;
+    loop {
+        match timeout(STEP_TIMEOUT, agent.next()).await {
+            Ok(Some(AgentStep::TextDelta(_))) => {
+                started = true;
+                break;
+            },
+            Ok(Some(AgentStep::Finished { .. })) | Ok(None) => break,
+            Ok(Some(_)) => continue,
+            Err(_) => panic!("timed out before generation started"),
+        }
+    }
+
+    agent.cancel();
+
+    // After cancel, the turn must reach a terminal state within the timeout.
+    let mut terminated = false;
+    loop {
+        match timeout(STEP_TIMEOUT, agent.next()).await {
+            Ok(Some(AgentStep::Finished { .. })) | Ok(None) => {
+                terminated = true;
+                break;
+            },
+            Ok(Some(_)) => continue, // residual deltas may still drain
+            Err(_) => break,         // timed out -> assertion below fails
+        }
+    }
+
+    assert!(started, "generation never started");
+    assert!(terminated, "agent did not terminate after cancel() (interrupt hung)");
+    eprintln!("[cancel_interrupts] interrupt terminated the turn cleanly");
+}
