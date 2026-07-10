@@ -511,6 +511,21 @@ impl App {
         self.draw();
     }
 
+    /// Set input mode, but never clobber an active tool approval.
+    /// If an approval is currently being shown to the user, the mode change is suppressed.
+    fn set_input_mode(&mut self, mode: InputMode) {
+        if self.input_mode == InputMode::ToolApproval && mode != InputMode::ToolApproval {
+            if self.effects.has_active_approval() {
+                tracing::debug!(
+                    "Suppressed mode change to {:?} — approval is active",
+                    mode
+                );
+                return;
+            }
+        }
+        self.input_mode = mode;
+    }
+
     /// Execute a tool decision (approve/deny) for the currently active tool
     async fn decide_pending_tool(&mut self, decision: ToolDecision) {
         tracing::debug!("decide_pending_tool: decision={:?}", decision);
@@ -531,6 +546,12 @@ impl App {
                 ToolDecision::Deny => Status::Denied,
                 _ => Status::Pending,
             });
+            // Ensure there's an active turn to attach the block to.
+            // The primary agent's turn may have already finished while
+            // a background agent's approval was still pending.
+            if !self.chat.transcript.has_active_turn() {
+                self.chat.transcript.begin_turn(Role::Assistant);
+            }
             self.chat.transcript.start_block(block);
         }
 
@@ -549,7 +570,7 @@ impl App {
         // If no more acknowledged approvals, switch mode
         // (next unacknowledged approval will be handled by polling)
         if !self.effects.has_active_approval() {
-            self.input_mode = InputMode::Streaming;
+            self.set_input_mode(InputMode::Streaming);
         }
 
         self.chat.render(&mut self.terminal);
@@ -785,7 +806,7 @@ impl App {
                     .send_request(&combined_content, RequestMode::Normal);
             }
             self.chat.begin_turn(Role::Assistant, &mut self.terminal);
-            self.input_mode = InputMode::Streaming;
+            self.set_input_mode(InputMode::Streaming);
         }
 
         self.chat.render(&mut self.terminal);
@@ -892,7 +913,7 @@ impl App {
 
                 // Tool is done - only switch to streaming if no more approvals pending
                 if !self.effects.has_pending_approvals() {
-                    self.input_mode = InputMode::Streaming;
+                    self.set_input_mode(InputMode::Streaming);
                 }
 
                 // Render update
@@ -921,7 +942,7 @@ impl App {
 
                 // Tool is done - only switch to streaming if no more approvals pending
                 if !self.effects.has_pending_approvals() {
-                    self.input_mode = InputMode::Streaming;
+                    self.set_input_mode(InputMode::Streaming);
                 }
 
                 // Render update
@@ -1022,7 +1043,7 @@ impl App {
             },
             AgentStep::Finished { usage: _ } => {
                 if is_primary {
-                    self.input_mode = InputMode::Normal;
+                    self.set_input_mode(InputMode::Normal);
 
                     // Context management / compaction is owned by the claude binary.
                     self.chat.transcript.finish_turn();
@@ -1067,7 +1088,7 @@ impl App {
                 if let Err(e) = self.chat.transcript.save() {
                     tracing::error!("Failed to save transcript on error: {}", e);
                 }
-                self.input_mode = InputMode::Normal;
+                self.set_input_mode(InputMode::Normal);
 
                 let alert_msg = if let Some(start) = msg.find('{') {
                     serde_json::from_str::<serde_json::Value>(&msg[start..])

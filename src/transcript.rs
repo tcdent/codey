@@ -1050,6 +1050,11 @@ impl Transcript {
         self.current_turn_id = Some(id);
     }
 
+    /// Check if there's an active turn.
+    pub fn has_active_turn(&self) -> bool {
+        self.current_turn_id.is_some()
+    }
+
     /// Finish the current turn - marks active block complete, clears current turn.
     pub fn finish_turn(&mut self) {
         self.mark_active_block(Status::Complete);
