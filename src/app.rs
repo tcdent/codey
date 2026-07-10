@@ -590,6 +590,12 @@ impl App {
                 ToolDecision::Deny => Status::Denied,
                 _ => Status::Pending,
             });
+            // Ensure there's an active turn to attach the block to.
+            // The primary agent's turn may have already finished while
+            // a background agent's approval was still pending.
+            if !self.chat.transcript.has_active_turn() {
+                self.chat.transcript.begin_turn(Role::Assistant);
+            }
             self.chat.transcript.start_block(block);
         }
 
