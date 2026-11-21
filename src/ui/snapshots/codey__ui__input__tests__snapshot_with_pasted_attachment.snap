@@ -1,9 +1,8 @@
 ---
-source: src/ui/input.rs
-assertion_line: 1646
+source: src/ui/input_tests.rs
 expression: rendered
 ---
-┌ test-model ────────────────────────────────────────── 1k ┐
+┌────────────────────────────────────────────────────── 1k ┐
 │Check this: [¶ pasted (17 chars)]                         │
 │                                                          │
 │                                                          │

@@ -2,13 +2,8 @@
 //!
 //! Tools are defined as a chain of effect handlers:
 //! ```text
-//! edit_file = [
-//!     IdeOpen,           // Open file in IDE
-//!     IdeShowPreview,    // Show diff preview
-//!     AwaitApproval,     // <-- user decides here
-//!     WriteFile,         // Apply changes
-//!     Output,            // Report success
-//!     IdeReloadBuffer,   // Refresh IDE
+//! shell = [
+//!     Shell,             // Run the command, set the output
 //! ]
 //! ```
 
@@ -28,8 +23,6 @@ pub enum Step {
     Delta(String),
     /// Delegate effect to app layer
     Delegate(Effect),
-    /// Pause and wait for user approval
-    AwaitApproval,
     /// Pipeline failed
     Error(String),
 }
@@ -42,7 +35,7 @@ pub trait EffectHandler: Send {
 
 /// When an effect should run
 enum EffectTiming {
-    /// Normal effect - skipped on deny/error
+    /// Normal effect - skipped on error
     Normal(Box<dyn EffectHandler>),
     /// Cleanup effect - always runs
     Finally(Box<dyn EffectHandler>),
@@ -97,14 +90,7 @@ impl ToolPipeline {
         self
     }
 
-    /// Add approval checkpoint (CLI only)
-    #[cfg(feature = "cli")]
-    pub fn await_approval(self) -> Self {
-        use crate::tools::handlers;
-        self.then(handlers::AwaitApproval)
-    }
-
-    /// Add a cleanup effect that always runs (success, error, or deny)
+    /// Add a cleanup effect that always runs (success or error)
     pub fn finally(mut self, handler: impl EffectHandler + 'static) -> Self {
         self.effects.push_back(EffectTiming::Finally(Box::new(handler)));
         self
@@ -117,7 +103,7 @@ impl ToolPipeline {
         })
     }
 
-    /// Skip to finally effects (for deny/error - removes all Normal effects)
+    /// Skip to finally effects (on error - removes all Normal effects)
     pub fn skip_to_finally(&mut self) {
         self.effects.retain(|e| matches!(e, EffectTiming::Finally(_)));
     }
@@ -152,11 +138,10 @@ mod tests {
     #[test]
     fn test_pipeline_chain() {
         let pipeline = ToolPipeline::new()
-            .then(handlers::ValidateFile { path: "/tmp/test".into() })
-            .await_approval()
+            .then(handlers::Delta { content: "working".into() })
             .then(handlers::Output { content: "done".into() });
 
-        assert_eq!(pipeline.len(), 3);
+        assert_eq!(pipeline.len(), 2);
     }
 
     #[test]
@@ -170,7 +155,7 @@ mod tests {
     #[test]
     fn test_skip_to_finally() {
         let mut pipeline = ToolPipeline::new()
-            .then(handlers::ValidateFile { path: "/tmp/test".into() })
+            .then(handlers::Delta { content: "working".into() })
             .then(handlers::Output { content: "done".into() })
             .finally(handlers::Output { content: "cleanup".into() });
 

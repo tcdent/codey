@@ -2,7 +2,7 @@
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_tool_block;
-use crate::transcript::{render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, Status, ToolBlock};
+use crate::transcript::{render_agent_label, render_prefix, render_result, Block, BlockType, Status, ToolBlock};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -63,21 +63,12 @@ impl Block for WebSearchBlock {
             Span::styled(")", Style::default().fg(Color::DarkGray)),
         ]));
 
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
 
         if !self.text.is_empty() {
             lines.extend(render_result(
                 &format!("{} results.", self.text.split("\n").count()), 1));
         }
 
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
 
         lines
     }
@@ -158,7 +149,6 @@ impl Tool for WebSearchTool {
         };
 
         ToolPipeline::new()
-            .await_approval()
             .then(handlers::WebSearch {
                 query: parsed.query,
                 count: parsed.count,

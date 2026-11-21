@@ -27,17 +27,17 @@ crossterm = { version = "0.28", features = ["event-stream"], optional = true }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
-# LLM client (multi-provider) - using patched version for thinking blocks + OAuth
-genai = { git = "https://github.com/tcdent/rust-genai.git", branch = "codey-dev" }
+# Claude Agent SDK backend (drives the `claude` binary; subscription / SDK-credit billing).
+# Vendored fork of claude-agent-sdk-rs 0.6.4 (upstream unmaintained since Feb);
+# patched for forward-compatible message parsing against newer CLI versions.
+claude-agent-sdk-rs = { path = "vendor/claude-agent-sdk-rs" }
+
+# rockem backend: the client for rockem's own API (~/Work/rockem, docs/api.md).
+rockem-client = { path = "../rockem/api/client" }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["stream", "json", "rustls-tls"], default-features = false }
 futures = "0.3"
-
-# Web content extraction (CLI only - reader view)
-chromiumoxide = { version = "0.7", features = ["tokio-runtime"], default-features = false, optional = true }
-readability = { version = "0.3", optional = true }
-htmd = { version = "0.1", optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -55,7 +55,6 @@ anyhow = "1"
 thiserror = "2"
 
 # Utilities
-fancy-regex = "0.14"
 unicode-width = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
@@ -80,9 +79,6 @@ typetag = "0.2.21"
 ratskin = { version = "0.3", optional = true }
 textwrap = { version = "0.16.2", optional = true }
 
-# Neovim RPC (CLI only)
-nvim-rs = { version = "0.9", features = ["use_tokio"], optional = true }
-
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"
@@ -99,10 +95,9 @@ debug = true
 [features]
 default = ["cli"]
 
-# Full CLI with TUI, IDE integration, and web extraction
+# Full CLI with TUI
 cli = [
-    "ratatui", "crossterm", "clap", "nvim-rs", "open",
-    "chromiumoxide", "readability", "htmd",
+    "ratatui", "crossterm", "clap", "open",
     "ratskin", "textwrap"
 ]
 

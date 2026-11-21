@@ -46,11 +46,6 @@ pub enum Notification {
         result: String,
         block_id: usize,
     },
-
-    /// Compaction request
-    Compaction {
-        block_id: usize,
-    },
 }
 
 impl Notification {
@@ -61,23 +56,22 @@ impl Notification {
             Notification::Command { block_id, .. } => *block_id,
             Notification::BackgroundTool { block_id, .. } => *block_id,
             Notification::BackgroundAgent { block_id, .. } => *block_id,
-            Notification::Compaction { block_id } => *block_id,
         }
     }
 
     /// Whether this notification can interrupt a streaming turn.
-    /// Commands and Compaction must wait for idle; background results can be injected.
+    /// Commands must wait for idle; background results can be injected.
     fn can_interrupt(&self) -> bool {
         match self {
-            Notification::Message { .. } 
-            | Notification::BackgroundTool { .. } 
+            Notification::Message { .. }
+            | Notification::BackgroundTool { .. }
             | Notification::BackgroundAgent { .. } => true,
-            Notification::Command { .. } | Notification::Compaction { .. } => false,
+            Notification::Command { .. } => false,
         }
     }
 
     /// Format as XML for injection into tool results.
-    /// Returns None for notifications that shouldn't be injected (Commands, Compaction).
+    /// Returns None for notifications that shouldn't be injected (Commands).
     pub fn to_xml(&self) -> Option<String> {
         match self {
             Notification::Message { content, .. } => Some(format!(
@@ -92,7 +86,7 @@ impl Notification {
                 "<notification source=\"background_agent\" label=\"{}\">\n{}\n</notification>",
                 label, result
             )),
-            Notification::Command { .. } | Notification::Compaction { .. } => None,
+            Notification::Command { .. } => None,
         }
     }
 }

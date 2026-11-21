@@ -1,6 +1,6 @@
 //! Tool execution engine
 //!
-//! Executes tool pipelines with approval flow and streaming output.
+//! Executes tool pipelines with streaming output.
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -48,8 +48,6 @@ enum WaitingFor {
     Handler(oneshot::Receiver<Step>, JoinHandle<()>),
     /// Waiting for delegated effect to complete
     Effect(oneshot::Receiver<EffectResult>),
-    /// Waiting for user approval (Ok = approved, Err = denied)
-    Approval(oneshot::Receiver<EffectResult>),
 }
 
 /// A tool call pending execution
@@ -59,7 +57,6 @@ pub struct ToolCall {
     pub call_id: String,
     pub name: String,
     pub params: serde_json::Value,
-    pub decision: ToolDecision,
     /// If true, execute in background and return immediately
     pub background: bool,
 }
@@ -71,20 +68,10 @@ impl ToolCall {
     }
 }
 
-/// Decision state for a pending tool
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ToolDecision {
-    #[default]
-    Pending,
-    Requested,
-    Approve,
-    Deny,
-}
-
 /// Events emitted by the tool executor
 #[derive(Debug)]
 pub enum ToolEvent {
-    /// Effect delegated to app (IDE, agents, approvals, etc)
+    /// Effect delegated to app (sub-agents)
     Delegate {
         agent_id: AgentId,
         call_id: String,
@@ -110,11 +97,14 @@ pub enum ToolEvent {
         call_id: String,
         content: String,
     },
-    /// Background tool started - placeholder sent to agent
-    BackgroundStarted {
+    /// A tool began running (its first step). For a background tool, the agent is
+    /// sent a placeholder result now.
+    Started {
         agent_id: AgentId,
         call_id: String,
         name: String,
+        params: serde_json::Value,
+        background: bool,
     },
     /// Background tool completed - notification for agent
     BackgroundCompleted {
@@ -176,10 +166,10 @@ struct ActivePipeline {
     output: String,
     /// What we're currently waiting for (if anything)
     waiting: WaitingFor,
-    /// Original decision from tool call (for pre-approval)
-    original_decision: ToolDecision,
     /// If true, this is a background task
     background: bool,
+    /// Whether `Started` has been emitted
+    started: bool,
     /// Execution status
     status: Status,
 }
@@ -190,9 +180,9 @@ impl ActivePipeline {
             agent_id: tool_call.agent_id,
             call_id: tool_call.call_id,
             name: tool_call.name,
-            original_decision: tool_call.decision,
             params: tool_call.params,
             background: tool_call.background,
+            started: false,
             pipeline,
             output: String::new(),
             waiting: WaitingFor::Nothing,
@@ -229,20 +219,15 @@ impl ActivePipeline {
         self.status = Status::Complete;
         self.waiting = WaitingFor::Nothing;
     }
-    
-    /// Transition to denied state
-    fn set_denied(&mut self) {
-        self.status = Status::Denied;
-        self.waiting = WaitingFor::Nothing;
-    }
+
 }
 
-/// Executes tools with approval flow and streaming output.
+/// Executes tools with streaming output.
 ///
-/// Supports concurrent execution of multiple tools. Blocking tools emit
-/// Completed/Error events and are removed from tracking. Background tools
-/// emit BackgroundStarted immediately and BackgroundCompleted when done,
-/// staying in active map until results are retrieved via take_result().
+/// Supports concurrent execution of multiple tools. Every tool emits Started as
+/// it begins. Blocking tools then emit Completed/Error and are removed from
+/// tracking. Background tools emit BackgroundCompleted when done, staying in the
+/// active map until results are retrieved via take_result().
 pub struct ToolExecutor {
     tools: ToolRegistry,
     pending: VecDeque<ToolCall>,
@@ -346,17 +331,23 @@ impl ToolExecutor {
         }
     }
     
+    /// The next event that isn't `Started`: a tool's outcome (for testing)
+    #[cfg(test)]
+    pub async fn next_outcome(&mut self) -> Option<ToolEvent> {
+        loop {
+            match self.next().await? {
+                ToolEvent::Started { .. } => continue,
+                event => return Some(event),
+            }
+        }
+    }
+
     /// Get output from a background task without removing it (for testing)
     #[cfg(test)]
     pub fn get_background_output(&self, call_id: &str) -> Option<String> {
         self.active.get(call_id)
             .filter(|p| p.background)
             .map(|p| p.output.clone())
-    }
-    
-    /// Check if a tool call is ready to start (not denied/requested)
-    fn is_ready(tool_call: &ToolCall) -> bool {
-        matches!(tool_call.decision, ToolDecision::Pending | ToolDecision::Approve)
     }
     
     /// Check if a foreground tool is currently running for a specific agent
@@ -392,14 +383,14 @@ impl ToolExecutor {
         
         // Start one foreground tool per agent that doesn't already have one running
         let fg_agent_ids: HashSet<_> = self.pending.iter()
-            .filter(|t| !t.background && Self::is_ready(t))
+            .filter(|t| !t.background)
             .map(|t| t.agent_id)
             .collect();
         
         for agent_id in fg_agent_ids {
             if !self.has_running_foreground_for_agent(agent_id) {
                 if let Some(idx) = self.pending.iter().position(|t| 
-                    t.agent_id == agent_id && !t.background && Self::is_ready(t)
+                    t.agent_id == agent_id && !t.background
                 ) {
                     let tool_call = self.pending.remove(idx).unwrap();
                     self.start_tool(tool_call);
@@ -411,7 +402,7 @@ impl ToolExecutor {
         // (Collect indices first, then remove in reverse to preserve indices)
         let bg_indices: Vec<_> = self.pending.iter()
             .enumerate()
-            .filter(|(_, t)| t.background && Self::is_ready(t))
+            .filter(|(_, t)| t.background)
             .map(|(i, _)| i)
             .collect();
         for idx in bg_indices.into_iter().rev() {
@@ -421,7 +412,7 @@ impl ToolExecutor {
 
         // Main execution loop - keeps going while there's work to do
         loop {
-            // Poll all active pipelines for pending results (handlers, effects, approvals)
+            // Poll all active pipelines for pending results (handlers, effects)
             let call_ids: Vec<String> = self.active.keys().cloned().collect();
             for call_id in &call_ids {
                 if let Some(event) = self.poll_waiting(call_id) {
@@ -440,7 +431,7 @@ impl ToolExecutor {
                         Some(active) => (
                             // Step if not waiting and either:
                             // - Running (including when empty, to trigger completion)
-                            // - Denied/Error with finally handlers still remaining
+                            // - Errored with finally handlers still remaining
                             !active.is_waiting() && 
                                 (active.status == Status::Running || !active.pipeline.is_empty()),
                             active.is_waiting_for_handler(),
@@ -472,14 +463,13 @@ impl ToolExecutor {
                 continue;
             }
             
-            // Check if we're blocked waiting for user input (approvals) or effects
+            // Check if we're blocked waiting for the app to handle an effect
             let any_waiting_for_external = self.active.values().any(|p| {
-                matches!(p.waiting, WaitingFor::Approval(_) | WaitingFor::Effect(_))
+                matches!(p.waiting, WaitingFor::Effect(_))
             });
             
             if any_waiting_for_external {
-                // Sleep briefly to avoid busy-polling while waiting for user input
-                // The main app loop handles keyboard events separately
+                // Sleep briefly to avoid busy-polling while the app handles the effect
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 continue;
             }
@@ -581,52 +571,25 @@ impl ToolExecutor {
                 }
             },
             
-            WaitingFor::Approval(mut rx) => {
-                let poll_result = poll_receiver(&mut rx);
-                
-                match poll_result {
-                    Poll::Ready(Ok(Ok(_))) => {
-                        // Approved - continue pipeline
-                        // For background tools, emit BackgroundStarted now
-                        if active.background {
-                            Some(ToolEvent::BackgroundStarted {
-                                agent_id: active.agent_id,
-                                call_id: active.call_id.clone(),
-                                name: active.name.clone(),
-                            })
-                        } else {
-                            None
-                        }
-                    },
-                    Poll::Ready(Ok(Err(reason))) => {
-                        // Denied - skip to finally
-                        active.pipeline.skip_to_finally();
-                        active.set_denied();
-                        Some(ToolEvent::Error {
-                            agent_id: active.agent_id,
-                            call_id: active.call_id.clone(),
-                            content: reason,
-                        })
-                    },
-                    Poll::Ready(Err(_)) => {
-                        tracing::warn!("poll_waiting: approval channel dropped");
-                        let active = self.active.remove(call_id).unwrap();
-                        Some(ToolEvent::error(active, "Approval cancelled"))
-                    },
-                    Poll::Pending => {
-                        tracing::trace!("poll_waiting: Pending (waiting for user approval)");
-                        // Put it back - still waiting
-                        self.active.get_mut(call_id).unwrap().waiting = WaitingFor::Approval(rx);
-                        None
-                    },
-                }
-            },
         }
     }
 
     /// Execute next handler in a specific pipeline.
     /// Spawns the handler in a separate task to avoid losing state if dropped.
     fn execute_step(&mut self, call_id: &str) -> Option<ToolEvent> {
+        // Every tool announces itself before its first step runs.
+        let active = self.active.get_mut(call_id)?;
+        if !active.started {
+            active.started = true;
+            return Some(ToolEvent::Started {
+                agent_id: active.agent_id,
+                call_id: active.call_id.clone(),
+                name: active.name.clone(),
+                params: active.params.clone(),
+                background: active.background,
+            });
+        }
+
         // Get the handler to execute
         let handler = {
             let active = self.active.get_mut(call_id)?;
@@ -634,8 +597,8 @@ impl ToolExecutor {
                 Some(h) => h,
                 None => {
                     // Pipeline complete - finally handlers have run
-                    // For denied/errored pipelines, we already emitted the event, just cleanup
-                    if active.status == Status::Denied || active.status == Status::Error {
+                    // For errored pipelines, we already emitted the event, just cleanup
+                    if active.status == Status::Error {
                         self.active.remove(call_id);
                         return None;
                     }
@@ -686,31 +649,6 @@ impl ToolExecutor {
                 active.waiting = WaitingFor::Effect(rx);
                 Some(event)
             },
-            Step::AwaitApproval => {
-                // Skip approval if tool was pre-approved
-                if active.original_decision == ToolDecision::Approve {
-                    // For background tools, emit BackgroundStarted now
-                    if active.background {
-                        Some(ToolEvent::BackgroundStarted {
-                            agent_id: active.agent_id,
-                            call_id: active.call_id.clone(),
-                            name: active.name.clone(),
-                        })
-                    } else {
-                        None  // Continue to next step
-                    }
-                } else {
-                    // Delegate approval to app via Effect::AwaitApproval
-                    let effect = Effect::AwaitApproval {
-                        name: active.name.clone(),
-                        params: active.params.clone(),
-                        background: active.background,
-                    };
-                    let (event, rx) = ToolEvent::delegate(active, effect);
-                    active.waiting = WaitingFor::Approval(rx);
-                    Some(event)
-                }
-            },
             Step::Error(msg) => {
                 if active.background {
                     active.set_error(&msg);
@@ -754,14 +692,14 @@ mod tests {
             call_id: "test1".to_string(),
             name: "mcp_shell".to_string(),
             params: serde_json::json!({ "command": "echo hello" }),
-            decision: ToolDecision::Approve,
             background: false,
         }]);
 
         let events = collect_events(&mut executor).await;
         
-        assert_eq!(events.len(), 1);
-        match &events[0] {
+        assert_eq!(events.len(), 2);
+        assert!(matches!(&events[0], ToolEvent::Started { call_id, background: false, .. } if call_id == "test1"));
+        match &events[1] {
             ToolEvent::Completed { content, .. } => {
                 assert!(content.contains("hello"));
             }
@@ -782,7 +720,6 @@ mod tests {
                 call_id: "test1".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo first" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
             ToolCall {
@@ -790,7 +727,6 @@ mod tests {
                 call_id: "test2".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo second" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
         ]);
@@ -823,7 +759,6 @@ mod tests {
                 call_id: "bg1".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo background_one" }),
-                decision: ToolDecision::Approve,
                 background: true,
             },
             ToolCall {
@@ -831,7 +766,6 @@ mod tests {
                 call_id: "bg2".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo background_two" }),
-                decision: ToolDecision::Approve,
                 background: true,
             },
             ToolCall {
@@ -839,22 +773,21 @@ mod tests {
                 call_id: "bg3".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo background_three" }),
-                decision: ToolDecision::Approve,
                 background: true,
             },
         ]);
 
         let events = collect_events(&mut executor).await;
         
-        // Should have BackgroundStarted and BackgroundCompleted for each
+        // Should have Started and BackgroundCompleted for each
         let started: HashSet<_> = events.iter().filter_map(|e| {
-            if let ToolEvent::BackgroundStarted { call_id, .. } = e { Some(call_id.clone()) } else { None }
+            if let ToolEvent::Started { call_id, background: true, .. } = e { Some(call_id.clone()) } else { None }
         }).collect();
         let completed: HashSet<_> = events.iter().filter_map(|e| {
             if let ToolEvent::BackgroundCompleted { call_id, .. } = e { Some(call_id.clone()) } else { None }
         }).collect();
         
-        assert_eq!(started.len(), 3, "Expected 3 BackgroundStarted events");
+        assert_eq!(started.len(), 3, "Expected 3 Started events");
         assert_eq!(completed.len(), 3, "Expected 3 BackgroundCompleted events");
         assert!(started.contains("bg1"));
         assert!(started.contains("bg2"));
@@ -890,7 +823,6 @@ mod tests {
                 call_id: "fg1".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo foreground" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
             ToolCall {
@@ -898,7 +830,6 @@ mod tests {
                 call_id: "bg1".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo background" }),
-                decision: ToolDecision::Approve,
                 background: true,
             },
         ]);
@@ -938,7 +869,6 @@ mod tests {
                 call_id: "slow1".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "sleep 0.1 && echo slow1_done" }),
-                decision: ToolDecision::Approve,
                 background: true,
             },
             ToolCall {
@@ -946,7 +876,6 @@ mod tests {
                 call_id: "slow2".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "sleep 0.1 && echo slow2_done" }),
-                decision: ToolDecision::Approve,
                 background: true,
             },
         ]);
@@ -972,8 +901,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_foreground_fifo_order() {
-        // Foreground tools should execute in strict FIFO order,
-        // even if all are auto-approved
+        // Foreground tools should execute in strict FIFO order
         let mut registry = ToolRegistry::empty();
         registry.register(std::sync::Arc::new(ShellTool::new()));
         let mut executor = ToolExecutor::new(registry);
@@ -985,7 +913,6 @@ mod tests {
                 call_id: "fg1".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "sleep 0.05 && echo first" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
             ToolCall {
@@ -993,7 +920,6 @@ mod tests {
                 call_id: "fg2".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo second" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
         ]);
@@ -1023,7 +949,6 @@ mod tests {
                 call_id: "bg1".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "sleep 0.1 && echo background" }),
-                decision: ToolDecision::Approve,
                 background: true,
             },
             ToolCall {
@@ -1031,7 +956,6 @@ mod tests {
                 call_id: "fg1".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo foreground" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
         ]);
@@ -1073,7 +997,6 @@ mod tests {
                 call_id: "agent0_slow".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "sleep 0.1 && echo agent0" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
             ToolCall {
@@ -1081,7 +1004,6 @@ mod tests {
                 call_id: "agent1_fast".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo agent1" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
         ]);
@@ -1119,7 +1041,6 @@ mod tests {
                 call_id: "agent0_first".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "sleep 0.05 && echo first" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
             ToolCall {
@@ -1127,7 +1048,6 @@ mod tests {
                 call_id: "agent0_second".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo second" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
             ToolCall {
@@ -1135,7 +1055,6 @@ mod tests {
                 call_id: "agent1_tool".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo agent1" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
         ]);
@@ -1163,187 +1082,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_foreground_approval_blocks_subsequent() {
-        // A foreground tool waiting for approval should block subsequent foreground tools
-        let mut registry = ToolRegistry::empty();
-        registry.register(std::sync::Arc::new(ShellTool::new()));
-        let mut executor = ToolExecutor::new(registry);
-
-        // Two foreground tools, first needs approval
-        executor.enqueue(vec![
-            ToolCall {
-                agent_id: 0,
-                call_id: "fg1".to_string(),
-                name: "mcp_shell".to_string(),
-                params: serde_json::json!({ "command": "echo first" }),
-                decision: ToolDecision::Pending, // Needs approval
-                background: false,
-            },
-            ToolCall {
-                agent_id: 0,
-                call_id: "fg2".to_string(),
-                name: "mcp_shell".to_string(),
-                params: serde_json::json!({ "command": "echo second" }),
-                decision: ToolDecision::Approve, // Auto-approved
-                background: false,
-            },
-        ]);
-
-        // First event should be Delegate with AwaitApproval for fg1
-        let event1 = executor.next().await.unwrap();
-        let responder = match event1 {
-            ToolEvent::Delegate { call_id, effect: Effect::AwaitApproval { .. }, responder, .. } => {
-                assert_eq!(call_id, "fg1");
-                responder
-            }
-            other => panic!("Expected Delegate/AwaitApproval for fg1, got {:?}", other),
-        };
-
-        // fg2 should NOT have started yet (no events available without blocking)
-        // Approve fg1
-        responder.send(Ok(None)).unwrap();  // Approve
-
-        // Now collect remaining events
-        let events = collect_events(&mut executor).await;
-        
-        // Should see fg1 complete, then fg2 complete (in order)
-        let completion_order: Vec<_> = events.iter().filter_map(|e| {
-            if let ToolEvent::Completed { call_id, .. } = e { Some(call_id.clone()) } else { None }
-        }).collect();
-        
-        assert_eq!(completion_order, vec!["fg1", "fg2"],
-            "After approval, tools should complete in order");
-    }
-
-    #[tokio::test]
-    async fn test_foreground_denial_unblocks_next() {
-        // Denying a foreground tool should allow the next foreground tool to start
-        let mut registry = ToolRegistry::empty();
-        registry.register(std::sync::Arc::new(ShellTool::new()));
-        let mut executor = ToolExecutor::new(registry);
-
-        executor.enqueue(vec![
-            ToolCall {
-                agent_id: 0,
-                call_id: "fg1".to_string(),
-                name: "mcp_shell".to_string(),
-                params: serde_json::json!({ "command": "echo first" }),
-                decision: ToolDecision::Pending,
-                background: false,
-            },
-            ToolCall {
-                agent_id: 0,
-                call_id: "fg2".to_string(),
-                name: "mcp_shell".to_string(),
-                params: serde_json::json!({ "command": "echo second" }),
-                decision: ToolDecision::Pending,
-                background: false,
-            },
-        ]);
-
-        // Get approval request for fg1
-        let event1 = executor.next().await.unwrap();
-        let responder1 = match event1 {
-            ToolEvent::Delegate { call_id, effect: Effect::AwaitApproval { .. }, responder, .. } => {
-                assert_eq!(call_id, "fg1");
-                responder
-            }
-            other => panic!("Expected Delegate/AwaitApproval for fg1, got {:?}", other),
-        };
-
-        // Deny fg1
-        responder1.send(Err("Denied by user".to_string())).unwrap();
-
-        // Should get Error for fg1, then Delegate/AwaitApproval for fg2
-        let mut saw_fg1_error = false;
-        let mut saw_fg2_approval = false;
-        let mut responder2 = None;
-        
-        while let Some(event) = executor.next().await {
-            match event {
-                ToolEvent::Error { call_id, .. } if call_id == "fg1" => {
-                    saw_fg1_error = true;
-                }
-                ToolEvent::Delegate { call_id, effect: Effect::AwaitApproval { .. }, responder, .. } if call_id == "fg2" => {
-                    saw_fg2_approval = true;
-                    responder2 = Some(responder);
-                    break; // Got what we need
-                }
-                _ => {}
-            }
-        }
-        
-        assert!(saw_fg1_error, "Should see error for denied fg1");
-        assert!(saw_fg2_approval, "fg2 should get approval request after fg1 denied");
-        
-        // Approve fg2 and verify it completes
-        responder2.unwrap().send(Ok(None)).unwrap();  // Approve
-        let events = collect_events(&mut executor).await;
-        
-        let fg2_completed = events.iter().any(|e| {
-            matches!(e, ToolEvent::Completed { call_id, .. } if call_id == "fg2")
-        });
-        assert!(fg2_completed, "fg2 should complete after approval");
-    }
-
-    #[tokio::test]
-    async fn test_background_with_pending_foreground() {
-        // Background tools should start even when a foreground tool is waiting for approval
-        let mut registry = ToolRegistry::empty();
-        registry.register(std::sync::Arc::new(ShellTool::new()));
-        let mut executor = ToolExecutor::new(registry);
-
-        executor.enqueue(vec![
-            ToolCall {
-                agent_id: 0,
-                call_id: "fg1".to_string(),
-                name: "mcp_shell".to_string(),
-                params: serde_json::json!({ "command": "echo foreground" }),
-                decision: ToolDecision::Pending,
-                background: false,
-            },
-            ToolCall {
-                agent_id: 0,
-                call_id: "bg1".to_string(),
-                name: "mcp_shell".to_string(),
-                params: serde_json::json!({ "command": "echo background" }),
-                decision: ToolDecision::Approve,
-                background: true,
-            },
-        ]);
-
-        // Should get both: Delegate/AwaitApproval for fg1 AND BackgroundStarted for bg1
-        let mut saw_fg1_approval = false;
-        let mut saw_bg1_started = false;
-        let mut responder = None;
-        
-        // Collect a few events
-        for _ in 0..5 {
-            if let Some(event) = executor.next().await {
-                match event {
-                    ToolEvent::Delegate { call_id, effect: Effect::AwaitApproval { .. }, responder: r, .. } if call_id == "fg1" => {
-                        saw_fg1_approval = true;
-                        responder = Some(r);
-                    }
-                    ToolEvent::BackgroundStarted { call_id, .. } if call_id == "bg1" => {
-                        saw_bg1_started = true;
-                    }
-                    ToolEvent::BackgroundCompleted { .. } => break,
-                    _ => {}
-                }
-            }
-        }
-        
-        assert!(saw_fg1_approval, "Should see approval request for fg1");
-        assert!(saw_bg1_started, "Background should start even with pending foreground approval");
-        
-        // Cleanup: approve fg1 so test exits cleanly
-        if let Some(r) = responder {
-            let _ = r.send(Ok(None));  // Approve
-        }
-    }
-
-    #[tokio::test]
     async fn test_cancel_clears_pending_queue() {
         let mut registry = ToolRegistry::empty();
         registry.register(std::sync::Arc::new(ShellTool::new()));
@@ -1356,7 +1094,6 @@ mod tests {
                 call_id: "p1".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo one" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
             ToolCall {
@@ -1364,7 +1101,6 @@ mod tests {
                 call_id: "p2".to_string(),
                 name: "mcp_shell".to_string(),
                 params: serde_json::json!({ "command": "echo two" }),
-                decision: ToolDecision::Approve,
                 background: false,
             },
         ]);
@@ -1382,13 +1118,12 @@ mod tests {
         registry.register(std::sync::Arc::new(ShellTool::new()));
         let mut executor = ToolExecutor::new(registry);
 
-        // Enqueue a slow foreground command that needs approval first
+        // Enqueue a slow foreground command
         executor.enqueue(vec![ToolCall {
             agent_id: 0,
             call_id: "slow_fg".to_string(),
             name: "mcp_shell".to_string(),
             params: serde_json::json!({ "command": "sleep 30" }),
-            decision: ToolDecision::Approve,
             background: false,
         }]);
 
@@ -1415,14 +1150,13 @@ mod tests {
             call_id: "slow_bg".to_string(),
             name: "mcp_shell".to_string(),
             params: serde_json::json!({ "command": "sleep 0.2 && echo bg_done" }),
-            decision: ToolDecision::Approve,
             background: true,
         }]);
 
-        // Poll to get BackgroundStarted
+        // Poll to get Started
         let event = executor.next().await;
-        assert!(matches!(event, Some(ToolEvent::BackgroundStarted { .. })),
-            "Expected BackgroundStarted, got {:?}", event);
+        assert!(matches!(event, Some(ToolEvent::Started { background: true, .. })),
+            "Expected Started, got {:?}", event);
         assert_eq!(executor.running_background_count(), 1);
 
         // Cancel — background tasks should keep running
@@ -1455,11 +1189,10 @@ mod tests {
             call_id: "fast".to_string(),
             name: "mcp_shell".to_string(),
             params: serde_json::json!({ "command": "echo done" }),
-            decision: ToolDecision::Approve,
             background: true,
         }]);
 
-        // Drain all events — should get BackgroundStarted then BackgroundCompleted
+        // Drain all events — should get Started then BackgroundCompleted
         let events = collect_events(&mut executor).await;
         let completed = events.iter().any(|e|
             matches!(e, ToolEvent::BackgroundCompleted { call_id, .. } if call_id == "fast")
@@ -1490,7 +1223,6 @@ mod tests {
             call_id: "fast".to_string(),
             name: "mcp_shell".to_string(),
             params: serde_json::json!({ "command": "echo done" }),
-            decision: ToolDecision::Approve,
             background: true,
         }]);
 
@@ -1503,13 +1235,12 @@ mod tests {
             call_id: "slow".to_string(),
             name: "mcp_shell".to_string(),
             params: serde_json::json!({ "command": "sleep 0.2 && echo slow_done" }),
-            decision: ToolDecision::Approve,
             background: true,
         }]);
 
         // Poll to get it started
         let event = executor.next().await;
-        assert!(matches!(event, Some(ToolEvent::BackgroundStarted { .. })));
+        assert!(matches!(event, Some(ToolEvent::Started { background: true, .. })));
 
         // Should have 1 running + 1 completed
         assert_eq!(executor.running_background_count(), 1);

@@ -106,8 +106,9 @@ impl ChatView {
         self.width = width;
     }
 
-    /// Replace the transcript and reset view state (used after compaction rotation)
+    /// Replace the transcript and reset view state.
     /// Renders the new transcript fully to scrollback
+    #[allow(dead_code)]
     pub fn reset_transcript(
         &mut self,
         transcript: Transcript,
@@ -297,6 +298,7 @@ pub struct ChatViewWidget<'a> {
     view: &'a ChatView,
 }
 
+
 impl Widget for ChatViewWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         #[cfg(feature = "profiling")]
@@ -312,4 +314,13 @@ impl Widget for ChatViewWidget<'_> {
 
         Paragraph::new(visible).render(area, buf);
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::Phase;
+    use ratatui::backend::TestBackend;
+
+
 }

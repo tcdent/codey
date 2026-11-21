@@ -2,7 +2,7 @@
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::define_tool_block;
-use crate::transcript::{render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
+use crate::transcript::{render_agent_label, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -80,7 +80,6 @@ impl Tool for FetchUrlTool {
         };
 
         ToolPipeline::new()
-            .await_approval()
             .then(handlers::FetchUrl {
                 url: parsed.url,
                 max_length: parsed.max_length,
@@ -99,7 +98,7 @@ impl Tool for FetchUrlTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
+    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall};
 
     #[tokio::test]
     async fn test_fetch_invalid_url() {
@@ -112,11 +111,10 @@ mod tests {
             call_id: "test".to_string(),
             name: FetchUrlTool::NAME.to_string(),
             params: json!({ "url": "not a valid url" }),
-            decision: ToolDecision::Approve,
             background: false,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next().await {
+        if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next_outcome().await {
             assert!(content.contains("Invalid URL"));
         } else {
             panic!("Expected Error event");
@@ -134,11 +132,10 @@ mod tests {
             call_id: "test".to_string(),
             name: FetchUrlTool::NAME.to_string(),
             params: json!({ "url": "ftp://example.com/file" }),
-            decision: ToolDecision::Approve,
             background: false,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next().await {
+        if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next_outcome().await {
             assert!(content.contains("Unsupported URL scheme"));
         } else {
             panic!("Expected Error event");

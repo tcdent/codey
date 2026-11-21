@@ -1,6 +1,8 @@
 //! Codey - A terminal-based AI coding assistant
 //!
 //! This crate can be used as a library to create AI agents with custom system prompts.
+//! Agents run on the Claude Agent SDK, which drives the `claude` binary — it must
+//! be installed and authenticated (subscription login or `ANTHROPIC_API_KEY`).
 //!
 //! # Example
 //!
@@ -13,7 +15,6 @@
 //!     let mut agent = Agent::new(
 //!         AgentRuntimeConfig::default(),
 //!         "You are a helpful assistant. Answer questions concisely.",
-//!         None, // oauth credentials (uses ANTHROPIC_API_KEY env var)
 //!         ToolRegistry::empty(),
 //!     );
 //!
@@ -40,25 +41,26 @@
 //! ```
 
 // Core modules (always available)
-mod auth;
 mod config;
 mod effect;
-mod ide;
 mod llm;
 mod tools;
 mod transcript;
 
 // CLI-only modules
 #[cfg(feature = "cli")]
-mod compaction;
-#[cfg(feature = "cli")]
 mod notifications;
 #[cfg(feature = "cli")]
 mod prompts;
-#[cfg(feature = "cli")]
-mod tool_filter;
 
 // Re-export the public API
-pub use config::AgentRuntimeConfig;
-pub use llm::{Agent, AgentStep, RequestMode, Usage};
+pub use config::{AgentRuntimeConfig, Backend};
+pub use llm::{Activity, Agent, AgentStep, Phase, RequestMode, Usage};
 pub use tools::{SimpleTool, ToolCall, ToolRegistry};
+
+// Transcript types — exposed for library users implementing persistence.
+// Render methods are cfg(feature = "cli") but the data model is plain serde.
+pub use transcript::{
+    next_block_id, Block, BlockType, Role, Stage, Status, TextBlock, ThinkingBlock, ToolBlock,
+    Transcript, Turn,
+};

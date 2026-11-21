@@ -12,7 +12,7 @@ fn render_input_box(input: &InputBox, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("test-model", "", 1000, 0, false);
+        let widget = input.widget(None, 1000, 0, 0, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -35,7 +35,7 @@ fn render_input_content(input: &InputBox, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("test-model", "", 1000, 0, false);
+        let widget = input.widget(None, 1000, 0, 0, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -162,7 +162,7 @@ fn test_render_cursor_position_at_end() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("model", "", 1000, 0, false);
+        let widget = input.widget(None, 1000, 0, 0, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -194,7 +194,7 @@ fn test_render_cursor_position_middle() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("model", "", 1000, 0, false);
+        let widget = input.widget(None, 1000, 0, 0, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -266,11 +266,18 @@ fn test_render_long_text_wraps() {
 #[test]
 fn test_render_border_and_title() {
     let input = InputBox::new();
-    let rendered = render_input_box(&input, 40, 5);
+    let mut terminal = Terminal::new(TestBackend::new(50, 5)).unwrap();
+    terminal.draw(|frame| {
+        let widget = input.widget(Some("writing 14s · 412 tokens".into()), 1000, 0, 0, false);
+        frame.render_widget(widget, frame.area());
+    }).unwrap();
+    let buffer = terminal.backend().buffer();
+    let top: String = (0..50).map(|x| buffer.cell((x, 0)).unwrap().symbol()).collect();
 
-    // Should contain the model name in title
-    assert!(rendered.contains("test-model"),
-        "Border should show model name. Got:\n{}", rendered);
+    // The running turn's readout is the title; no title between turns
+    assert!(top.starts_with("┌ writing 14s · 412 tokens "), "Got: {}", top);
+    let idle = render_input_box(&input, 40, 5);
+    assert!(idle.starts_with("┌───"), "Got:\n{}", idle);
 }
 
 #[test]
@@ -282,7 +289,7 @@ fn test_render_token_count_display() {
     let mut terminal = Terminal::new(backend).unwrap();
 
     terminal.draw(|frame| {
-        let widget = input.widget("model", "", 5000, 0, false);
+        let widget = input.widget(None, 5000, 0, 0, false);
         frame.render_widget(widget, frame.area());
     }).unwrap();
 
@@ -302,52 +309,21 @@ fn test_render_token_count_display() {
 #[test]
 fn test_render_background_tasks_indicator() {
     let input = InputBox::new();
-    
-    // Render with 0 background tasks - no indicator
-    let backend = TestBackend::new(40, 5);
-    let mut terminal = Terminal::new(backend).unwrap();
+    let top = |activity: Option<&str>, background: usize| {
+        let mut terminal = Terminal::new(TestBackend::new(50, 5)).unwrap();
+        terminal.draw(|frame| {
+            let widget = input.widget(activity.map(String::from), 1000, 0, background, false);
+            frame.render_widget(widget, frame.area());
+        }).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..50).map(|x| buffer.cell((x, 0)).unwrap().symbol()).collect::<String>()
+    };
 
-    terminal.draw(|frame| {
-        let widget = input.widget("model", "", 1000, 0, false);
-        frame.render_widget(widget, frame.area());
-    }).unwrap();
-
-    let buffer = terminal.backend().buffer();
-    let mut render_no_bg = String::new();
-    for y in 0..5 {
-        for x in 0..40 {
-            render_no_bg.push_str(buffer.cell((x, y)).unwrap().symbol());
-        }
-        render_no_bg.push('\n');
-    }
-
-    // Should show "model" without asterisk
-    assert!(render_no_bg.contains(" model "),
-        "Should display model name without indicator. Got:\n{}", render_no_bg);
-    assert!(!render_no_bg.contains(" * "),
-        "Should NOT have indicator when no background tasks. Got:\n{}", render_no_bg);
-    
-    // Render with 2 background tasks - should show indicator
-    let backend = TestBackend::new(40, 5);
-    let mut terminal = Terminal::new(backend).unwrap();
-
-    terminal.draw(|frame| {
-        let widget = input.widget("model", "", 1000, 2, false);
-        frame.render_widget(widget, frame.area());
-    }).unwrap();
-
-    let buffer = terminal.backend().buffer();
-    let mut render_with_bg = String::new();
-    for y in 0..5 {
-        for x in 0..40 {
-            render_with_bg.push_str(buffer.cell((x, y)).unwrap().symbol());
-        }
-        render_with_bg.push('\n');
-    }
-
-    // Should show " * model " with indicator
-    assert!(render_with_bg.contains(" * model "),
-        "Should display indicator when background tasks running. Got:\n{}", render_with_bg);
+    assert!(!top(None, 0).contains('*'), "no indicator without background tasks");
+    assert!(top(None, 2).starts_with("┌ * ─"),
+        "indicator alone between turns. Got: {}", top(None, 2));
+    assert!(top(Some("writing 3s"), 2).starts_with("┌ * writing 3s "),
+        "indicator before the readout. Got: {}", top(Some("writing 3s"), 2));
 }
 
 // ==================== Snapshot Tests ====================
@@ -629,7 +605,7 @@ fn test_cursor_position_after_complex_edits() {
     let backend = TestBackend::new(40, 5);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| {
-        f.render_widget(input.widget("m", "", 0, 0, false), f.area());
+        f.render_widget(input.widget(None, 0, 0, 0, false), f.area());
     }).unwrap();
 
     let buffer = terminal.backend().buffer();
@@ -784,37 +760,6 @@ fn test_render_pasted_text_pill() {
 }
 
 #[test]
-fn test_render_ide_selection_pill() {
-    let mut input = InputBox::new();
-    input.add_attachment(Attachment::ide_selection(
-        "/path/to/file.rs".to_string(),
-        "fn main() {}".to_string(),
-        10,
-        15,
-    ));
-
-    let rendered = render_input_content(&input, 50, 5);
-
-    assert_eq!(rendered, expected_content(&["[§ file.rs:10-15]"], 50, 5));
-}
-
-#[test]
-fn test_render_ide_selection_single_line() {
-    let mut input = InputBox::new();
-    input.add_attachment(Attachment::ide_selection(
-        "/src/lib.rs".to_string(),
-        "let x = 42;".to_string(),
-        42,
-        42,  // Same line
-    ));
-
-    let rendered = render_input_content(&input, 50, 5);
-
-    // Single line should show just the line number, not a range
-    assert_eq!(rendered, expected_content(&["[§ lib.rs:42]"], 50, 5));
-}
-
-#[test]
 fn test_render_text_with_pasted_attachment() {
     let mut input = InputBox::new();
 
@@ -909,73 +854,4 @@ fn test_snapshot_with_pasted_attachment() {
 
     let rendered = render_input_box(&input, 60, 5);
     insta::assert_snapshot!(rendered);
-}
-
-#[test]
-fn test_snapshot_with_ide_selection() {
-    let mut input = InputBox::new();
-
-    input.add_attachment(Attachment::ide_selection(
-        "/src/main.rs".to_string(),
-        "fn main() {\n    println!(\"Hello\");\n}".to_string(),
-        1,
-        3,
-    ));
-    for c in " fix this function".chars() {
-        input.insert_char(c);
-    }
-
-    let rendered = render_input_box(&input, 60, 5);
-    insta::assert_snapshot!(rendered);
-}
-
-#[test]
-fn test_set_ide_selection_updates_existing() {
-    let mut input = InputBox::new();
-
-    // Set initial selection
-    input.set_ide_selection(Some(Attachment::ide_selection(
-        "/old.rs".to_string(),
-        "old content".to_string(),
-        1, 1,
-    )));
-
-    let rendered1 = render_input_content(&input, 50, 5);
-    assert_eq!(rendered1, expected_content(&["[§ old.rs:1]"], 50, 5));
-
-    // Update selection
-    input.set_ide_selection(Some(Attachment::ide_selection(
-        "/new.rs".to_string(),
-        "new content".to_string(),
-        10, 20,
-    )));
-
-    let rendered2 = render_input_content(&input, 50, 5);
-    assert_eq!(rendered2, expected_content(&["[§ new.rs:10-20]"], 50, 5));
-
-    // Only one IDE selection should exist
-    let ide_count = input.segments().iter().filter(|s| {
-        matches!(s, Segment::Attachment(a) if matches!(a.kind, AttachmentKind::IdeSelection { .. }))
-    }).count();
-    assert_eq!(ide_count, 1, "Should have exactly 1 IDE selection");
-}
-
-#[test]
-fn test_clear_ide_selection() {
-    let mut input = InputBox::new();
-
-    input.set_ide_selection(Some(Attachment::ide_selection(
-        "/file.rs".to_string(),
-        "content".to_string(),
-        1, 1,
-    )));
-
-    let rendered1 = render_input_content(&input, 50, 5);
-    assert_eq!(rendered1, expected_content(&["[§ file.rs:1]"], 50, 5));
-
-    // Clear it
-    input.set_ide_selection(None);
-
-    let rendered2 = render_input_content(&input, 50, 5);
-    assert_eq!(rendered2, expected_content(&["Type your message here..."], 50, 5));
 }

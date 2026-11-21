@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::{Config, CODEY_DIR, CORRECTIONS_FILENAME};
+use crate::config::{Config, CODEY_DIR};
 
 /// Embedded esh script for template processing
 const ESH_SCRIPT: &str = include_str!("../lib/esh/esh");
@@ -43,56 +43,38 @@ pub fn default_system_intro(name: &str) -> String {
 pub const SYSTEM_PROMPT_BODY: &str = r#"
 ## Capabilities
 You have access to the following tools:
-- `read_file`: Read file contents, optionally with line ranges
-- `write_file`: Create new files
-- `edit_file`: Make precise edits using search/replace
-- `shell`: Execute bash commands
+- `shell`: Execute bash commands. Reading, searching, creating and editing files all go through it.
 - `fetch_url`: Fetch web content
-- `fetch_html`: Fetch a web page and extract readable content as markdown
-- `open_file`: Open a file in the user's IDE/editor at a specific line
 - `web_search`: Search the web and return results with titles, URLs, and descriptions
 - `spawn_agent`: Spawn a sub-agent to handle a subtask
-- `list_agents` / `get_agent`: Check status and retrieve results from sub-agents
-- `list_background_tasks` / `get_background_task`: Check on background tool executions
-- `record_correction`: Record a correction when a command fails and you find a better approach
+- `list_agents`: Check the status of sub-agents
 
 ## Guidelines
 
 ### Reading Files
 - Always read a file before editing it
-- Use line ranges for large files: `read_file(path, start_line=100, end_line=200)`
-- Use `shell("ls -la")` to explore directories
-- When reading files, be careful about reading large files in one-go. Use line ranges,
-    or check the file stats with `shell("stat <file_path>")` first.
-- shell grep is a great way to get a line number to read a targeted section of a file
+- Be careful about reading large files in one go: check the size first (`wc -l`), and read
+    a range with `sed -n '100,200p' <file>`
+- `grep -n` or `rg -n` is a great way to find the line number of a section to read
+- Use `ls` to explore directories
 
 ### Editing Files
-- Use `edit_file` for existing files, `write_file` only for new files
-- The `old_string` must match EXACTLY, including whitespace and indentation
-- If `old_string` appears multiple times, include more context to make it unique
-- Apply edits sequentially; each edit sees the result of previous edits
-- You can do multiple edits at once, but keep it under 1000 lines
-- Avoid the urge to completely rewrite files - make precise, minimal edits so the user can review them easily
+- Make precise, minimal edits rather than rewriting whole files, so the changes review easily
+- Create new files with a heredoc (`cat > <file> <<'EOF'`)
+- For edits to existing files, make sure the text you replace matches exactly and only once;
+    re-read the changed lines afterwards to confirm the edit landed
 
 ### Shell Commands
-- Prefer `read_file` over `cat`, `head`, `tail`
-- Use `ls` for directory exploration
 - Use `grep` or `rg` for searching code
-- Prefer relative paths over absolute paths when possible - tool approval configs often allow execution from the current working directory but restrict access to system-wide paths
+- Prefer relative paths over absolute paths when possible
 - Avoid using `cd` to change directories before commands; instead, use relative paths from your working directory (e.g., `./src/main.rs` or `src/main.rs`)
 
 ### Web Content
-When fetching web pages with `fetch_html`, consider using `spawn_agent` to delegate content extraction to a sub-agent. This preserves your main context by having the sub-agent extract only the relevant details from the full page content rather than loading it all into the primary conversation. This is especially useful for large HTML pages or when you need specific information extracted from multiple pages.
+When fetching large pages with `fetch_url`, consider using `spawn_agent` to delegate content extraction to a sub-agent. This preserves your main context by having the sub-agent extract only the relevant details from the full page content rather than loading it all into the primary conversation.
 
 ### Background Execution
 For long-running operations, you can execute tools in the background by adding `"background": true` to the tool call. This returns immediately with a task ID while the tool runs asynchronously.
-You will be automatically notified when background tasks and sub-agents finish — their results will be delivered to you as notifications. Do NOT poll or check on background tasks/agents using `list_background_tasks`, `list_agents`, `get_background_task`, or `get_agent`. Instead, continue with other work or go idle and wait for the notification. You will always be reawakened when a background task or agent completes. Only use the status-checking tools if you need to debug a specific issue or if a user explicitly asks about task status.
-
-### Recording Corrections
-When a shell command or approach fails and you find a better way to accomplish the goal, use `record_correction` to save this knowledge. This helps avoid repeating the same mistakes in future sessions. For example:
-- A command that doesn't exist on this system but has an alternative
-- A path that was wrong but you found the correct one
-- A syntax that didn't work but another did
+You will be automatically notified when background tasks and sub-agents finish — their results will be delivered to you as notifications. Do NOT poll sub-agents with `list_agents`; continue with other work or go idle and wait for the notification. You will always be reawakened when a background task or agent completes. Only use `list_agents` if you need to debug a specific issue or if a user explicitly asks about agent status.
 
 ### General
 - Be concise but thorough
@@ -103,35 +85,14 @@ When a shell command or approach fails and you find a better way to accomplish t
 - Always get confirmation before making destructive changes (this includes building a release)
 "#;
 
-/// Prompt used when compacting conversation context
-pub const COMPACTION_PROMPT: &str = r#"The conversation context is getting large and needs to be compacted.
-
-Please provide a comprehensive summary of our conversation so far in markdown format. Include:
-
-1. **What was accomplished** - Main tasks and changes completed as a bulleted list
-2. **What still needs to be done** - Remaining tasks or open areas of work as a bulleted list
-3. **Key project information** - Important facts about the project that the user has shared or that we're not immediately apparent
-4. **Relevant files** - Files most relevant to the current work with brief descriptions, line numbers, or method/variable names
-5. **Relevant documentation paths or URLs** - Links to docs or resources we will use to continue our work
-6. **Quotes and log snippets** - Any important quotes or logs that the user provided that we'll need later
-
-Be thorough but concise - this summary will seed a fresh conversation context."#;
-
 /// System prompt for sub-agents (background research agents)
 pub const SUB_AGENT_PROMPT: &str = r#"You are a background agent. Your task is to investigate, explore, analyze, or implement as directed.
 
 ## Capabilities
 You have access to:
-- `read_file`: Read file contents
-- `write_file`: Create new files
-- `edit_file`: Edit existing files
-- `shell`: Execute commands
+- `shell`: Execute bash commands, including reading and editing files
 - `fetch_url`: Fetch web content
-- `fetch_html`: Fetch and extract readable content from web pages
 - `web_search`: Search the web
-- `open_file`: Signal a file to open in the IDE
-
-Write operations (edit_file, write_file) route approval to the user.
 
 ## Guidelines
 - Focus on the specific task assigned to you
@@ -146,7 +107,6 @@ Write operations (edit_file, write_file) route approval to the user.
 /// 1. The base system prompt (configurable intro + capabilities/guidelines)
 /// 2. User SYSTEM.md from ~/.config/codey/ (optional, dynamic)
 /// 3. Project SYSTEM.md from .codey/ (optional, dynamic)
-/// 4. Project corrections.md from .codey/ (optional, contains learned corrections)
 ///
 /// SYSTEM.md files are processed through [esh](https://github.com/jirutka/esh),
 /// allowing embedded shell commands using `<%= command %>` syntax.
@@ -158,7 +118,6 @@ pub struct SystemPrompt {
     agent_name: Option<String>,
     /// Custom system prompt intro (None = use default)
     custom_intro: Option<String>,
-    corrections_path: PathBuf,
 }
 
 impl SystemPrompt {
@@ -166,14 +125,12 @@ impl SystemPrompt {
     pub fn new() -> Self {
         let user_path = Config::config_dir().map(|d| d.join(SYSTEM_MD_FILENAME));
         let project_path = Path::new(CODEY_DIR).join(SYSTEM_MD_FILENAME);
-        let corrections_path = Path::new(CODEY_DIR).join(CORRECTIONS_FILENAME);
 
         Self {
             user_path,
             project_path,
             agent_name: None,
             custom_intro: None,
-            corrections_path,
         }
     }
 
@@ -181,14 +138,12 @@ impl SystemPrompt {
     pub fn with_config(config: &Config) -> Self {
         let user_path = Config::config_dir().map(|d| d.join(SYSTEM_MD_FILENAME));
         let project_path = Path::new(CODEY_DIR).join(SYSTEM_MD_FILENAME);
-        let corrections_path = Path::new(CODEY_DIR).join(CORRECTIONS_FILENAME);
 
         Self {
             user_path,
             project_path,
             agent_name: config.agent.name.clone(),
             custom_intro: config.agent.system_prompt.clone(),
-            corrections_path,
         }
     }
 
@@ -204,7 +159,6 @@ impl SystemPrompt {
     /// - Base system prompt (with optional custom intro)
     /// - User SYSTEM.md content (if exists)
     /// - Project SYSTEM.md content (if exists)
-    /// - Project corrections.md content (if exists)
     pub fn build(&self) -> String {
         // Build the intro portion
         let intro = if let Some(ref custom) = self.custom_intro {
@@ -229,25 +183,7 @@ impl SystemPrompt {
             prompt.push_str(&content);
         }
 
-        // Append corrections.md if it exists (learned corrections from previous sessions)
-        if let Some(content) = self.load_corrections() {
-            prompt.push_str("\n\n## Learned Corrections\n\n");
-            prompt.push_str("The following corrections were learned from previous sessions. ");
-            prompt.push_str("Use this knowledge to avoid repeating the same mistakes:\n\n");
-            prompt.push_str(&content);
-        }
-
         prompt
-    }
-
-    /// Load corrections from the corrections JSON file.
-    fn load_corrections(&self) -> Option<String> {
-        if !self.corrections_path.exists() {
-            return None;
-        }
-        fs::read_to_string(&self.corrections_path)
-            .ok()
-            .filter(|s| !s.is_empty())
     }
 
     /// Load and process a SYSTEM.md file through esh, falling back to raw content.

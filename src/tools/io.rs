@@ -1,6 +1,6 @@
 //! System I/O operations
 //!
-//! Pure functions for filesystem, shell, and network operations.
+//! Pure functions for shell and network operations.
 //! These are decoupled from the effect/tool system and use standard types.
 
 use std::fs;
@@ -67,80 +67,12 @@ pub struct SearchResult {
 /// Default tab width for user display
 pub const DEFAULT_TAB_WIDTH: usize = 4;
 
-/// Format text for the agent (LLM)
-/// 
-/// Converts tabs to literal `\t` escape sequences so the agent can see
-/// and correctly reproduce them in edits.
-pub fn format_for_agent(text: &str) -> String {
-    text.replace('\t', "\\t")
-}
-
 /// Format text for user display in the terminal
 /// 
 /// Expands escaped `\t` sequences to spaces based on tab_width for proper visual alignment.
 pub fn format_for_user(text: &str, tab_width: usize) -> String {
     let spaces: String = " ".repeat(tab_width);
     text.replace("\\t", &spaces)
-}
-
-/// Read a file and format with line numbers
-///
-/// If `start_line` and/or `end_line` are provided, only the specified line range is returned.
-/// Line numbers are 1-indexed. Use -1 for `end_line` to read to the end of the file.
-/// The output line numbers always reflect the actual line numbers in the file.
-pub fn read_file(
-    path: &Path,
-    start_line: Option<i32>,
-    end_line: Option<i32>,
-) -> Result<String, String> {
-    if !path.exists() {
-        return Err(format!("File not found: {}", path.display()));
-    }
-    if !path.is_file() {
-        return Err(format!("Not a file: {}", path.display()));
-    }
-
-    let content =
-        fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?;
-
-    let lines: Vec<&str> = content.lines().collect();
-    let total_lines = lines.len();
-
-    // Convert to 0-indexed range, handling optional bounds
-    let start_idx = match start_line {
-        Some(s) if s > 0 => (s as usize).saturating_sub(1),
-        Some(s) if s < 0 => 0, // Negative start treated as beginning
-        _ => 0,
-    };
-
-    let end_idx = match end_line {
-        Some(e) if e == -1 => total_lines, // -1 means end of file
-        Some(e) if e > 0 => (e as usize).min(total_lines),
-        Some(e) if e < 0 => total_lines, // Other negative values also mean end
-        _ => total_lines,
-    };
-
-    // Validate range
-    if start_idx >= total_lines {
-        return Ok(String::new()); // Start is past end of file
-    }
-
-    let end_idx = end_idx.max(start_idx); // Ensure end >= start
-
-    // Calculate line number width based on the highest line number we'll show
-    let line_num_width = end_idx.to_string().len().max(4);
-
-    let mut output = String::new();
-    for (i, line) in lines.iter().enumerate().skip(start_idx).take(end_idx - start_idx) {
-        output.push_str(&format!(
-            "{:>width$}│{}\n",
-            i + 1, // Line numbers are 1-indexed
-            format_for_agent(line),
-            width = line_num_width
-        ));
-    }
-
-    Ok(output)
 }
 
 /// Execute a shell command

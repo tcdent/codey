@@ -7,12 +7,10 @@ A terminal-based AI coding assistant built in Rust.
 ## Features
 
 - **Real-time Streaming**: See responses as they're generated with live markdown rendering
-- **Tool Execution**: File operations, shell commands, web search, and more
-- **Permission System**: Tool executions require approval with configurable auto-approve/deny patterns
-- **IDE Integration**: Neovim integration for diff previews and buffer management
+- **Tool Execution**: Bash for everything on the system, plus web fetch and search
 - **Sub-agents**: Spawn background agents for research tasks
 - **Session Persistence**: Continue previous sessions with full context restoration
-- **OAuth Authentication**: Secure authentication via Anthropic OAuth
+- **Subscription or API billing**: runs on the Claude Agent SDK via the `claude` binary (subscription login or `ANTHROPIC_API_KEY`)
 
 ## Installation
 
@@ -47,8 +45,8 @@ sudo cp target/release/codey /usr/local/bin/
 
 ### Requirements
 
-- **Neovim** (optional, for IDE integration): `brew install neovim`
-- **Authentication**: Either OAuth (`codey --login`) or `ANTHROPIC_API_KEY` environment variable
+- **Claude CLI** (required): Codey drives the `claude` binary via the Claude Agent SDK. Install it from https://docs.claude.com/claude-code and make sure `claude` is on your `PATH`.
+- **Authentication**: handled by the `claude` binary — log in once with `claude` (subscription) or set `ANTHROPIC_API_KEY` for pay-as-you-go.
 
 ## Usage
 
@@ -65,12 +63,17 @@ codey --working-dir /path/to/project
 
 ### Authentication
 
-```bash
-# OAuth login (recommended)
-codey --login              # Prints auth URL
-codey --login <code>       # Exchanges code for token
+Codey itself stores no credentials — the `claude` binary it drives owns auth.
+Codey runs the binary with `CLAUDE_CONFIG_DIR=~/.codey/claude` so its settings,
+sessions, and credentials stay isolated from your interactive `~/.claude`.
+Subscription logins live in that dir, so the one-time login must be run with it
+set; API keys come from the environment and need no login:
 
-# Or use API key
+```bash
+# Subscription login (one time, stored under ~/.codey/claude)
+CLAUDE_CONFIG_DIR=~/.codey/claude claude   # then /login
+
+# Or use an API key (pay-as-you-go)
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
@@ -143,146 +146,28 @@ Commands are re-executed on every LLM request, so the prompt always reflects the
 | `Up/Down` | Scroll chat (when input empty: history) |
 | `PageUp/PageDown` | Page scroll |
 
-### Tool Approval
-
-| Key | Action |
-|-----|--------|
-| `y` | Allow |
-| `n` / `Esc` | Deny |
-
 ### Cancellation
 
 Esc and Ctrl+C use layered cancellation that stacks based on what's happening:
 
-1. **Pending approval** → denies the tool and lets the agent continue
-2. **Running foreground tool** → cancels the tool (kills the process), error is sent to the agent which continues its turn
-3. **Agent streaming** → ends the turn entirely
-4. **Idle** → clears the input
+1. **Running foreground tool** → cancels the tool (kills the process), error is sent to the agent which continues its turn
+2. **Agent streaming** → ends the turn entirely
+3. **Idle** → clears the input
 
 Background tasks are never affected by cancel.
 
 ## Tools
 
-Codey provides fourteen tools:
+Codey provides five tools, and runs them without asking: allowing and denying
+belongs to the shell environment the agent runs in.
 
 | Tool | Description |
 |------|-------------|
-| `read_file` | Read file contents with optional line ranges |
-| `write_file` | Create new files (fails if file exists) |
-| `edit_file` | Apply search/replace edits to existing files |
-| `shell` | Execute bash commands with optional working directory |
+| `shell` | Execute bash commands with optional working directory; reading, searching and editing files all go through it |
 | `fetch_url` | Fetch content from URLs (HTTP/HTTPS) |
-| `fetch_html` | Fetch web pages as readable markdown using headless browser |
 | `web_search` | Search the web and return results |
-| `open_file` | Open a file in the IDE at a specific line |
-| `spawn_agent` | Spawn a sub-agent for research/analysis tasks |
+| `spawn_agent` | Spawn a sub-agent for research/analysis tasks; its result arrives as a notification |
 | `list_agents` | List all sub-agents and their status |
-| `get_agent` | Retrieve the result of a finished sub-agent |
-| `list_background_tasks` | List all background tasks and their status |
-| `get_background_task` | Retrieve the result of a completed background task |
-| `record_correction` | Record a correction when a command fails, included in future prompts |
-
-### Tool Filters
-
-Configure auto-approve and auto-deny patterns in `config.toml`:
-
-```toml
-[tools.shell]
-allow = ["^ls\\b", "^grep\\b"]  # Auto-approve
-deny = ["rm\\s+-rf\\s+/"]       # Auto-deny (blocked)
-```
-
-Evaluation order: deny patterns → allow patterns → prompt user.
-
-## Neovim Integration
-
-Codey integrates with Neovim to provide real-time previews, buffer synchronization, and seamless navigation. This requires launching Neovim with an RPC socket.
-
-### Socket Setup
-
-Start Neovim with a listening socket:
-
-```bash
-# With tmux (recommended) - socket auto-discovered by Codey
-nvim --listen /tmp/nvim-$(tmux display -p '#S').sock
-
-# Without tmux - set the environment variable
-export NVIM_LISTEN_ADDRESS=/tmp/nvim.sock
-nvim --listen $NVIM_LISTEN_ADDRESS
-```
-
-### Socket Discovery
-
-Codey discovers the Neovim socket in this order:
-
-1. **Explicit config**: `socket` path in `config.toml`
-2. **Tmux auto-discovery**: `/tmp/nvim-{session-name}.sock`
-3. **Environment variable**: `$NVIM_LISTEN_ADDRESS`
-
-### IDE Effect Handlers
-
-When connected, Codey provides these handlers that integrate with the built-in tools:
-
-| Handler | Tool Integration | Description |
-|---------|------------------|-------------|
-| **Diff Preview** | `edit_file` | Opens side-by-side diff view showing original vs. modified content before you approve changes |
-| **File Preview** | `write_file` | Shows new file content in a scratch buffer before creation |
-| **Buffer Reload** | `edit_file`, `write_file` | Automatically reloads open buffers after files are modified |
-| **Navigation** | `open_file` | Jumps to specific file:line:column in the editor |
-| **Selection Context** | Input | Visual selections in Neovim are automatically attached as context for your next prompt |
-| **Unsaved Check** | `edit_file` | Prevents edits to files with unsaved changes in the buffer |
-
-### Preview Controls
-
-When a preview is displayed:
-- Press `q` to close the preview and return to your original buffer
-- Diff views show deletions (left) and additions (right) with syntax highlighting
-
-### Configuration
-
-Add to `~/.config/codey/config.toml`:
-
-```toml
-[ide.nvim]
-enabled = true                          # Enable nvim integration (default: true)
-socket = "/tmp/nvim-custom.sock"        # Explicit socket path (optional)
-show_diffs = true                       # Show diff previews (default: true)
-auto_reload = true                      # Auto-reload buffers (default: true)
-```
-
-## Browser Setup (for fetch_html)
-
-The `fetch_html` tool requires Chrome or Chromium:
-
-**macOS:**
-```bash
-brew install --cask chromium
-# or install Google Chrome from https://google.com/chrome
-```
-
-**Debian/Ubuntu:**
-```bash
-sudo apt install chromium-browser
-```
-
-### Chrome Profile (Cookie Sharing)
-
-To access authenticated pages, configure Codey to use your Chrome profile:
-
-```toml
-[browser]
-# macOS
-chrome_user_data_dir = "~/Library/Application Support/Google/Chrome"
-chrome_profile = "Profile 9"  # Optional: specific profile name
-
-# Linux
-# chrome_user_data_dir = "~/.config/google-chrome"
-# chrome_profile = "Default"
-```
-
-To find your profile name, check `chrome://version` in Chrome or list the profile directories.
-
-> **Note:** The profile must not be in use by another Chrome instance. Consider creating a separate profile for Codey.
 
 ## Session Persistence
 

@@ -1,0 +1,71 @@
+[package]
+name = "claude-agent-sdk-rs"
+version = "0.6.4"
+authors = ["Tyr Chen <tyr.chen@gmail.com>"]
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+documentation = "https://docs.rs/claude-agent-sdk-rs"
+repository = "https://github.com/tyrchen/claude-agent-sdk-rs"
+homepage = "https://github.com/tyrchen/claude-agent-sdk-rs"
+description = "Rust SDK for Claude Code CLI with bidirectional streaming, hooks, custom tools, and plugin support - 100% feature parity with Python SDK"
+readme = "README.md"
+categories = ["development-tools", "api-bindings", "asynchronous"]
+keywords = ["claude", "ai", "agent", "llm", "sdk"]
+include = ["src/**/*.rs", "Cargo.toml", "LICENSE", "README.md"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.49", features = [
+  "macros",
+  "rt-multi-thread",
+  "process",
+  "io-util",
+  "sync",
+  "time",
+] }
+
+# Async traits
+async-trait = "0.1"
+futures = "0.3"
+pin-project = "1.1"
+async-stream = "0.3"
+
+# Fast lock-free channel
+flume = "0.12"
+
+# Concurrent hash map
+dashmap = "6"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Path utilities
+path-absolutize = "3.1"
+
+# Logging
+tracing = "0.1"
+
+# UUID generation
+uuid = { version = "1.20", features = ["v4"] }
+typed-builder = "0.23.2"
+
+# Macro utilities
+paste = "1.0"
+
+[dev-dependencies]
+tokio-test = "0.4"
+mockall = "0.14"
+
+[features]
+default = []
+testing = ["rand"]
+
+[dependencies.rand]
+version = "0.8"
+optional = true

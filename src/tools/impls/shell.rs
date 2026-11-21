@@ -2,7 +2,7 @@
 
 use super::{handlers, Tool, ToolPipeline};
 use crate::define_tool_block;
-use crate::transcript::{render_agent_label, render_approval_prompt, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
+use crate::transcript::{render_agent_label, render_prefix, render_result, Block, BlockType, ToolBlock, Status};
 use ratatui::{
     style::{Color, Style},
     text::{Line, Span},
@@ -67,9 +67,8 @@ impl Tool for ShellTool {
 
     fn description(&self) -> &'static str {
         "Execute a bash command and return stdout/stderr. \
-         Use for: ls, grep, git, cargo, npm, etc. \
-         Prefer read_file over cat/head/tail. \
-         Commands are executed with a timeout."
+         Use for everything on the system: reading, searching, creating and editing files, \
+         git, builds, tests. Commands are executed with a timeout."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -100,7 +99,6 @@ impl Tool for ShellTool {
         };
 
         ToolPipeline::new()
-            .await_approval()
             .then(handlers::Shell {
                 command: parsed.command,
                 working_dir: parsed.working_dir,
@@ -120,7 +118,7 @@ impl Tool for ShellTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
+    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall};
 
     #[tokio::test]
     async fn test_shell_echo() {
@@ -133,11 +131,10 @@ mod tests {
             call_id: "test".to_string(),
             name: ShellTool::NAME.to_string(),
             params: json!({ "command": "echo 'hello world'" }),
-            decision: ToolDecision::Approve,
             background: false,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
+        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next_outcome().await {
             assert!(content.contains("hello world"));
         } else {
             panic!("Expected Completed event");
@@ -158,11 +155,10 @@ mod tests {
                 "command": "pwd",
                 "working_dir": "/tmp"
             }),
-            decision: ToolDecision::Approve,
             background: false,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
+        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next_outcome().await {
             assert!(content.contains("/tmp"));
         } else {
             panic!("Expected Completed event");
@@ -180,11 +176,10 @@ mod tests {
             call_id: "test".to_string(),
             name: ShellTool::NAME.to_string(),
             params: json!({ "command": "exit 1" }),
-            decision: ToolDecision::Approve,
             background: false,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
+        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next_outcome().await {
             assert!(content.contains("exit code: 1"));
         } else {
             panic!("Expected Completed event");
@@ -202,11 +197,10 @@ mod tests {
             call_id: "test".to_string(),
             name: ShellTool::NAME.to_string(),
             params: json!({ "command": "echo 'error message' >&2" }),
-            decision: ToolDecision::Approve,
             background: false,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next().await {
+        if let Some(crate::tools::ToolEvent::Completed { content, .. }) = executor.next_outcome().await {
             assert!(content.contains("[stderr]"));
             assert!(content.contains("error message"));
         } else {
@@ -228,11 +222,10 @@ mod tests {
                 "command": "ls",
                 "working_dir": "/nonexistent/directory"
             }),
-            decision: ToolDecision::Approve,
             background: false,
         }]);
 
-        if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next().await {
+        if let Some(crate::tools::ToolEvent::Error { content, .. }) = executor.next_outcome().await {
             assert!(content.contains("does not exist"));
         } else {
             panic!("Expected Error event");
