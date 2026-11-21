@@ -2,13 +2,11 @@ mod app;
 mod commands;
 mod config;
 mod effect;
-mod ide;
 mod llm;
 mod notifications;
 #[cfg(feature = "profiling")]
 mod profiler;
 mod prompts;
-mod tool_filter;
 mod tools;
 mod transcript;
 mod ui;

@@ -16,22 +16,20 @@ use ratatui::{
 
 use crate::commands::Command;
 use crate::config::{AgentRuntimeConfig, Config};
-use crate::effect::{Effect, EffectPoll, EffectQueue, PendingEffect};
-use crate::ide::{Ide, IdeEvent, Nvim};
-use crate::llm::{Agent, AgentId, AgentRegistry, AgentStatus, AgentStep, RequestMode};
+use crate::effect::{Effect, EffectQueue, PendingEffect};
+use crate::llm::{Agent, AgentId, AgentRegistry, AgentStep, RequestMode};
 #[cfg(feature = "profiling")]
 use crate::{profile_frame, profile_span};
 use crate::notifications::{Notification, NotificationQueue};
 use crate::prompts::{SystemPrompt, welcome_message};
-use crate::tool_filter::ToolFilters;
-use crate::tools::{
-    init_agent_context, init_browser_context, EffectResult, ToolDecision,
-    ToolEvent, ToolExecutor, ToolRegistry,
-};
+use crate::tools::{init_agent_context, ToolEvent, ToolExecutor, ToolRegistry};
 use crate::transcript::{Block, BlockType, NotificationBlock, Role, Status, TextBlock, Transcript};
-use crate::ui::{Attachment, ChatView, InputBox};
+use crate::ui::{ActivityReadout, Attachment, ChatView, InputBox};
 
 const MIN_FRAME_TIME: Duration = Duration::from_millis(16);
+/// How often the activity readout redraws while a turn runs: often enough for its
+/// token count to move smoothly.
+const ACTIVITY_FRAME: Duration = Duration::from_millis(50);
 
 pub const APP_NAME: &str = "Codey";
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -49,7 +47,6 @@ enum ActionResult {
 enum InputMode {
     Normal,
     Streaming,
-    ToolApproval,
 }
 
 /// Actions that can be triggered by terminal events
@@ -75,9 +72,6 @@ enum Action {
     Interrupt,
     Quit,
     Resize(u16, u16),
-    // Tool approval
-    ApproveTool,
-    DenyTool,
 }
 
 /// Map a terminal event to an action based on the current input mode
@@ -100,7 +94,6 @@ fn map_key(mode: InputMode, key: KeyEvent) -> Option<Action> {
     match mode {
         InputMode::Normal => map_key_normal(key),
         InputMode::Streaming => map_key_streaming(key),
-        InputMode::ToolApproval => map_key_tool_approval(key),
     }
 }
 
@@ -144,15 +137,6 @@ fn map_key_streaming(key: KeyEvent) -> Option<Action> {
     }
 }
 
-/// Keybindings for tool approval mode
-fn map_key_tool_approval(key: KeyEvent) -> Option<Action> {
-    match key.code {
-        KeyCode::Char('y') | KeyCode::Enter => Some(Action::ApproveTool),
-        KeyCode::Char('n') | KeyCode::Esc => Some(Action::DenyTool),
-        _ => None,
-    }
-}
-
 /// Application state
 pub struct App {
     config: Config,
@@ -165,21 +149,21 @@ pub struct App {
     continue_session: bool,
     /// Last render time for frame rate limiting
     last_render: Instant,
+    /// Redraws the activity readout (clock, smoothed token count) while a turn runs.
+    activity_tick: tokio::time::Interval,
+    /// The running turn's readout, shown in the input box's title
+    activity: ActivityReadout,
     /// Alert message to display (cleared on next user input)
     alert: Option<String>,
-    /// Compiled tool parameter filters for auto-approve/deny
-    tool_filters: ToolFilters,
-    /// IDE connection for editor integration (e.g., Neovim)
-    ide: Option<Box<dyn Ide>>,
     /// Terminal event stream
     events: EventStream,
     /// Current input mode
     input_mode: InputMode,
     /// Agent registry for managing multiple agents
     agents: AgentRegistry,
-    /// Tool executor for managing tool approval and execution
+    /// Tool executor for running tools
     tool_executor: ToolExecutor,
-    /// Queue for pending effects (approvals, IDE previews, etc.)
+    /// Queue for pending effects (sub-agent spawns and listings)
     effects: EffectQueue,
     /// Notifications to inject into next tool result
     notifications: NotificationQueue,
@@ -250,30 +234,6 @@ impl App {
             Transcript::new_numbered().context("Failed to create new transcript")?
         };
 
-        // Compile tool filters from config
-        let tool_filters = ToolFilters::compile(&config.tools.filters())
-            .context("Failed to compile tool filters")?;
-
-        // Try to connect to neovim if enabled
-        let ide: Option<Box<dyn Ide>> = if config.ide.nvim.enabled {
-            match Nvim::discover(&config.ide.nvim).await {
-                Ok(Some(nvim)) => {
-                    tracing::info!("Connected to {} at {:?}", nvim.name(), nvim.socket_path());
-                    Some(Box::new(nvim))
-                },
-                Ok(None) => {
-                    tracing::debug!("No nvim instance found");
-                    None
-                },
-                Err(e) => {
-                    tracing::warn!("Failed to connect to nvim: {}", e);
-                    None
-                },
-            }
-        } else {
-            None
-        };
-
         let agent_name = config.agent.name().to_string();
 
         Ok(Self {
@@ -284,9 +244,13 @@ impl App {
             should_quit: false,
             continue_session,
             last_render: Instant::now(),
+            activity_tick: {
+                let mut tick = tokio::time::interval(ACTIVITY_FRAME);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                tick
+            },
+            activity: ActivityReadout::default(),
             alert: None,
-            tool_filters,
-            ide,
             events: EventStream::new(),
             input_mode: InputMode::Normal,
             agents: AgentRegistry::new(),
@@ -301,23 +265,21 @@ impl App {
         // Initialize agent context for sub-agent spawning
         init_agent_context(AgentRuntimeConfig::background(&self.config));
 
-        // Initialize browser context for fetch_html
-        init_browser_context(&self.config.browser);
-
         // Use dynamic prompt builder so mdsh commands are re-executed on each LLM call
         let system_prompt = SystemPrompt::with_config(&self.config);
         let agent_name = system_prompt.agent_name().to_string();
-        let agent = Agent::with_dynamic_prompt(
+        let mut agent = Agent::with_dynamic_prompt(
             AgentRuntimeConfig::foreground(&self.config),
             Box::new(move || system_prompt.build()),
             self.tool_executor.tools().clone(),
         );
 
-        if !self.continue_session {
+        if self.continue_session {
+            agent.restore_from_transcript(&self.chat.transcript);
+        } else {
             self.chat
                 .add_turn(Role::Assistant, TextBlock::pending(&welcome_message(&agent_name)));
         }
-        // Session continuation is owned by the claude binary (--resume); TODO wire it.
         self.agents.register(agent);
 
         // Initial render - populate hot zone from transcript
@@ -336,10 +298,6 @@ impl App {
                 Some(term_event) = self.events.next() => {
                     self.handle_term_event(term_event).await?;
                 }
-                // Handle IDE events (selection changes)
-                Some(ide_event) = async { self.ide.as_mut()?.next().await } => {
-                    self.handle_ide_event(ide_event);
-                }
                 // Handle agent steps (streaming responses, tool requests)
                 Some((agent_id, agent_step)) = self.agents.next() => {
                     self.handle_agent_step(agent_id, agent_step).await?;
@@ -347,6 +305,10 @@ impl App {
                 // Handle tool executor events (tool output, completion)
                 Some(tool_event) = self.tool_executor.next() => {
                     self.handle_tool_event(tool_event).await?;
+                }
+                // Advance the activity readout while a turn runs
+                _ = self.activity_tick.tick(), if self.input_mode != InputMode::Normal => {
+                    self.draw();
                 }
                 // Handle notifications when in normal input mode
                 _ = std::future::ready(()), if self.input_mode == InputMode::Normal && !self.notifications.is_empty() => {
@@ -357,7 +319,7 @@ impl App {
                 _ = std::future::ready(()), if self.effects.has_pollable() => {
                     if let Some(pending) = self.effects.poll_next() {
                         self.handle_pending_effect(pending).await;
-                        // Ensure UI is updated after handling effects (especially for background agent approvals)
+                        // Ensure UI is updated after handling effects
                         self.draw();
                     }
                 }
@@ -424,21 +386,17 @@ impl App {
         let input_height = input_height.min(max_input_height).max(5);
 
         // Draw the viewport (hot zone content + input)
+        let (usage, activity) = self
+            .agents
+            .primary()
+            .and_then(|m| m.try_lock().ok())
+            .map_or((Default::default(), None), |a| (a.total_usage(), a.activity()));
+        let activity = activity.map(|a| self.activity.text(&a));
         let chat_widget = self.chat.widget();
-        let context_tokens = self
-            .agents
-            .primary()
-            .and_then(|m| m.try_lock().ok())
-            .map_or(0, |a| a.total_usage().context_tokens);
-        let model_icon = self
-            .agents
-            .primary()
-            .and_then(|m| m.try_lock().ok())
-            .map_or("", |a| a.model_icon());
         let input_widget = self.input.widget(
-            &self.config.agents.foreground.model,
-            model_icon,
-            context_tokens,
+            activity,
+            usage.context_tokens,
+            usage.tokens_per_second,
             self.tool_executor.running_background_count() + self.agents.running_background_count(),
             self.input_mode != InputMode::Normal,
         );
@@ -511,71 +469,10 @@ impl App {
         self.draw();
     }
 
-    /// Set input mode, but never clobber an active tool approval.
-    /// If an approval is currently being shown to the user, the mode change is suppressed.
     fn set_input_mode(&mut self, mode: InputMode) {
-        if self.input_mode == InputMode::ToolApproval && mode != InputMode::ToolApproval {
-            if self.effects.has_active_approval() {
-                tracing::debug!(
-                    "Suppressed mode change to {:?} — approval is active",
-                    mode
-                );
-                return;
-            }
-        }
         self.input_mode = mode;
     }
 
-    /// Execute a tool decision (approve/deny) for the currently active tool
-    async fn decide_pending_tool(&mut self, decision: ToolDecision) {
-        tracing::debug!("decide_pending_tool: decision={:?}", decision);
-
-        // Take the currently active approval
-        let pending = match self.effects.take_active_approval() {
-            Some(p) => p,
-            None => {
-                tracing::warn!("No tool awaiting approval");
-                return;
-            },
-        };
-
-        // Find block in stage, update status, and promote to transcript
-        if let Some(mut block) = self.chat.transcript.stage.remove_by_call_id(&pending.call_id) {
-            block.set_status(match decision {
-                ToolDecision::Approve => Status::Running,
-                ToolDecision::Deny => Status::Denied,
-                _ => Status::Pending,
-            });
-            // Ensure there's an active turn to attach the block to.
-            // The primary agent's turn may have already finished while
-            // a background agent's approval was still pending.
-            if !self.chat.transcript.has_active_turn() {
-                self.chat.transcript.begin_turn(Role::Assistant);
-            }
-            self.chat.transcript.start_block(block);
-        }
-
-        // Convert decision to EffectResult and send to executor
-        let result: EffectResult = match decision {
-            ToolDecision::Approve => Ok(None),
-            ToolDecision::Deny => Err("Denied by user".to_string()),
-            _ => Err("Unexpected decision".to_string()),
-        };
-        tracing::debug!(
-            "decide_pending_tool: sending decision for {}",
-            pending.call_id
-        );
-        pending.complete(result);
-
-        // If no more acknowledged approvals, switch mode
-        // (next unacknowledged approval will be handled by polling)
-        if !self.effects.has_active_approval() {
-            self.set_input_mode(InputMode::Streaming);
-        }
-
-        self.chat.render(&mut self.terminal);
-        self.draw();
-    }
     /// Handle an action. Returns the result indicating what the main loop should do.
     async fn handle_action(&mut self, action: Action) -> ActionResult {
         // Clear alert on any input action
@@ -591,12 +488,6 @@ impl App {
             Action::Quit => {
                 self.should_quit = true;
                 return ActionResult::Interrupt;
-            },
-            Action::ApproveTool => {
-                self.decide_pending_tool(ToolDecision::Approve).await;
-            },
-            Action::DenyTool => {
-                self.decide_pending_tool(ToolDecision::Deny).await;
             },
             Action::InsertChar(c) => self.input.insert_char(c),
             Action::InsertNewline => self.input.insert_newline(),
@@ -662,25 +553,6 @@ impl App {
         }
 
         Ok(())
-    }
-
-    /// Handle an IDE event (selection changes, etc.)
-    fn handle_ide_event(&mut self, event: IdeEvent) {
-        match event {
-            IdeEvent::SelectionChanged(selection) => {
-                let attachment = selection.map(|sel| {
-                    let path = std::env::current_dir()
-                        .ok()
-                        .and_then(|cwd| std::path::Path::new(&sel.path).strip_prefix(cwd).ok())
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or(sel.path);
-
-                    Attachment::ide_selection(path, sel.content, sel.start_line, sel.end_line)
-                });
-                self.input.set_ide_selection(attachment);
-                let _ = self.draw_throttled();
-            },
-        }
     }
 
     /// Handle notifications from the queue.
@@ -825,8 +697,8 @@ impl App {
                 ToolEvent::Completed { content, .. } =>
                     format!("Completed(content_len={})", content.len()),
                 ToolEvent::Error { content, .. } => format!("Error(content_len={})", content.len()),
-                ToolEvent::BackgroundStarted { name, call_id, .. } =>
-                    format!("BackgroundStarted({}, {})", name, call_id),
+                ToolEvent::Started { name, call_id, .. } =>
+                    format!("Started({}, {})", name, call_id),
                 ToolEvent::BackgroundCompleted { name, call_id, .. } =>
                     format!("BackgroundCompleted({}, {})", name, call_id),
             }
@@ -911,10 +783,7 @@ impl App {
                         .submit_tool_result(&call_id, content);
                 }
 
-                // Tool is done - only switch to streaming if no more approvals pending
-                if !self.effects.has_pending_approvals() {
-                    self.set_input_mode(InputMode::Streaming);
-                }
+                self.set_input_mode(InputMode::Streaming);
 
                 // Render update
                 self.chat.render(&mut self.terminal);
@@ -940,30 +809,47 @@ impl App {
                         .submit_tool_result(&call_id, content);
                 }
 
-                // Tool is done - only switch to streaming if no more approvals pending
-                if !self.effects.has_pending_approvals() {
-                    self.set_input_mode(InputMode::Streaming);
-                }
+                self.set_input_mode(InputMode::Streaming);
 
                 // Render update
                 self.chat.render(&mut self.terminal);
                 self.draw();
             },
 
-            ToolEvent::BackgroundStarted {
+            ToolEvent::Started {
                 agent_id,
                 call_id,
                 name,
+                params,
+                background,
             } => {
-                // Background task started - send placeholder result to agent
-                let placeholder = format!("Running in background (task_id: {})", call_id);
-                if let Some(agent_mutex) = self.agents.get(agent_id) {
-                    agent_mutex
-                        .lock()
-                        .await
-                        .submit_tool_result(&call_id, placeholder);
+                // The tool's block joins the transcript as it starts running.
+                let tool = self.tool_executor.tools().get(&name);
+                let mut block = tool.create_block(&call_id, params, background);
+                if self.agents.primary_id() != Some(agent_id) {
+                    if let Some(label) = self.agents.metadata(agent_id).map(|m| m.label.clone()) {
+                        block.set_agent_label(label);
+                    }
                 }
-                tracing::info!("Background task started: {} ({})", name, call_id);
+                block.set_status(Status::Running);
+                // The primary agent's turn may have already finished while a
+                // sub-agent's tool starts.
+                if !self.chat.transcript.has_active_turn() {
+                    self.chat.transcript.begin_turn(Role::Assistant);
+                }
+                self.chat.transcript.start_block(block);
+
+                if background {
+                    // The agent goes on with a placeholder result.
+                    let placeholder = format!("Running in background (task_id: {})", call_id);
+                    if let Some(agent_mutex) = self.agents.get(agent_id) {
+                        agent_mutex.lock().await.submit_tool_result(&call_id, placeholder);
+                    }
+                    tracing::info!("Background task started: {} ({})", name, call_id);
+                }
+
+                self.chat.render(&mut self.terminal);
+                self.draw();
             },
 
             ToolEvent::BackgroundCompleted {
@@ -1084,11 +970,32 @@ impl App {
                 }
             },
             AgentStep::Error(msg) => {
-                self.chat.transcript.mark_active_block(Status::Error);
-                if let Err(e) = self.chat.transcript.save() {
-                    tracing::error!("Failed to save transcript on error: {}", e);
+                if is_primary {
+                    // The turn is over: end it, so the next message can begin another.
+                    self.chat.transcript.fail_turn();
+                    if let Err(e) = self.chat.transcript.save() {
+                        tracing::error!("Failed to save transcript on error: {}", e);
+                    }
+                    self.set_input_mode(InputMode::Normal);
+                } else {
+                    // A sub-agent broke: the primary agent hears about it as it would
+                    // hear its result, and the primary's own turn is left alone.
+                    let label = self
+                        .agents
+                        .metadata(agent_id)
+                        .map(|m| m.label.clone())
+                        .unwrap_or_default();
+                    self.agents.set_error(agent_id, msg.clone());
+                    tracing::warn!("Sub-agent {} ({}) failed: {}", agent_id, label, msg);
+                    let block = NotificationBlock::new("background_agent", format!("[{}] failed", label));
+                    let block_id = self.chat.transcript.stage.push(Box::new(block));
+                    self.notifications.push(Notification::BackgroundAgent {
+                        label: label.clone(),
+                        result: format!("The agent failed: {}", msg),
+                        block_id,
+                    });
+                    self.chat.render(&mut self.terminal);
                 }
-                self.set_input_mode(InputMode::Normal);
 
                 let alert_msg = if let Some(start) = msg.find('{') {
                     serde_json::from_str::<serde_json::Value>(&msg[start..])
@@ -1108,56 +1015,8 @@ impl App {
         Ok(())
     }
 
-    /// Handle a pending effect - execute it and either complete or re-queue.
-    async fn handle_pending_effect(&mut self, mut pending: PendingEffect) {
-        // Special handling for approval effects
-        if let Effect::AwaitApproval {
-            ref name,
-            ref params,
-            background,
-        } = pending.effect
-        {
-            if !pending.acknowledged {
-                // Clone values before mutating pending
-                let call_id = pending.call_id.clone();
-                let agent_id = pending.agent_id;
-                let name = name.clone();
-                let params = params.clone();
-
-                // Mark as acknowledged and requeue BEFORE showing UI
-                // This is needed because acknowledge_approval may auto-decide,
-                // which calls decide_pending_tool, which looks for the effect in the queue
-                pending.acknowledge();
-                self.effects.requeue(pending);
-
-                // Now show approval UI (may auto-decide)
-                self.acknowledge_approval(&call_id, agent_id, &name, params, background)
-                    .await;
-                return;
-            }
-            // Already acknowledged - stays in queue waiting for user input
-            self.effects.requeue(pending);
-            return;
-        }
-
-        // IDE preview effects need polling (resource contention)
-        if matches!(
-            pending.effect,
-            Effect::IdeShowPreview { .. } | Effect::IdeShowDiffPreview { .. }
-        ) {
-            let poll_result = self.try_execute_effect(&pending.effect).await;
-            match poll_result {
-                EffectPoll::Ready(result) => {
-                    pending.complete(result.map_err(|e: anyhow::Error| e.to_string()));
-                },
-                EffectPoll::Pending => {
-                    self.effects.requeue(pending);
-                },
-            }
-            return;
-        }
-
-        // All other effects execute immediately
+    /// Handle a pending effect: apply it and send the result back to its pipeline.
+    async fn handle_pending_effect(&mut self, pending: PendingEffect) {
         let PendingEffect {
             agent_id,
             effect,
@@ -1168,169 +1027,10 @@ impl App {
         let _ = responder.send(result.map_err(|e| e.to_string()));
     }
 
-    /// Show approval UI for an effect (create block, check filters, set mode)
-    async fn acknowledge_approval(
-        &mut self,
-        call_id: &str,
-        agent_id: AgentId,
-        name: &str,
-        params: serde_json::Value,
-        background: bool,
-    ) {
-        let is_primary = self.agents.primary_id() == Some(agent_id);
-
-        // Get agent label for sub-agents
-        let agent_label = if !is_primary {
-            self.agents.metadata(agent_id).map(|m| m.label.clone())
-        } else {
-            None
-        };
-
-        self.draw(); // flush any pending text
-        let tool = self.tool_executor.tools().get(name);
-        let mut block = tool.create_block(call_id, params.clone(), background);
-
-        // Set agent label for sub-agent tools
-        if let Some(ref label) = agent_label {
-            tracing::info!("Sub-agent '{}' requesting approval for {}", label, name);
-            block.set_agent_label(label.clone());
-        }
-
-        // Add to stage (stays at bottom while awaiting approval)
-        self.chat.transcript.stage.push(block);
-        self.chat.render(&mut self.terminal);
-        self.draw();
-
-        // Check filters for auto-approve/deny
-        match self.tool_filters.evaluate(name, &params) {
-            Some(decision) => {
-                self.decide_pending_tool(decision).await;
-            },
-            None => {
-                // Wait for user approval
-                if is_primary {
-                    if let Err(e) = self.chat.transcript.save() {
-                        tracing::error!("Failed to save transcript before tool approval: {}", e);
-                    }
-                }
-                self.input_mode = InputMode::ToolApproval;
-                self.draw();
-            },
-        }
-    }
-
-    /// Try to execute an IDE preview effect. Returns Ready if completed, Pending if slot not available.
-    /// Only handles IdeShowPreview and IdeShowDiffPreview - all other effects go through apply_effect.
-    async fn try_execute_effect(&mut self, effect: &Effect) -> EffectPoll {
-        match effect {
-            Effect::IdeShowPreview { preview } => {
-                if let Some(ide) = &self.ide {
-                    match ide.try_claim_preview().await {
-                        Ok(true) => match ide.show_preview(preview).await {
-                            Ok(_) => EffectPoll::Ready(Ok(None)),
-                            Err(e) => EffectPoll::Ready(Err(e)),
-                        },
-                        Ok(false) => EffectPoll::Pending,
-                        Err(e) => EffectPoll::Ready(Err(e)),
-                    }
-                } else {
-                    EffectPoll::Ready(Ok(None))
-                }
-            },
-
-            Effect::IdeShowDiffPreview { path, edits } => {
-                if let Some(ide) = &self.ide {
-                    match ide.try_claim_preview().await {
-                        Ok(true) => {
-                            match ide.show_diff_preview(&path.to_string_lossy(), edits).await {
-                                Ok(_) => EffectPoll::Ready(Ok(None)),
-                                Err(e) => EffectPoll::Ready(Err(e)),
-                            }
-                        },
-                        Ok(false) => EffectPoll::Pending,
-                        Err(e) => EffectPoll::Ready(Err(e)),
-                    }
-                } else {
-                    EffectPoll::Ready(Ok(None))
-                }
-            },
-
-            // All other effects should go through apply_effect, not here
-            _ => EffectPoll::Ready(Err(anyhow::anyhow!(
-                "Effect {:?} should not be polled - use apply_effect",
-                effect
-            ))),
-        }
-    }
-
     /// Apply a tool effect. Returns Ok(Some(output)) to set pipeline output.
     async fn apply_effect(&mut self, _agent_id: AgentId, effect: Effect) -> Result<Option<String>> {
         tracing::debug!("Applying effect: {:?}", effect);
         match effect {
-            // AwaitApproval is handled via the EffectQueue, not here
-            Effect::AwaitApproval { .. } => {
-                unreachable!("AwaitApproval should be handled via EffectQueue, not apply_effect")
-            },
-            // Preview effects are polled via try_execute_effect, not here
-            Effect::IdeShowPreview { .. } | Effect::IdeShowDiffPreview { .. } => {
-                unreachable!(
-                    "IDE preview effects should be polled via try_execute_effect, not apply_effect"
-                )
-            },
-            Effect::IdeReloadBuffer { path } => {
-                if let Some(ide) = &self.ide {
-                    ide.reload_buffer(&path.to_string_lossy()).await?;
-                }
-                Ok(None)
-            },
-            Effect::IdeOpen { path, line, column } => {
-                if let Some(ide) = &self.ide {
-                    ide.navigate_to(&path.to_string_lossy(), line, column)
-                        .await?;
-                }
-                Ok(None)
-            },
-            Effect::IdeClosePreview => {
-                if let Some(ide) = &self.ide {
-                    ide.close_preview().await?;
-                }
-                Ok(None)
-            },
-            Effect::IdeCheckUnsavedEdits { path } => {
-                if let Some(ide) = &self.ide {
-                    if ide.has_unsaved_changes(&path.to_string_lossy()).await? {
-                        anyhow::bail!(
-                            "File {} has unsaved changes in the IDE. Save or discard them first.",
-                            path.display()
-                        );
-                    }
-                }
-                Ok(None)
-            },
-            Effect::ListBackgroundTasks => {
-                let tasks = self.tool_executor.list_tasks();
-                if tasks.is_empty() {
-                    Ok(Some("No background tasks".to_string()))
-                } else {
-                    let output = tasks
-                        .iter()
-                        .map(|(call_id, name, status)| {
-                            format!("{} ({}) [{:?}]", call_id, name, status)
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    Ok(Some(output))
-                }
-            },
-            Effect::GetBackgroundTask { task_id } => {
-                match self.tool_executor.take_result(&task_id) {
-                    Some((tool_name, output, status)) => Ok(Some(format!(
-                        "Task {} ({}) [{:?}]:\n{}",
-                        task_id, tool_name, status, output
-                    ))),
-                    None => Ok(Some(format!("Task {} not found or still running", task_id))),
-                }
-            },
             Effect::SpawnAgent { agent, label } => {
                 // Register the agent - it will be polled through agents.next()
                 let parent_id = _agent_id;
@@ -1358,72 +1058,6 @@ impl App {
                     Ok(Some(output))
                 }
             },
-            Effect::GetAgent { label } => {
-                // Find agent by label
-                let agent_id = match self.agents.find_by_label(&label) {
-                    Some(id) => id,
-                    None => return Ok(Some(format!("Agent '{}' not found", label))),
-                };
-
-                // Check status
-                let status = self.agents.metadata(agent_id).map(|m| m.status.clone());
-
-                match status {
-                    Some(status) => {
-                        let status_str = format!("{:?}", status);
-                        if status == AgentStatus::Finished {
-                            // Get result and remove agent (consume on retrieval)
-                            let result = if let Some(agent_mutex) = self.agents.get(agent_id) {
-                                let agent = agent_mutex.lock().await;
-                                agent.last_message().unwrap_or_default()
-                            } else {
-                                String::new()
-                            };
-                            self.agents.remove(agent_id);
-                            Ok(Some(format!("[{}] [{}]:\n{}", label, status_str, result)))
-                        } else {
-                            // Still running - just return status
-                            Ok(Some(format!("[{}] [{}]", label, status_str)))
-                        }
-                    },
-                    None => Ok(Some(format!("Agent '{}' not found", label))),
-                }
-            },
-        }
-    }
-
-    /// Get output from an agent by label (for GetAgent effect)
-    #[cfg(feature = "cli")]
-    #[allow(dead_code)]
-    async fn get_agent_output(&mut self, label: &str) -> String {
-        // Find agent by label
-        let agent_id = match self.agents.find_by_label(label) {
-            Some(id) => id,
-            None => return format!("Agent '{}' not found", label),
-        };
-
-        // Check status
-        let status = self.agents.metadata(agent_id).map(|m| m.status.clone());
-
-        match status {
-            Some(status) => {
-                let status_str = format!("{:?}", status);
-                if status == AgentStatus::Finished {
-                    // Get result and remove agent (consume on retrieval)
-                    let result = if let Some(agent_mutex) = self.agents.get(agent_id) {
-                        let agent = agent_mutex.lock().await;
-                        agent.last_message().unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    self.agents.remove(agent_id);
-                    format!("[{}] [{}]:\n{}", label, status_str, result)
-                } else {
-                    // Still running - just return status
-                    format!("[{}] [{}]", label, status_str)
-                }
-            },
-            None => format!("Agent '{}' status unknown", label),
         }
     }
 }

@@ -1,8 +1,9 @@
 //! Shared agent types: steps, usage, and request modes.
 //!
-//! The agent backend itself lives in [`super::sdk_agent`] (driving the `claude`
-//! binary via claude-agent-sdk-rs). This module holds the types shared between
-//! that backend and the rest of Codey (App, transcript, tools).
+//! The backends live in [`super::sdk_agent`] (driving the `claude` binary via
+//! claude-agent-sdk-rs) and [`super::rockem_agent`] (Codey's own loop over a rockem
+//! service), behind [`super::backend::Agent`]. This module holds the types shared
+//! between them and the rest of Codey (App, transcript, tools).
 #![allow(dead_code)]
 
 use crate::tools::ToolCall;
@@ -18,6 +19,9 @@ pub struct Usage {
     pub cache_creation_tokens: u32,
     /// Cache read tokens in last request
     pub cache_read_tokens: u32,
+    /// Generation rate over the last turn, tokens per second; 0 when the backend
+    /// doesn't report one.
+    pub tokens_per_second: u32,
 }
 
 impl Usage {
@@ -45,7 +49,44 @@ impl std::ops::AddAssign for Usage {
         self.context_tokens = other.context_tokens;
         self.cache_creation_tokens = other.cache_creation_tokens;
         self.cache_read_tokens = other.cache_read_tokens;
+        self.tokens_per_second = other.tokens_per_second;
     }
+}
+
+/// What a running turn is doing, for the activity readout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// Waiting in line for the model (rockem: before a node takes the request).
+    Queued,
+    /// Reading the prompt, until the first token.
+    Prefill,
+    /// Generating reasoning.
+    Thinking,
+    /// Generating the reply.
+    Writing,
+    /// Waiting on tool results.
+    Tools,
+}
+
+impl Phase {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Phase::Queued => "queued",
+            Phase::Prefill => "prefill",
+            Phase::Thinking => "thinking",
+            Phase::Writing => "writing",
+            Phase::Tools => "tools",
+        }
+    }
+}
+
+/// A running turn: since when, what it is doing, and the tokens generated so far
+/// (`None` when the backend doesn't count them as they arrive).
+#[derive(Debug, Clone, Copy)]
+pub struct Activity {
+    pub started: std::time::Instant,
+    pub phase: Phase,
+    pub tokens: Option<u32>,
 }
 
 /// Steps yielded by the agent during processing
@@ -66,8 +107,7 @@ pub enum AgentStep {
 
 /// Request mode controlling agent behavior for a single request.
 ///
-/// Retained for the public `send_request` signature; the `claude` binary owns
-/// the agent loop, so only `Normal` is used today.
+/// Retained for the public `send_request` signature; only `Normal` is used today.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum RequestMode {
     /// Normal conversation mode with tool access

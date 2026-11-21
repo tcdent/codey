@@ -9,8 +9,6 @@
 
 mod exec;
 #[cfg(feature = "cli")]
-pub mod browser;
-#[cfg(feature = "cli")]
 pub mod handlers;
 #[cfg(feature = "cli")]
 mod impls;
@@ -19,35 +17,20 @@ mod pipeline;
 
 /// Tool name constants (always available for configuration)
 pub mod names {
-    pub const READ_FILE: &str = "mcp_read_file";
-    pub const WRITE_FILE: &str = "mcp_write_file";
-    pub const EDIT_FILE: &str = "mcp_edit_file";
     pub const SHELL: &str = "mcp_shell";
     pub const FETCH_URL: &str = "mcp_fetch_url";
-    pub const FETCH_HTML: &str = "mcp_fetch_html";
     pub const WEB_SEARCH: &str = "mcp_web_search";
-    pub const OPEN_FILE: &str = "mcp_open_file";
     pub const SPAWN_AGENT: &str = "mcp_spawn_agent";
-    pub const LIST_BACKGROUND_TASKS: &str = "mcp_list_background_tasks";
-    pub const GET_BACKGROUND_TASK: &str = "mcp_get_background_task";
     pub const LIST_AGENTS: &str = "mcp_list_agents";
-    pub const GET_AGENT: &str = "mcp_get_agent";
-    pub const RECORD_CORRECTION: &str = "mcp_record_correction";
 }
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub use crate::effect::EffectResult;
-pub use exec::{ToolCall, ToolDecision, ToolEvent, ToolExecutor};
+pub use exec::{ToolCall, ToolEvent, ToolExecutor};
 #[cfg(feature = "cli")]
-pub use impls::{
-    init_agent_context, EditFileTool, FetchHtmlTool, FetchUrlTool,
-    GetAgentTool, GetBackgroundTaskTool, ListAgentsTool, ListBackgroundTasksTool, OpenFileTool,
-    ReadFileTool, RecordCorrectionTool, ShellTool, SpawnAgentTool, WebSearchTool, WriteFileTool,
-};
-#[cfg(feature = "cli")]
-pub use browser::init_browser_context;
+pub use impls::{init_agent_context, FetchUrlTool, ListAgentsTool, ShellTool, SpawnAgentTool, WebSearchTool};
 pub use pipeline::{Effect, Step, Tool, ToolPipeline};
 
 #[cfg(feature = "cli")]
@@ -127,80 +110,41 @@ impl Tool for SimpleTool {
     }
 }
 
-/// Registry of available tools
+/// Registry of available tools, kept sorted by name: the tool list leads every
+/// prompt, so it must come out the same in every process for the model server's
+/// prompt cache to match across launches.
 #[derive(Clone)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    tools: BTreeMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
     /// Create a full registry with all tools (CLI only)
     #[cfg(feature = "cli")]
     pub fn new() -> Self {
-        let mut registry = Self {
-            tools: HashMap::new(),
-        };
-
-        registry.register(Arc::new(ReadFileTool));
-        registry.register(Arc::new(WriteFileTool));
-        registry.register(Arc::new(EditFileTool));
-        registry.register(Arc::new(ShellTool::new()));
-        registry.register(Arc::new(FetchUrlTool));
-        registry.register(Arc::new(FetchHtmlTool));
-        registry.register(Arc::new(WebSearchTool));
-        registry.register(Arc::new(OpenFileTool));
+        let mut registry = Self::subagent();
         registry.register(Arc::new(SpawnAgentTool));
-        registry.register(Arc::new(ListBackgroundTasksTool));
-        registry.register(Arc::new(GetBackgroundTaskTool));
         registry.register(Arc::new(ListAgentsTool));
-        registry.register(Arc::new(GetAgentTool));
-        registry.register(Arc::new(RecordCorrectionTool));
-
         registry
     }
 
-    /// Tools available to sub-agents (includes write tools - approval routed to user) (CLI only)
+    /// Tools available to sub-agents: everything but agent management (CLI only)
     ///
     /// TODO: Sub-agent tools shouldn't have a `background` parameter since sub-agents
     /// are already non-blocking. We should either filter it out of the schema or
     /// create separate tool variants for sub-agents.
     #[cfg(feature = "cli")]
     pub fn subagent() -> Self {
-        let mut registry = Self {
-            tools: HashMap::new(),
-        };
-
-        registry.register(Arc::new(ReadFileTool));
-        registry.register(Arc::new(WriteFileTool));
-        registry.register(Arc::new(EditFileTool));
+        let mut registry = Self::empty();
         registry.register(Arc::new(ShellTool::new()));
         registry.register(Arc::new(FetchUrlTool));
-        registry.register(Arc::new(FetchHtmlTool));
         registry.register(Arc::new(WebSearchTool));
-        registry.register(Arc::new(OpenFileTool));
-
-        registry
-    }
-
-    #[cfg(feature = "cli")]
-    pub fn read_only() -> Self {
-        let mut registry = Self {
-            tools: HashMap::new(),
-        };
-
-        registry.register(Arc::new(ReadFileTool));
-        registry.register(Arc::new(ShellTool::new()));
-        registry.register(Arc::new(FetchUrlTool));
-        registry.register(Arc::new(FetchHtmlTool));
-        registry.register(Arc::new(WebSearchTool));
-        registry.register(Arc::new(OpenFileTool));
-
         registry
     }
 
     pub fn empty() -> Self {
         Self {
-            tools: HashMap::new(),
+            tools: BTreeMap::new(),
         }
     }
 
@@ -224,5 +168,21 @@ impl ToolRegistry {
 
     pub fn values(&self) -> impl Iterator<Item = &dyn Tool> {
         self.tools.values().map(|t| t.as_ref())
+    }
+}
+
+#[cfg(all(test, feature = "cli"))]
+mod tests {
+    use super::*;
+
+    /// The tool list leads every prompt; it must come out the same in every process.
+    #[test]
+    fn tools_come_out_sorted_by_name() {
+        for registry in [ToolRegistry::new(), ToolRegistry::subagent()] {
+            let names: Vec<&str> = registry.values().map(|t| t.name()).collect();
+            let mut sorted = names.clone();
+            sorted.sort();
+            assert_eq!(names, sorted);
+        }
     }
 }

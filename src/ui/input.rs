@@ -42,12 +42,6 @@ fn format_tokens(count: u32) -> String {
 pub enum AttachmentKind {
     /// Pasted text content
     PastedText { char_count: usize },
-    /// Selection from the IDE
-    IdeSelection {
-        path: String,
-        start_line: u32,
-        end_line: u32,
-    },
 }
 
 /// Attached content shown as a pill
@@ -66,30 +60,10 @@ impl Attachment {
         }
     }
 
-    /// Create a new IDE selection attachment
-    pub fn ide_selection(path: String, content: String, start_line: u32, end_line: u32) -> Self {
-        Self {
-            kind: AttachmentKind::IdeSelection { path, start_line, end_line },
-            content,
-        }
-    }
-
     /// Get the label for this attachment
     pub fn label(&self) -> String {
         match &self.kind {
             AttachmentKind::PastedText { char_count } => format!("pasted ({} chars)", char_count),
-            AttachmentKind::IdeSelection { path, start_line, end_line } => {
-                // Extract just the filename from the path
-                let filename = std::path::Path::new(path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(path);
-                if start_line == end_line {
-                    format!("{}:{}", filename, start_line)
-                } else {
-                    format!("{}:{}-{}", filename, start_line, end_line)
-                }
-            }
         }
     }
 
@@ -97,7 +71,6 @@ impl Attachment {
     pub fn display(&self) -> String {
         let icon = match &self.kind {
             AttachmentKind::PastedText { .. } => "\u{00B6}",  // ¶ pilcrow
-            AttachmentKind::IdeSelection { .. } => "\u{00A7}",  // § section
         };
         format!("[{} {}] ", icon, self.label())
     }
@@ -107,28 +80,6 @@ impl Attachment {
         match &self.kind {
             AttachmentKind::PastedText { .. } => {
                 self.content.clone()
-            }
-            AttachmentKind::IdeSelection { path, start_line, end_line } => {
-                // Format with line numbers like read_file does
-                let line_num_width = end_line.to_string().len().max(4);
-                let mut numbered_content = String::new();
-                
-                for (i, line) in self.content.lines().enumerate() {
-                    let line_num = start_line + i as u32;
-                    numbered_content.push_str(&format!(
-                        "{:>width$}\u{2502}{}\n",
-                        line_num,
-                        line,
-                        width = line_num_width as usize
-                    ));
-                }
-                
-                let range = if start_line == end_line {
-                    format!("{}", start_line)
-                } else {
-                    format!("{}-{}", start_line, end_line)
-                };
-                format!("\n```\n# {}:{}\n{}```\n\n", path, range, numbered_content)
             }
         }
     }
@@ -485,43 +436,6 @@ impl InputBox {
         content
     }
 
-    /// Update the IDE selection (replaces any existing, inserts at front if new)
-    /// Pass None to clear the IDE selection.
-    pub fn set_ide_selection(&mut self, attachment: Option<Attachment>) {
-        // Find existing IDE selection
-        let existing_idx = self.segments.iter().position(|seg| {
-            matches!(seg, Segment::Attachment(a) if matches!(a.kind, AttachmentKind::IdeSelection { .. }))
-        });
-
-        match (existing_idx, attachment) {
-            // Update existing
-            (Some(idx), Some(new_attachment)) => {
-                self.segments[idx] = Segment::Attachment(new_attachment);
-            }
-            // Remove existing
-            (Some(idx), None) => {
-                self.segments.remove(idx);
-                if self.cursor_seg > idx {
-                    self.cursor_seg -= 1;
-                } else if self.cursor_seg == idx {
-                    self.cursor_seg = 0;
-                    self.cursor_offset = 0;
-                }
-                // Ensure we have at least one text segment
-                if self.segments.is_empty() {
-                    self.segments.push(Segment::Text(String::new()));
-                }
-            }
-            // Insert new at front
-            (None, Some(new_attachment)) => {
-                self.segments.insert(0, Segment::Attachment(new_attachment));
-                self.cursor_seg += 1;
-            }
-            // Nothing to do
-            (None, None) => {}
-        }
-    }
-
     /// Navigate to previous history item
     pub fn history_prev(&mut self) {
         if self.history.is_empty() {
@@ -567,20 +481,20 @@ impl InputBox {
         (self.cursor_seg, self.cursor_offset)
     }
 
-    /// Render the input box with model name as title and usage display
+    /// Render the input box with the running turn's readout as title and usage display
     pub fn widget<'a>(
         &'a self,
-        model: &'a str,
-        model_icon: &'a str,
+        activity: Option<String>,
         context_tokens: u32,
+        tokens_per_second: u32,
         background_tasks: usize,
         agent_active: bool,
     ) -> InputBoxWidget<'a> {
         InputBoxWidget {
             state: self,
-            model,
-            model_icon,
+            activity,
             context_tokens,
+            tokens_per_second,
             background_tasks,
             agent_active,
         }
@@ -596,10 +510,12 @@ impl Default for InputBox {
 /// Input box widget for rendering
 pub struct InputBoxWidget<'a> {
     state: &'a InputBox,
-    model: &'a str,
-    model_icon: &'a str,
+    /// The running turn's readout, shown as the title; `None` between turns
+    activity: Option<String>,
     /// Current context window size in tokens
     context_tokens: u32,
+    /// Generation rate over the last turn; 0 hides it
+    tokens_per_second: u32,
     /// Number of running background tasks
     background_tasks: usize,
     /// Whether the agent is actively processing (streaming, tool execution)
@@ -609,19 +525,24 @@ pub struct InputBoxWidget<'a> {
 impl Widget for InputBoxWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // Build the usage string for right title
-        let usage_title = format!(" {} ", format_tokens(self.context_tokens));
-        
-        // Build model title with background indicator
-        let model_title = if self.background_tasks > 0 {
-            format!(" * {}{} ", self.model, self.model_icon)
+        let usage_title = if self.tokens_per_second > 0 {
+            format!(" {} {}t/s ", format_tokens(self.context_tokens), self.tokens_per_second)
         } else {
-            format!(" {}{} ", self.model, self.model_icon)
+            format!(" {} ", format_tokens(self.context_tokens))
+        };
+        
+        // Title: the running turn's readout, with the background indicator
+        let title = match (self.background_tasks > 0, &self.activity) {
+            (true, Some(activity)) => format!(" * {} ", activity),
+            (true, None) => " * ".to_string(),
+            (false, Some(activity)) => format!(" {} ", activity),
+            (false, None) => String::new(),
         };
 
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(model_title)
+            .title(title)
             .title_top(Line::from(usage_title).right_aligned());
 
         let inner = block.inner(area);

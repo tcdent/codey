@@ -298,6 +298,7 @@ pub struct ChatViewWidget<'a> {
     view: &'a ChatView,
 }
 
+
 impl Widget for ChatViewWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         #[cfg(feature = "profiling")]
@@ -313,4 +314,13 @@ impl Widget for ChatViewWidget<'_> {
 
         Paragraph::new(visible).render(area, buf);
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::Phase;
+    use ratatui::backend::TestBackend;
+
+
 }

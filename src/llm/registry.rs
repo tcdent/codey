@@ -8,7 +8,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::Mutex;
 
 use super::agent::AgentStep;
-use super::sdk_agent::SdkAgent as Agent;
+use super::backend::Agent;
 
 /// Unique identifier for an agent
 pub type AgentId = u32;
@@ -87,20 +87,6 @@ impl AgentRegistry {
         id
     }
 
-    /// Remove an agent by ID (used for cleanup after get_agent retrieves result)
-    pub fn remove(&mut self, id: AgentId) -> Option<Agent> {
-        let agent = self.agents.remove(&id)?;
-        self.metadata.remove(&id);
-
-        // Clear primary if we removed it
-        if self.primary == Some(id) {
-            self.primary = None;
-        }
-
-        // into_inner consumes the mutex, returning the inner value
-        Some(agent.into_inner())
-    }
-
     /// Get a reference to an agent's mutex
     pub fn get(&self, id: AgentId) -> Option<&Mutex<Agent>> {
         self.agents.get(&id)
@@ -134,14 +120,6 @@ impl AgentRegistry {
     /// List all spawned agents with their status
     pub fn list_spawned(&self) -> Vec<(AgentId, &AgentMetadata)> {
         self.metadata.iter().map(|(&id, meta)| (id, meta)).collect()
-    }
-
-    /// Find a spawned agent by label
-    pub fn find_by_label(&self, label: &str) -> Option<AgentId> {
-        self.metadata
-            .iter()
-            .find(|(_, meta)| meta.label == label)
-            .map(|(&id, _)| id)
     }
 
     /// Count running background agents

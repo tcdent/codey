@@ -43,7 +43,6 @@
 // Core modules (always available)
 mod config;
 mod effect;
-mod ide;
 mod llm;
 mod tools;
 mod transcript;
@@ -53,10 +52,15 @@ mod transcript;
 mod notifications;
 #[cfg(feature = "cli")]
 mod prompts;
-#[cfg(feature = "cli")]
-mod tool_filter;
 
 // Re-export the public API
-pub use config::AgentRuntimeConfig;
-pub use llm::{Agent, AgentStep, RequestMode, Usage};
+pub use config::{AgentRuntimeConfig, Backend};
+pub use llm::{Activity, Agent, AgentStep, Phase, RequestMode, Usage};
 pub use tools::{SimpleTool, ToolCall, ToolRegistry};
+
+// Transcript types — exposed for library users implementing persistence.
+// Render methods are cfg(feature = "cli") but the data model is plain serde.
+pub use transcript::{
+    next_block_id, Block, BlockType, Role, Stage, Status, TextBlock, ThinkingBlock, ToolBlock,
+    Transcript, Turn,
+};

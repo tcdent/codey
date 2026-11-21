@@ -1,6 +1,6 @@
 # Tools System
 
-This directory contains the tool execution system for Codey. Tools are defined as pipelines of effect handlers that can be composed, approved, and executed.
+This directory contains the tool execution system for Codey. Tools are defined as pipelines of effect handlers that are composed and executed. Tools run without approval: allowing and denying belongs to the shell environment the agent runs in.
 
 ## Architecture Overview
 
@@ -8,7 +8,7 @@ This directory contains the tool execution system for Codey. Tools are defined a
 ┌─────────────────────────────────────────────────────────────────┐
 │                         ToolExecutor                            │
 │  - Manages pending/active tool pipelines                        │
-│  - Handles approval flow                                        │
+│  - Emits Started, Delta, Completed/Error events                 │
 │  - Spawns handlers in separate tasks (won't be dropped)         │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -16,7 +16,7 @@ This directory contains the tool execution system for Codey. Tools are defined a
 ┌─────────────────────────────────────────────────────────────────┐
 │                        ToolPipeline                             │
 │  - Chain of EffectHandlers                                      │
-│  - Supports .then(), .await_approval(), .finally()              │
+│  - Supports .then(), .finally()                                 │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -31,8 +31,8 @@ This directory contains the tool execution system for Codey. Tools are defined a
 
 - `exec.rs` - ToolExecutor, WaitingFor state machine, event handling
 - `pipeline.rs` - ToolPipeline, Step enum, EffectHandler trait, Tool trait
-- `handlers.rs` - Reusable effect handlers (Shell, ReadFile, WriteFile, etc.)
-- `io.rs` - Low-level I/O operations (run_shell, read_file, etc.)
+- `handlers.rs` - Reusable effect handlers (Shell, FetchUrl, WebSearch, etc.)
+- `io.rs` - Low-level I/O operations (execute_shell, fetch_url, web_search)
 - `impls/` - Individual tool implementations
 
 ## Adding a New Tool
@@ -48,8 +48,7 @@ use serde_json::json;
 use super::{handlers, Tool, ToolPipeline};
 use crate::impl_base_block;
 use crate::transcript::{
-    render_approval_prompt, render_prefix, render_result, 
-    Block, BlockType, Status,
+    render_prefix, render_result, Block, BlockType, Status,
 };
 use ratatui::{
     style::{Color, Style},
@@ -110,22 +109,9 @@ impl Block for YourToolBlock {
         ];
         lines.push(Line::from(spans));
 
-        // Approval prompt if pending
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
-
         // Output if completed
         if !self.text.is_empty() {
             lines.extend(render_result(&self.text, 10));
-        }
-
-        // Denied message
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
         }
 
         lines
@@ -199,7 +185,6 @@ impl Tool for YourTool {
 
         // Build the pipeline
         ToolPipeline::new()
-            .await_approval()  // Pause for user approval
             .then(handlers::YourHandler {
                 param: parsed.some_param,
             })
@@ -252,78 +237,27 @@ In `src/tools/mod.rs`, add to `ToolRegistry::new()`:
 registry.register(Arc::new(YourTool));
 ```
 
-### 4. Add Config Support (for auto-approve filters)
-
-In `src/config.rs`, add to `ToolsConfig`:
-
-```rust
-pub struct ToolsConfig {
-    // ... existing fields ...
-    pub your_tool: ToolFilterConfig,
-}
-
-impl Default for ToolsConfig {
-    fn default() -> Self {
-        Self {
-            // ... existing fields ...
-            your_tool: ToolFilterConfig::default(),
-        }
-    }
-}
-
-impl ToolsConfig {
-    pub fn filters(&self) -> HashMap<String, ToolFilterConfig> {
-        // ... existing mappings ...
-        map.insert(YourTool::NAME.to_string(), self.your_tool.clone());
-        map
-    }
-}
-```
-
-In `src/tool_filter.rs`, update `primary_param()`:
-
-```rust
-fn primary_param(tool_name: &str) -> &'static str {
-    match tool_name {
-        // ... existing matches ...
-        x if x == YourTool::NAME => "some_param",
-        _ => "command",
-    }
-}
-```
-
-Don't forget to add the import at the top of `tool_filter.rs`.
-
 ## Pipeline Patterns
 
-### Basic Tool (no approval needed)
+### Basic Tool
 ```rust
 ToolPipeline::new()
     .then(handlers::DoSomething { ... })
 ```
 
-### Tool with Approval
-```rust
-ToolPipeline::new()
-    .then(handlers::ValidateInput { ... })  // Pre-approval validation
-    .await_approval()                        // User decides here
-    .then(handlers::DoSomething { ... })    // Only runs if approved
-```
-
 ### Tool with Cleanup
 ```rust
 ToolPipeline::new()
-    .then(handlers::SetupPreview { ... })
-    .await_approval()
-    .then(handlers::ApplyChanges { ... })
-    .finally(handlers::ClosePreview)  // Always runs, even on deny/error
+    .then(handlers::Setup { ... })
+    .then(handlers::DoSomething { ... })
+    .finally(handlers::Teardown)  // Always runs, even on error
 ```
 
 ### Tool that Delegates to App Layer
 ```rust
 // In handler:
 async fn call(self: Box<Self>) -> Step {
-    Step::Delegate(Effect::IdeOpen { path: self.path, line: None, column: None })
+    Step::Delegate(Effect::ListAgents)
 }
 ```
 
@@ -335,7 +269,6 @@ The app receives a `ToolEvent::Delegate` and sends back a result via oneshot cha
 - `Step::Output(String)` - Set final output, proceed to next handler
 - `Step::Delta(String)` - Emit streaming content (for long-running tools)
 - `Step::Delegate(Effect)` - Ask app layer to do something
-- `Step::AwaitApproval` - Pause for user approval (use `.await_approval()` instead)
 - `Step::Error(String)` - Abort pipeline with error
 
 ## Background Task Considerations
@@ -343,8 +276,7 @@ The app receives a `ToolEvent::Delegate` and sends back a result via oneshot cha
 When `background: true` is passed:
 1. Tool runs in background, returns task_id immediately
 2. The agent is automatically notified when the task completes via the notification system
-3. `list_background_tasks` and `get_background_task` are available but rarely needed
-4. Output is stored in `ActivePipeline.output` until retrieved
+3. Output is stored in `ActivePipeline.output` until retrieved
 
 The executor spawns handlers in separate tokio tasks, so they won't be lost if the main select! loop moves on to other work.
 
@@ -356,7 +288,7 @@ Add tests in your tool file:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall, ToolDecision};
+    use crate::tools::{ToolExecutor, ToolRegistry, ToolCall};
 
     #[tokio::test]
     async fn test_your_tool() {
@@ -369,11 +301,11 @@ mod tests {
             call_id: "test".to_string(),
             name: YourTool::NAME.to_string(),
             params: json!({ "some_param": "test_value" }),
-            decision: ToolDecision::Approve,  // Skip approval for tests
             background: false,
         }]);
 
-        if let Some(ToolEvent::Completed { content, .. }) = executor.next().await {
+        // next_outcome() skips the Started event every tool emits first
+        if let Some(ToolEvent::Completed { content, .. }) = executor.next_outcome().await {
             assert!(content.contains("expected"));
         } else {
             panic!("Expected Completed event");
@@ -386,6 +318,5 @@ mod tests {
 
 - Use `render_status()` for the spinner/checkmark prefix
 - Use `render_prefix(background)` for the `[bg]` indicator
-- Use `render_approval_prompt()` for the `[y]es [n]o` prompt
 - Use `render_result(&text, max_lines)` for output with truncation
 - Tool names in UI should strip the `mcp_` prefix for cleaner display

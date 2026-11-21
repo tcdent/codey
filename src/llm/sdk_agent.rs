@@ -27,9 +27,9 @@ use claude_agent_sdk_rs::{
     SdkMcpServer, SettingSource, SystemPrompt,
 };
 
-use super::agent::{AgentStep, RequestMode, SystemPromptBuilder, Usage};
+use super::agent::{Activity, AgentStep, Phase, RequestMode, SystemPromptBuilder, Usage};
 use crate::config::AgentRuntimeConfig;
-use crate::tools::{ToolCall, ToolDecision, ToolRegistry};
+use crate::tools::{ToolCall, ToolRegistry};
 
 /// Name of the in-process MCP server that exposes Codey's tools to the binary.
 const CODEY_MCP_SERVER: &str = "codey";
@@ -98,7 +98,7 @@ impl SdkMcpServer for CodeyToolBridge {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
-                // Bridge to Codey's approval/execution flow.
+                // Bridge to Codey's tool execution flow.
                 let call_id = uuid::Uuid::new_v4().to_string();
                 let (tx, rx) = oneshot::channel::<String>();
                 self.pending.lock().await.insert(call_id.clone(), tx);
@@ -108,7 +108,6 @@ impl SdkMcpServer for CodeyToolBridge {
                     call_id: call_id.clone(),
                     name,
                     params: args,
-                    decision: ToolDecision::Pending,
                     background,
                 };
                 if self
@@ -147,8 +146,7 @@ impl SdkMcpServer for CodeyToolBridge {
     }
 }
 
-/// SDK-backed agent. Public surface mirrors the legacy genai `Agent` so callers
-/// (App, AgentRegistry) are unchanged.
+/// SDK-backed agent, the `Claude` arm of [`super::Agent`].
 pub struct SdkAgent {
     config: AgentRuntimeConfig,
     tools: ToolRegistry,
@@ -167,6 +165,8 @@ pub struct SdkAgent {
 
     /// Accumulated assistant text of the current/last turn (for `last_message`).
     last_text: String,
+    /// The running turn, tracked from the steps passing through `next()`.
+    activity: Option<Activity>,
 }
 
 impl SdkAgent {
@@ -186,6 +186,7 @@ impl SdkAgent {
             step_rx: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
             last_text: String::new(),
+            activity: None,
         }
     }
 
@@ -206,7 +207,15 @@ impl SdkAgent {
             step_rx: None,
             pending: Arc::new(Mutex::new(HashMap::new())),
             last_text: String::new(),
+            activity: None,
         }
+    }
+
+    /// The `claude` binary keeps its own sessions; resuming one is not wired yet.
+    pub fn restore_from_transcript(&mut self, _transcript: &crate::transcript::Transcript) {}
+
+    pub fn activity(&self) -> Option<Activity> {
+        self.activity
     }
 
     pub fn total_usage(&self) -> Usage {
@@ -223,14 +232,6 @@ impl SdkAgent {
 
     pub fn is_fast_mode(&self) -> bool {
         self.config.fast_mode && self.config.model.to_lowercase().contains("opus")
-    }
-
-    pub fn model_icon(&self) -> &'static str {
-        if self.is_fast_mode() {
-            "ϟ"
-        } else {
-            ""
-        }
     }
 
     /// Tool descriptors for the in-process MCP server, from the registry.
@@ -321,6 +322,11 @@ impl SdkAgent {
         }
 
         self.last_text.clear();
+        self.activity = Some(Activity {
+            started: std::time::Instant::now(),
+            phase: Phase::Prefill,
+            tokens: None,
+        });
         if let Some(tx) = &self.cmd_tx {
             let _ = tx.send(DriverCmd::Query(user_input.to_string()));
         }
@@ -329,15 +335,31 @@ impl SdkAgent {
     pub async fn next(&mut self) -> Option<AgentStep> {
         let rx = self.step_rx.as_mut()?;
         let step = rx.recv().await?;
-        match &step {
-            AgentStep::TextDelta(t) => self.last_text.push_str(t),
-            AgentStep::Finished { usage } => self.total_usage += *usage,
-            _ => {},
-        }
+        let phase = match &step {
+            AgentStep::TextDelta(t) => {
+                self.last_text.push_str(t);
+                Some(Phase::Writing)
+            },
+            AgentStep::ThinkingDelta(_) => Some(Phase::Thinking),
+            AgentStep::ToolRequest(_) => Some(Phase::Tools),
+            AgentStep::Finished { usage } => {
+                self.total_usage += *usage;
+                None
+            },
+            AgentStep::Error(_) => None,
+            AgentStep::Retrying { .. } => Some(Phase::Prefill),
+        };
+        self.activity = match (self.activity, phase) {
+            (Some(a), Some(phase)) => Some(Activity { phase, ..a }),
+            _ => None,
+        };
         Some(step)
     }
 
     pub fn submit_tool_result(&mut self, call_id: &str, content: String) {
+        if let Some(a) = &mut self.activity {
+            a.phase = Phase::Prefill;
+        }
         let pending = self.pending.clone();
         let call_id = call_id.to_string();
         // Fulfill the oneshot the MCP bridge is awaiting.
@@ -352,6 +374,7 @@ impl SdkAgent {
 
     pub fn cancel(&mut self) {
         debug!("SdkAgent::cancel");
+        self.activity = None;
         if let Some(tx) = &self.cmd_tx {
             let _ = tx.send(DriverCmd::Interrupt);
         }
@@ -485,5 +508,6 @@ fn parse_usage(usage: Option<&Value>) -> Usage {
         context_tokens: input + cache_creation + cache_read,
         cache_creation_tokens: cache_creation,
         cache_read_tokens: cache_read,
+        tokens_per_second: 0,
     }
 }

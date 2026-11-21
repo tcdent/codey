@@ -44,7 +44,6 @@ pub enum Status {
     Running,
     Complete,
     Error,
-    Denied,
     Cancelled,
 }
 
@@ -125,7 +124,6 @@ pub trait Block: Send + Sync {
             Status::Running => ("⚙ ", Color::Blue),
             Status::Complete => ("✓ ", Color::Green),
             Status::Error => ("✗ ", Color::Red),
-            Status::Denied => ("⊘ ", Color::DarkGray),
             Status::Cancelled => ("⊘ ", Color::Yellow),
         };
         Span::styled(icon, Style::default().fg(color))
@@ -327,22 +325,12 @@ macro_rules! define_tool_block {
                 lines.push(Line::from(spans));
 
                 // Approval prompt if pending
-                if self.status == Status::Pending {
-                    lines.push(render_approval_prompt());
-                }
 
                 // Result output
                 if !self.text.is_empty() {
                     lines.extend(render_result(&self.text, $max_lines));
                 }
 
-                // Denied message
-                if self.status == Status::Denied {
-                    lines.push(Line::from(Span::styled(
-                        "  Denied by user",
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
 
                 lines
             }
@@ -371,7 +359,7 @@ macro_rules! define_tool_block {
 }
 
 /// Macro for simple tool blocks without agent_label support.
-/// Used for internal tools like list_agents, get_agent, list_background_tasks, etc.
+/// Used for internal tools like list_agents.
 #[macro_export]
 macro_rules! define_simple_tool_block {
     (
@@ -433,22 +421,12 @@ macro_rules! define_simple_tool_block {
                 lines.push(Line::from(spans));
 
                 // Approval prompt if pending
-                if self.status == Status::Pending {
-                    lines.push(render_approval_prompt());
-                }
 
                 // Result output
                 if !self.text.is_empty() {
                     lines.extend(render_result(&self.text, $max_lines));
                 }
 
-                // Denied message
-                if self.status == Status::Denied {
-                    lines.push(Line::from(Span::styled(
-                        "  Denied by user",
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
 
                 lines
             }
@@ -630,22 +608,12 @@ impl Block for ToolBlock {
         }
 
         // Approval prompt if pending
-        if self.status == Status::Pending {
-            lines.push(render_approval_prompt());
-        }
 
         // Result if completed
         if !self.text.is_empty() {
             lines.extend(render_result(&self.text, 5));
         }
 
-        // Denied message
-        if self.status == Status::Denied {
-            lines.push(Line::from(Span::styled(
-                "  Denied by user",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
 
         lines
     }
@@ -735,26 +703,6 @@ pub fn render_agent_label(label: Option<&str>) -> Span<'static> {
     }
 }
 
-/// Helper: render approval prompt
-#[cfg(feature = "cli")]
-pub fn render_approval_prompt() -> Line<'static> {
-    Line::from(vec![
-        Span::styled("  [", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            "y",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("]es  [", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            "n",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("]o", Style::default().fg(Color::DarkGray)),
-    ])
-}
-
 /// Helper: render result with line limit
 #[cfg(feature = "cli")]
 pub fn render_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
@@ -776,7 +724,7 @@ pub fn render_result(result: &str, max_lines: usize) -> Vec<Line<'static>> {
     lines
 }
 
-/// Staging area for pending blocks (notifications, approvals) awaiting consumption.
+/// Staging area for pending blocks (notifications) awaiting consumption.
 /// Similar to Turn but without role/timestamp - blocks here haven't entered the conversation yet.
 #[derive(Default)]
 pub struct Stage {
@@ -1061,6 +1009,12 @@ impl Transcript {
         self.current_turn_id = None;
     }
 
+    /// End the current turn because it broke: its active block is marked failed.
+    pub fn fail_turn(&mut self) {
+        self.mark_active_block(Status::Error);
+        self.current_turn_id = None;
+    }
+
     /// Get mutable reference to the current turn. Panics if no turn is active.
     fn current_turn_mut(&mut self) -> &mut Turn {
         let turn_id = self
@@ -1231,6 +1185,19 @@ mod tests {
         assert_eq!(transcript.turns().len(), 2);
         assert_eq!(transcript.get_mut(id1).unwrap().role, Role::User);
         assert_eq!(transcript.get_mut(id2).unwrap().role, Role::Assistant);
+    }
+
+    /// A turn that broke ends with its block failed, and the next turn can begin.
+    #[test]
+    fn test_fail_turn_lets_the_next_turn_begin() {
+        let mut transcript = Transcript::with_path(std::path::PathBuf::from("/tmp/test.md"));
+        transcript.begin_turn(Role::Assistant);
+        transcript.stream_delta(BlockType::Text, "partial");
+        transcript.fail_turn();
+
+        assert!(!transcript.has_active_turn());
+        assert_eq!(transcript.turns()[0].content[0].status(), Status::Error);
+        transcript.begin_turn(Role::Assistant); // panicked before fail_turn existed
     }
 
     #[test]
@@ -1461,9 +1428,9 @@ mod tests {
             transcript.start_block(block);
         }
 
-        // User denies call_c
+        // call_c errors
         if let Some(mut block) = stage.remove_by_call_id("call_c") {
-            block.set_status(Status::Denied);
+            block.set_status(Status::Error);
             transcript.start_block(block);
         }
 

@@ -5,7 +5,6 @@
 //! - `Config` - Full application configuration loaded from config.toml (CLI-only)
 
 #[cfg(feature = "cli")]
-use std::collections::HashMap;
 #[cfg(feature = "cli")]
 use std::path::PathBuf;
 
@@ -14,10 +13,6 @@ use anyhow::{Context, Result};
 #[cfg(feature = "cli")]
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "cli")]
-use crate::tool_filter::ToolFilterConfig;
-#[cfg(feature = "cli")]
-use crate::tools::names;
 
 // =============================================================================
 // Library-public types (always available)
@@ -29,8 +24,6 @@ pub const CODEY_DIR: &str = ".codey";
 /// Directory name for storing conversation transcripts
 pub const TRANSCRIPTS_DIR: &str = "transcripts";
 
-/// Filename for correction memory
-pub const CORRECTIONS_FILENAME: &str = "corrections.json";
 
 /// Runtime configuration for an Agent instance.
 ///
@@ -41,7 +34,7 @@ pub const CORRECTIONS_FILENAME: &str = "corrections.json";
 /// # Example
 ///
 /// ```
-/// use codey::AgentRuntimeConfig;
+/// use codey::{AgentRuntimeConfig, Backend};
 ///
 /// let config = AgentRuntimeConfig {
 ///     model: "claude-sonnet-4-5-20250929".to_string(),
@@ -49,10 +42,12 @@ pub const CORRECTIONS_FILENAME: &str = "corrections.json";
 ///     thinking_budget: 2_000,
 ///     max_retries: 5,
 ///     fast_mode: false,
+///     backend: Backend::Claude,
 /// };
 /// ```
 #[derive(Debug, Clone)]
 pub struct AgentRuntimeConfig {
+    /// Model to request. The `claude` backend only; rockem serves one model per bundle.
     pub model: String,
     // TODO: max_tokens/max_retries are not yet wired to the SDK backend (the
     // binary manages output limits and retries). Retained as config knobs.
@@ -64,6 +59,18 @@ pub struct AgentRuntimeConfig {
     /// Enable fast mode (research preview) for lower-latency responses.
     /// Only effective with opus models.
     pub fast_mode: bool,
+    /// Which inference backend the agent runs on.
+    pub backend: Backend,
+}
+
+/// The inference backend an agent runs on.
+#[derive(Debug, Clone, Default)]
+pub enum Backend {
+    /// The `claude` binary via the Agent SDK; the binary owns the agent loop.
+    #[default]
+    Claude,
+    /// A rockem API service at `url`; Codey owns the agent loop and the conversation.
+    Rockem { url: String },
 }
 
 impl Default for AgentRuntimeConfig {
@@ -74,6 +81,7 @@ impl Default for AgentRuntimeConfig {
             thinking_budget: 2_000,
             max_retries: 5,
             fast_mode: false,
+            backend: Backend::Claude,
         }
     }
 }
@@ -92,6 +100,7 @@ impl AgentRuntimeConfig {
             thinking_budget: config.agents.foreground.thinking_budget,
             max_retries: config.general.max_retries,
             fast_mode: config.agents.foreground.fast_mode,
+            backend: config.backend(&config.agents.foreground),
         }
     }
 
@@ -103,6 +112,7 @@ impl AgentRuntimeConfig {
             thinking_budget: config.agents.background.thinking_budget,
             max_retries: config.general.max_retries,
             fast_mode: config.agents.background.fast_mode,
+            backend: config.backend(&config.agents.background),
         }
     }
 }
@@ -116,9 +126,7 @@ pub struct Config {
     pub agent: AgentPersonaConfig,
     pub agents: AgentsConfig,
     pub ui: UiConfig,
-    pub tools: ToolsConfig,
-    pub ide: IdeConfig,
-    pub browser: BrowserConfig,
+    pub rockem: RockemConfig,
 }
 
 #[cfg(feature = "cli")]
@@ -129,9 +137,7 @@ impl Default for Config {
             agent: AgentPersonaConfig::default(),
             agents: AgentsConfig::default(),
             ui: UiConfig::default(),
-            tools: ToolsConfig::default(),
-            ide: IdeConfig::default(),
-            browser: BrowserConfig::default(),
+            rockem: RockemConfig::default(),
         }
     }
 }
@@ -150,6 +156,14 @@ impl Config {
             }
         }
         Ok(Config::default())
+    }
+
+    /// The runtime backend for an agent's configured backend kind.
+    pub fn backend(&self, agent: &AgentConfig) -> Backend {
+        match agent.backend {
+            BackendKind::Claude => Backend::Claude,
+            BackendKind::Rockem => Backend::Rockem { url: self.rockem.url.clone() },
+        }
     }
 
     /// Get the config directory path (~/.config/codey)
@@ -198,6 +212,34 @@ pub struct AgentConfig {
     /// Enable fast mode (research preview) for lower-latency responses at higher cost.
     /// Only works with opus-4-6 models. Adds the research-preview-2026-02-01 beta header.
     pub fast_mode: bool,
+    /// Inference backend: "claude" (default) or "rockem" (see `[rockem]`).
+    pub backend: BackendKind,
+}
+
+/// Backend names as written in config.toml.
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+    #[default]
+    Claude,
+    Rockem,
+}
+
+/// Where the rockem API service is.
+#[cfg(feature = "cli")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RockemConfig {
+    /// The service's root.
+    pub url: String,
+}
+
+#[cfg(feature = "cli")]
+impl Default for RockemConfig {
+    fn default() -> Self {
+        Self { url: "https://rockem.a10k.co".to_string() }
+    }
 }
 
 #[cfg(feature = "cli")]
@@ -208,6 +250,7 @@ impl Default for AgentConfig {
             max_tokens: 8192,
             thinking_budget: 2_000,
             fast_mode: false,
+            backend: BackendKind::Claude,
         }
     }
 }
@@ -269,173 +312,6 @@ impl Default for UiConfig {
     }
 }
 
-#[cfg(feature = "cli")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ToolsConfig {
-    pub enabled: Vec<String>,
-    /// Filter patterns for shell tool (matches against command)
-    pub shell: ToolFilterConfig,
-    /// Filter patterns for read_file tool (matches against path)
-    pub read_file: ToolFilterConfig,
-    /// Filter patterns for write_file tool (matches against path)
-    pub write_file: ToolFilterConfig,
-    /// Filter patterns for edit_file tool (matches against path)
-    pub edit_file: ToolFilterConfig,
-    /// Filter patterns for fetch_url tool (matches against url)
-    pub fetch_url: ToolFilterConfig,
-    /// Filter patterns for web_search tool (matches against query)
-    pub web_search: ToolFilterConfig,
-    /// Filter patterns for list_background_tasks tool (no params - use ".*" to auto-approve)
-    pub list_background_tasks: ToolFilterConfig,
-    /// Filter patterns for get_background_task tool (matches against task_id)
-    pub get_background_task: ToolFilterConfig,
-    /// Filter patterns for spawn_agent tool (matches against task)
-    pub spawn_agent: ToolFilterConfig,
-    /// Filter patterns for list_agents tool (no params - use ".*" to auto-approve)
-    pub list_agents: ToolFilterConfig,
-    /// Filter patterns for get_agent tool (matches against agent_id)
-    pub get_agent: ToolFilterConfig,
-    /// Filter patterns for record_correction tool (matches against goal)
-    pub record_correction: ToolFilterConfig,
-}
-
-#[cfg(feature = "cli")]
-impl Default for ToolsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: vec![
-                names::READ_FILE.to_string(),
-                names::WRITE_FILE.to_string(),
-                names::EDIT_FILE.to_string(),
-                names::SHELL.to_string(),
-                names::FETCH_URL.to_string(),
-                names::WEB_SEARCH.to_string(),
-                names::RECORD_CORRECTION.to_string(),
-            ],
-            shell: ToolFilterConfig::default(),
-            read_file: ToolFilterConfig::default(),
-            write_file: ToolFilterConfig::default(),
-            edit_file: ToolFilterConfig::default(),
-            fetch_url: ToolFilterConfig::default(),
-            web_search: ToolFilterConfig::default(),
-            list_background_tasks: ToolFilterConfig::default(),
-            get_background_task: ToolFilterConfig::default(),
-            spawn_agent: ToolFilterConfig::default(),
-            list_agents: ToolFilterConfig::default(),
-            get_agent: ToolFilterConfig::default(),
-            record_correction: ToolFilterConfig::default(),
-        }
-    }
-}
-
-#[cfg(feature = "cli")]
-impl ToolsConfig {
-    /// Build a HashMap of tool filters for compilation
-    pub fn filters(&self) -> HashMap<String, ToolFilterConfig> {
-        let mut map = HashMap::new();
-        map.insert(names::SHELL.to_string(), self.shell.clone());
-        map.insert(names::READ_FILE.to_string(), self.read_file.clone());
-        map.insert(names::WRITE_FILE.to_string(), self.write_file.clone());
-        map.insert(names::EDIT_FILE.to_string(), self.edit_file.clone());
-        map.insert(names::FETCH_URL.to_string(), self.fetch_url.clone());
-        map.insert(names::WEB_SEARCH.to_string(), self.web_search.clone());
-        map.insert(names::LIST_BACKGROUND_TASKS.to_string(), self.list_background_tasks.clone());
-        map.insert(names::GET_BACKGROUND_TASK.to_string(), self.get_background_task.clone());
-        map.insert(names::SPAWN_AGENT.to_string(), self.spawn_agent.clone());
-        map.insert(names::LIST_AGENTS.to_string(), self.list_agents.clone());
-        map.insert(names::GET_AGENT.to_string(), self.get_agent.clone());
-        map.insert(names::RECORD_CORRECTION.to_string(), self.record_correction.clone());
-        map
-    }
-}
-
-/// IDE integration configuration
-#[cfg(feature = "cli")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct IdeConfig {
-    pub nvim: NvimConfig,
-}
-
-#[cfg(feature = "cli")]
-impl Default for IdeConfig {
-    fn default() -> Self {
-        Self {
-            nvim: NvimConfig::default(),
-        }
-    }
-}
-
-/// Neovim integration configuration
-#[cfg(feature = "cli")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct NvimConfig {
-    /// Enable neovim integration
-    pub enabled: bool,
-    /// Explicit socket path (if not set, auto-discovers from tmux or $NVIM_LISTEN_ADDRESS)
-    pub socket: Option<PathBuf>,
-    /// Show diffs in nvim after file edits
-    pub show_diffs: bool,
-    /// Auto-reload buffers after file edits
-    pub auto_reload: bool,
-}
-
-#[cfg(feature = "cli")]
-impl Default for NvimConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            socket: None,
-            show_diffs: true,
-            auto_reload: true,
-        }
-    }
-}
-
-/// Browser configuration for fetch_html tool
-#[cfg(feature = "cli")]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct BrowserConfig {
-    /// Path to Chrome/Chromium user data directory.
-    /// Example: "~/.config/google-chrome" or "~/Library/Application Support/Google/Chrome"
-    pub chrome_user_data_dir: Option<PathBuf>,
-    /// Profile directory name within the user data directory.
-    /// Example: "Default", "Profile 1", "Profile 9"
-    /// If not set, Chrome uses the last-used or Default profile.
-    pub chrome_profile: Option<String>,
-    /// Custom Chrome/Chromium executable path (optional, auto-detected if not set)
-    pub chrome_executable: Option<PathBuf>,
-    /// Run browser in headless mode (default: true)
-    /// Set to false for debugging to see what the browser is doing
-    pub headless: bool,
-    /// Viewport width in pixels (default: 800)
-    pub viewport_width: u32,
-    /// Viewport height in pixels (default: 4000)
-    /// Taller viewports load more content on infinite-scroll pages like Twitter/X
-    pub viewport_height: u32,
-    /// Time to wait for JavaScript to render in milliseconds (default: 10000)
-    /// SPAs like Twitter need time to load and render content after initial page load
-    pub page_load_wait_ms: u64,
-}
-
-#[cfg(feature = "cli")]
-impl Default for BrowserConfig {
-    fn default() -> Self {
-        Self {
-            chrome_user_data_dir: None,
-            chrome_profile: None,
-            chrome_executable: None,
-            headless: true,
-            viewport_width: 800,
-            viewport_height: 4000,
-            page_load_wait_ms: 10000,
-        }
-    }
-}
-
 #[cfg(all(test, feature = "cli"))]
 mod tests {
     use super::*;
@@ -444,7 +320,6 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.agents.foreground.model, "claude-opus-4-6");
-        assert!(config.tools.enabled.contains(&names::READ_FILE.to_string()));
     }
 
     #[test]
@@ -479,24 +354,6 @@ thinking_budget = 1024
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.agents.foreground.model, "claude-opus-4-5-20251101");
         assert_eq!(config.agents.background.model, "claude-sonnet-4-20250514");
-    }
-
-    #[test]
-    fn test_parse_tool_filters() {
-        let toml = r#"
-[tools.shell]
-allow = ["^ls\\b", "^cat\\b"]
-deny = ["rm -rf"]
-
-[tools.read_file]
-allow = ["\\.rs$"]
-deny = ["\\.env$"]
-"#;
-        let config: Config = toml::from_str(toml).unwrap();
-        assert_eq!(config.tools.shell.allow, vec!["^ls\\b", "^cat\\b"]);
-        assert_eq!(config.tools.shell.deny, vec!["rm -rf"]);
-        assert_eq!(config.tools.read_file.allow, vec!["\\.rs$"]);
-        assert_eq!(config.tools.read_file.deny, vec!["\\.env$"]);
     }
 
     #[test]
