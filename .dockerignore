@@ -1,0 +1,43 @@
+# Build artifacts
+target/
+lib/ratatui-core/
+
+# Git
+.git/
+.gitignore
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Container build directory contents (avoid recursion)
+container/workspace/
+container/config/
+container/data/
+
+# Development files
+.cargo/config.toml
+
+# Documentation and non-essential files
+*.md
+!README.md
+LICENSE
+
+# Logs and temporary files
+*.log
+*.tmp
+.codey/
+
+# Environment files (may contain secrets)
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# Test fixtures and snapshots
+tests/
+snapshots/
