@@ -1,0 +1,12 @@
+services:
+  integration-test:
+    build:
+      context: ../..
+      dockerfile: tests/integration/Dockerfile
+    environment:
+      - ANTHROPIC_API_KEY
+      - EVAL_MODEL=${EVAL_MODEL:-claude-sonnet-4-5-20250929}
+      - CODEY_BIN=/usr/local/bin/codey
+    # Needed for chromium (fetch_html tool)
+    security_opt:
+      - seccomp=unconfined
